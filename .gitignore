@@ -36,9 +36,12 @@ hf_datasets_cache/
 *logs/
 /datasets/
 docker/*
-!docker/Dockerfile
-!docker/Dockerfile.ngc_pytorch
-!docker/README.md
+!docker/Dockerfile*
+!docker/README*.md
+!docker/*.toml
+!docker/xielu/
+docker/xielu/build/
+docker/xielu/*.egg-info/
 wandb/
 checkpoints/
 results/
