@@ -88,10 +88,11 @@ Code as previously planned (verified) — `plan_exact_dim_batches(dims, batch_si
 ```yaml
 # Task fragment for preference-mode datasets (composed via defaults).
 tokenizer_path: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed
-# Resize band = store-generation parameter (spec): 1024^2 -> <=~4.1k tokens/image,
-# comfortably inside seq 8192. Recorded in manifest.json.
+# Resize band ALIGNED WITH PRETRAIN/SFT (user decision 2026-06-11): post-training
+# never silently changes the vision front-end. 1400^2 -> <=~7.7k tokens/image;
+# multimodal DPO runs use max_total_sequence_length 16384. Recorded in manifest.json.
 min_pixels: "128*128"
-max_pixels: "1024*1024"
+max_pixels: "1400*1400"
 encode_batch_size: 32
 val_rows: 256
 ```
@@ -321,12 +322,12 @@ Diff against upstream `run_dpo.py` must show only this block.
 - [ ] **C1.1** `dataset=preference/mllm_dpo` (input = `.../alignment-processed/mllm-dpo.parquet`, output_dir = `.../alignment-tokenized/mllm_dpo_views_media`); **real root** = `.../mllm_dpo_views_media/preference/mllm_dpo` — use this path in all of Part C.
 - [ ] **C1.2** Gate 2 → exit 0. Record dedup factor (`n_unique_media` vs 5,182) and `n_skipped_media`.
 - [ ] **C1.3** Decode one real block via `translate_image_to_text` (`image_only.py:369-386`); eyeball `<|img_start|>H*W<|img_token_start|>…`.
-- [ ] **C1.4** Length-budget report: pyarrow over `views/train.parquet` — distribution of `media_tokens_total + text_chars/3.5` vs 8192; expectation ≥99% under budget (band is 1024² → ≤~4.1k tokens/image). If violated, revisit the band before C2.
+- [ ] **C1.4** Length-budget report: pyarrow over `views/train.parquet` — distribution of `media_tokens_total + text_chars/3.5` vs 16384; expectation ≥99% under budget (band 1400² → ≤~7.7k tokens/image). Also report native-resolution histogram (how many images the cap actually touched).
 
 ### Task C2: Gates — content audit, then probe
 
 - [ ] **C2.0 Content audit (the REAL splice gate — ln 2 cannot catch content bugs).** No GPU. Instantiate `OmniPreferenceDataset` on the C1 root, process ~32 datums through `omni_preference_preprocessor` with the real tokenizer, assert per datum: (a) zero residual id-131079 in both message logs; (b) for each ref **in order**, the slice between consecutive `<|img_start|>`/`<|img_end|>` boundaries equals `media.tokens(ref)` exactly (`np.array_equal`); (c) stripping all block spans, the remaining ids decode to text containing no vision-range ids and matching the view row's prompt/response text. Hard exit on any failure.
-- [ ] **C2.1** 3-step probe (same shape as the validated text probes; note `+data.omni_dataset_root` and seq 8192):
+- [ ] **C2.1** 3-step probe (same shape as the validated text probes; note `+data.omni_dataset_root` and seq 16384):
 
 ```bash
 cd /opt/nemo-rl && PYTHONPATH=$BRIDGE/src:$XIELU/site-v060:/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL \
@@ -336,7 +337,7 @@ uv run --locked python /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/examples/r
   policy.tokenizer.name=/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed.snapshot-20260611 \
   +data.omni_dataset_root=/capstor/store/cscs/swissai/infra01/vision-datasets/alignment-tokenized/mllm_dpo_views_media/preference/mllm_dpo \
   dpo.max_num_steps=3 dpo.val_period=3 dpo.val_batches=1 \
-  policy.train_global_batch_size=8 policy.max_total_sequence_length=8192 \
+  policy.train_global_batch_size=8 policy.max_total_sequence_length=16384 \
   policy.megatron_cfg.tensor_model_parallel_size=2 policy.megatron_cfg.sequence_parallel=false \
   checkpointing.enabled=false cluster.gpus_per_node=4 cluster.num_nodes=1
 ```
