@@ -10,7 +10,9 @@ The public `nvcr.io/nvidia/nemo-rl:v0.6.0` image works but resolves the
 every job. `docker/Dockerfile.nemo_rl_v0_6_0_megatron` is a thin overlay that
 bakes them in, adds `libjson-c5` (needed by slurm client plugins when
 submitting from inside CE sessions), and installs the fused CUDA xIELU from
-`docker/xielu` (vendored nathanrchn/kernels + contiguity fix; kernel contract:
+the `3rdparty/kernels` submodule (fork of nathanrchn/kernels with
+contiguity fix — run `git submodule update --init 3rdparty/kernels` before
+building; kernel contract:
 bf16 only, numel divisible by 128 — always true for ffn 21504 under TP
 1/2/4/8). Build and push:
 

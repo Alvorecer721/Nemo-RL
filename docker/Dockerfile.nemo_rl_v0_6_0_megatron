@@ -36,10 +36,10 @@ ENV LD_LIBRARY_PATH="/opt/nemo_rl_venv/lib/python3.13/site-packages/nvidia/cudnn
 RUN apt-get update && apt-get install -y --no-install-recommends libjson-c5 \
     && rm -rf /var/lib/apt/lists/*
 
-# Fused CUDA xIELU for Apertus (vendored from nathanrchn/kernels @ 185b512
-# plus a contiguity fix; see docker/xielu). Optional at runtime — the bridge's
-# XIELU module falls back to eager and warns if this is absent.
-COPY docker/xielu /opt/xielu-src
+# Fused CUDA xIELU for Apertus (3rdparty/kernels submodule — fork of
+# nathanrchn/kernels with contiguity fix; init submodules before building).
+# Optional at runtime — the bridge's XIELU module falls back to eager and warns.
+COPY 3rdparty/kernels/xielu /opt/xielu-src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --no-build-isolation /opt/xielu-src
 
