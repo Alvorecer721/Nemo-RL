@@ -540,15 +540,7 @@ def run_preference_mode(cfg: dict, tokenizer) -> None:
             encoded += 1
     media_files = writer.seal()
 
-    # views: stats + split, then write
-    for row in res.view_rows:
-        row["media_tokens_total"] = sum(
-            # block length = H/16*W/16 content + H/16 EOL + dims-text + 4 structure
-            # exact value comes from the store:
-            writer_lengths[row_ref] if False else 0
-            for row_ref in ()  # replaced below — lengths come from the store index
-        )
-    # exact lengths from the sealed parquet:
+    # views: stats (exact lengths from the sealed parquet) + split, then write
     idx = {r["media_id"]: r["length_elems"]
            for r in pq.read_table(out / "media" / "media.000000.parquet").to_pylist()}
     for row in res.view_rows:
