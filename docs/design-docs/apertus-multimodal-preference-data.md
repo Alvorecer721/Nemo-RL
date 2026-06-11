@@ -173,6 +173,12 @@ setting) and making runtime overlength deaths approximately never instead of
 the primary mechanism; (3) the adapter's loss-mask + placeholder-shrink guard
 remains as the last-resort net only.
 
+**No system messages in views** (user decision 2026-06-11): the SFT-era 80/20
+system-prompt strip convention is retired for preference/RL data. Views carry
+user/assistant turns only; the runtime chat template supplies the system
+prompt uniformly — system-prompt changes never require data regeneration. The
+producer rejects rows containing system-role messages (fail loud).
+
 Input: preference rows {prompt messages with `<|image|>` markers, chosen,
 rejected, per-field image refs}. Canonical first input:
 `vision-datasets/alignment-processed/mllm-dpo.parquet` (5,182 pairs;
