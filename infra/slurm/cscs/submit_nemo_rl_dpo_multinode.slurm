@@ -31,6 +31,15 @@ CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 XIELU_SITE=${XIELU_SITE:-/iopsstor/scratch/cscs/xyixuan/apertus/xielu-kernel/site-v060}
 RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
+# Raw Megatron base/reference loading (requires the mlm-restore worktree as
+# RUNTIME_DIR — the pretrained_checkpoint backport lives there): set
+# PRETRAINED_CKPT_PATH to an iter_XXXXXXX dir to skip the HF conversion cache.
+PRETRAINED_CKPT_PATH=${PRETRAINED_CKPT_PATH:-}
+PRETRAINED_CKPT_FORMAT=${PRETRAINED_CKPT_FORMAT:-megatron_lm}
+EXTRA_OVERRIDES=""
+if [ -n "$PRETRAINED_CKPT_PATH" ]; then
+    EXTRA_OVERRIDES="+checkpointing.pretrained_checkpoint.path=$PRETRAINED_CKPT_PATH +checkpointing.pretrained_checkpoint.format=$PRETRAINED_CKPT_FORMAT"
+fi
 GPUS_PER_NODE=4
 
 NUM_NODES=$SLURM_JOB_NUM_NODES
@@ -42,7 +51,7 @@ fi
 EXPECTED_UNITS=$((NUM_NODES * GPUS_PER_NODE))
 echo "head: $head_node ($HEAD_IP), nodes: $NUM_NODES, expected worker_units: $EXPECTED_UNITS"
 
-export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE
+export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES
 
 unset LD_PRELOAD
 srun \
@@ -77,7 +86,8 @@ srun \
         fi
         echo "=== ray cluster complete: ${units}/$EXPECTED_UNITS units; starting driver ==="
         cd "$RUNTIME_DIR"
-        uv run --locked examples/run_dpo.py --config "$RECIPE" cluster.num_nodes="$NUM_NODES"
+        # shellcheck disable=SC2086  # EXTRA_OVERRIDES is intentionally word-split
+        uv run --locked examples/run_dpo.py --config "$RECIPE" cluster.num_nodes="$NUM_NODES" $EXTRA_OVERRIDES
         ray stop
     else
         # Workers: wait for the head port, join, then live exactly as long as
