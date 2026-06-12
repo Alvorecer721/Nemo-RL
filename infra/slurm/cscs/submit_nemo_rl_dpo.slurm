@@ -29,6 +29,9 @@ fi
 # training math as N nodes (DP width changes, updates do not).
 ###############################################################################
 REPO_DIR=${REPO_DIR:-/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL}
+# NeMo-RL runtime: image default, or a filesystem worktree (validated branch
+# checkout) to run changed core/lock without rebuilding the image.
+RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
@@ -49,7 +52,7 @@ srun \
     export PYTHONUNBUFFERED=1
     export HF_HOME=/iopsstor/scratch/cscs/${USER}/.cache/huggingface
     export PYTHONPATH="'"$BRIDGE_ROOT"'/src:'"$XIELU_SITE"'"
-    cd /opt/nemo-rl
+    cd "'"$RUNTIME_DIR"'"
 
     # Prologue: full-set parquet (all 245,898 pairs, reference data parity).
     if [ ! -f "'"$FULL_SET"'" ]; then
