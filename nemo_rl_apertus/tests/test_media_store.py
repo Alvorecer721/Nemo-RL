@@ -31,6 +31,47 @@ from nemo_rl_apertus.tests.toy_store import build_toy_dataset
 GOLDEN_STORE = Path(__file__).resolve().parent / "fixtures" / "golden_store"
 
 
+def test_reader_roundtrip_tokens_and_raw(tmp_path):
+    from nemo_rl_apertus.media_store import MediaStoreReader
+
+    meta = build_toy_dataset(tmp_path / "ds")
+    reader = MediaStoreReader([tmp_path / "ds" / "media"])
+    for key in ("img0", "img1", "img2"):
+        np.testing.assert_array_equal(
+            reader.tokens(meta["ids"][key]), meta["blocks"][key]
+        )
+        assert reader.raw(meta["ids"][key]) == key.encode()
+
+
+def test_reader_memmap_path_equals_ram_path(tmp_path):
+    from nemo_rl_apertus.media_store import MediaStoreReader
+
+    meta = build_toy_dataset(tmp_path / "ds")
+    ram = MediaStoreReader([tmp_path / "ds" / "media"])
+    mmapped = MediaStoreReader(
+        [tmp_path / "ds" / "media"], load_to_ram_threshold_bytes=0
+    )
+    for mid in meta["ids"].values():
+        np.testing.assert_array_equal(ram.tokens(mid), mmapped.tokens(mid))
+
+
+def test_reader_refuses_unknown_dtype(tmp_path):
+    from nemo_rl_apertus.media_store import MediaStoreReader
+
+    build_toy_dataset(tmp_path / "ds")
+    with pytest.raises(ValueError, match="token_dtype"):
+        MediaStoreReader([tmp_path / "ds" / "media"], token_dtype="<i8")
+
+
+def test_reader_rejects_duplicate_media_id_across_roots(tmp_path):
+    from nemo_rl_apertus.media_store import MediaStoreReader
+
+    build_toy_dataset(tmp_path / "a")
+    build_toy_dataset(tmp_path / "b")  # same synthetic ids in both roots
+    with pytest.raises(ValueError, match="duplicate media_id"):
+        MediaStoreReader([tmp_path / "a" / "media", tmp_path / "b" / "media"])
+
+
 def test_toy_store_units_are_token_elements(tmp_path):
     """The fixture itself must honor the units contract: offsets/lengths in elements."""
     meta = build_toy_dataset(tmp_path / "ds")
