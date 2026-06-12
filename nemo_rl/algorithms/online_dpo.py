@@ -697,7 +697,11 @@ def _prepare_generation(
         )
         return False
 
-    if colocated_inference and need_refit:
+    # grpo parity: grpo's non-refit branch offloads under colocated inference
+    # unconditionally (unload optimizer to make space for generation). The
+    # megatron inline backend (policy_generation is policy, need_refit=False)
+    # needs that room just as much as the refit backends do.
+    if colocated_inference:
         policy.offload_after_refit()
     policy_generation.prepare_for_generation()
     return generation_stale
