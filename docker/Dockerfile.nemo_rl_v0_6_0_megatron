@@ -55,4 +55,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY docker/patches/0001-pretrained-checkpoint-backport.patch /tmp/mlm-restore.patch
 RUN cd /opt/nemo-rl && git apply --check /tmp/mlm-restore.patch     && git apply /tmp/mlm-restore.patch && rm /tmp/mlm-restore.patch
 
+# We changed deps (tokenizers re-lock) and code (patch) relative to the base
+# image, so regenerate the container fingerprint — otherwise NeMo-RL's
+# startup mismatch check would warn forever about a perfectly consistent image.
+RUN cd /opt/nemo-rl && python tools/generate_fingerprint.py > /opt/nemo_rl_container_fingerprint
+
 RUN python -c "import transformer_engine.pytorch as te; import modelopt; from modelopt.torch.opt.plugins import restore_modelopt_state; import xielu, torch; assert hasattr(torch.ops.xielu, 'xielu'); print('TE', te.__file__); print('ModelOpt', modelopt.__file__); print('xielu CUDA', xielu.__file__); import nemo_rl.utils.checkpoint as c; assert hasattr(c.CheckpointManager, 'get_resume_paths'), 'backport missing'; import tokenizers; assert tokenizers.__version__ >= '0.22.2', f'slow tokenizer load: {tokenizers.__version__}'"
