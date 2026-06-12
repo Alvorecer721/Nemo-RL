@@ -23,7 +23,11 @@ docker buildx build \
   --push .
 ```
 
-Then put the real tag into `docker/nemo_rl_apertus_gh200.toml` (kept in sync
+Then distribute via the shared containers dir (preferred — no registry auth
+for consumers): `enroot import -o nemo-rl-v0.6.0-apertus-mcore-gh200.sqsh
+docker://<tag>` and move the .sqsh to
+`/capstor/store/cscs/swissai/infra01/containers/`; point the EDF `image =` at
+that absolute path. Or put the registry tag into `docker/nemo_rl_apertus_gh200.toml` (kept in sync
 with `docker/nemo_rl.toml` — same mounts/env, only the image differs) and copy
 it to `~/.edf/` or point `sbatch`/`srun` at it.
 
