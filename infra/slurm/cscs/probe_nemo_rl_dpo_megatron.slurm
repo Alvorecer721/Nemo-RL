@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=infra01
-#SBATCH --job-name=nemo-rl-dpo-meg
+#SBATCH --job-name=ap1p5-meg
 #SBATCH --output=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/nemo_rl_dpo_megatron_%j.out
 #SBATCH --error=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/nemo_rl_dpo_megatron_%j.err
 #SBATCH --time=01:00:00

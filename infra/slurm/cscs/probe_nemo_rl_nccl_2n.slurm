@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=infra01
-#SBATCH --job-name=nemo-rl-nccl-2n
+#SBATCH --job-name=net-2n
 #SBATCH --output=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/nemo_rl_nccl_2n_%j.out
 #SBATCH --error=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/nemo_rl_nccl_2n_%j.err
 #SBATCH --time=00:15:00

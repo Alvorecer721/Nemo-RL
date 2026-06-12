@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=infra01
-#SBATCH --job-name=nemo-rl-dpo-maxmin
+#SBATCH --job-name=ap1p5-train
 #SBATCH --output=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo_maxmin_%j.out
 #SBATCH --error=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo_maxmin_%j.err
 #SBATCH --time=12:00:00
