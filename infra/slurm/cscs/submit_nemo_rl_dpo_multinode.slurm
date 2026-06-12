@@ -52,6 +52,9 @@ EXPECTED_UNITS=$((NUM_NODES * GPUS_PER_NODE))
 echo "head: $head_node ($HEAD_IP), nodes: $NUM_NODES, expected worker_units: $EXPECTED_UNITS"
 
 export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES
+# sbatch --export=<list> propagates to srun via SLURM_EXPORT_ENV and would
+# strip the exports above from the tasks; force full propagation.
+export SLURM_EXPORT_ENV=ALL
 
 unset LD_PRELOAD
 srun \
