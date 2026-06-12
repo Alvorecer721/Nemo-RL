@@ -88,6 +88,13 @@ class OnlineDPOConfig(TypedDict):
             response tokens.
         preference_loss_weight: Weight for the DPO preference loss.
         sft_loss_weight: Weight for the auxiliary SFT loss on chosen responses.
+
+    Optional keys:
+        gen_logprob_error_warn_threshold: Warn (never abort) when the mean abs
+            difference between generation-engine logprobs and the training
+            graph's recomputed policy logprobs — over response tokens of valid
+            pairs — exceeds this value. Large errors indicate refit or
+            numerics drift between generation and training. Default: 0.05.
     """
 
     num_prompts_per_step: int
@@ -108,6 +115,10 @@ class OnlineDPOConfig(TypedDict):
     sft_average_log_probs: bool
     preference_loss_weight: float
     sft_loss_weight: float
+    gen_logprob_error_warn_threshold: NotRequired[float]
+
+
+DEFAULT_GEN_LOGPROB_ERROR_WARN_THRESHOLD = 0.05
 
 
 class OnlineDPOSaveState(TypedDict):
@@ -168,6 +179,13 @@ def _validate_online_dpo_config(
     assert online_dpo_config["val_batch_size"] > 0
     assert online_dpo_config["max_val_samples"] >= 0
     assert online_dpo_config["min_reward_margin"] >= 0
+    assert (
+        online_dpo_config.get(
+            "gen_logprob_error_warn_threshold",
+            DEFAULT_GEN_LOGPROB_ERROR_WARN_THRESHOLD,
+        )
+        > 0
+    ), "online_dpo.gen_logprob_error_warn_threshold must be positive."
     assert not data_config["use_multiple_dataloader"], (
         "Online DPO currently supports a single prompt dataloader."
     )
@@ -590,6 +608,87 @@ def collate_preference_datums(
     )
 
 
+def gather_generation_logprobs_for_pairs(
+    preference_datums: list[PreferenceDatumSpec],
+    sequence_length: int,
+) -> Optional[torch.Tensor]:
+    """Assemble per-token generation logprobs aligned with the collated batch.
+
+    Rows interleave chosen/rejected exactly like ``preference_collate_fn`` and
+    follow grpo's layout: position ``i`` holds the generation engine's logprob
+    for input token ``i``, with zeros for tokens the engine did not sample
+    (prompt tokens and right padding).
+
+    Returns None when the rollout backend did not attach generation logprobs
+    to the sampled responses; callers should skip the gen-vs-train tripwire.
+    """
+    message_logs: list[LLMMessageLogType] = []
+    for datum in preference_datums:
+        message_logs.append(datum["message_log_chosen"])
+        message_logs.append(datum["message_log_rejected"])
+
+    # Online DPO is single-turn: the final message of each log is the sampled
+    # assistant response, the only segment the tripwire (and loss mask) covers.
+    has_logprobs = ["generation_logprobs" in log[-1] for log in message_logs]
+    if not any(has_logprobs):
+        return None
+    if not all(has_logprobs):
+        raise ValueError(
+            "Generation logprobs are attached to some sampled responses but "
+            "not others; the rollout output is inconsistent."
+        )
+
+    rows = []
+    for message_log in message_logs:
+        row = torch.cat(
+            [
+                cast(torch.Tensor, message["generation_logprobs"])
+                if "generation_logprobs" in message
+                else torch.zeros(
+                    int(cast(torch.Tensor, message["token_ids"]).numel()),
+                    dtype=torch.float32,
+                )
+                for message in message_log
+            ]
+        )
+        assert row.numel() <= sequence_length, (
+            f"Generation logprobs span {row.numel()} tokens but the collated "
+            f"sequence length is only {sequence_length}."
+        )
+        rows.append(
+            torch.nn.functional.pad(row, (0, sequence_length - row.numel()))
+        )
+    return torch.stack(rows)
+
+
+def compute_gen_logprob_error_metrics(
+    generation_logprobs: torch.Tensor,
+    policy_logprobs: torch.Tensor,
+    token_mask: torch.Tensor,
+    sample_mask: torch.Tensor,
+) -> dict[str, float]:
+    """Mean/max abs gen-vs-train logprob error, grpo's masking semantics exactly.
+
+    Mirrors grpo's lp_error computation (``ClippedPGLossFn`` /
+    ``compute_and_apply_seq_logprob_error_masking``): drop position 0 of every
+    [batch, seq] tensor, then mask with token_mask[:, 1:] * sample_mask so only
+    response tokens of valid samples contribute. A large error means the
+    generation engine and the training graph disagree about the very tokens
+    being trained on (refit bug or numerics drift).
+    """
+    lp_error = torch.abs(generation_logprobs[:, 1:] - policy_logprobs[:, 1:])
+    mask = token_mask[:, 1:] * sample_mask.unsqueeze(-1)
+    masked_error = lp_error * mask
+    return {
+        "gen_logprob_error_mean": float(
+            (masked_error.sum() / mask.sum().clamp(min=1)).item()
+        ),
+        "gen_logprob_error_max": float(masked_error.max().item())
+        if masked_error.numel() > 0
+        else 0.0,
+    }
+
+
 def add_reference_logprobs_to_preference_batch(
     preference_batch: BatchedDataDict,
     policy: ColocatablePolicyInterface,
@@ -714,7 +813,14 @@ def _collect_preference_batch(
     task_to_env: dict[str, EnvironmentInterface],
     master_config: MasterConfig,
     timer: Timer,
-) -> tuple[Optional[BatchedDataDict], dict[str, float], dict[str, Any], int, int]:
+) -> tuple[
+    Optional[BatchedDataDict],
+    Optional[torch.Tensor],
+    dict[str, float],
+    dict[str, Any],
+    int,
+    int,
+]:
     online_dpo_config = master_config["online_dpo"]
     target_pairs = master_config["policy"]["train_global_batch_size"]
     preference_datums: list[PreferenceDatumSpec] = []
@@ -761,6 +867,7 @@ def _collect_preference_batch(
     if len(preference_datums) < target_pairs:
         return (
             None,
+            None,
             _aggregate_pair_metrics(pair_metrics),
             {},
             consumed_prompts,
@@ -773,9 +880,17 @@ def _collect_preference_batch(
         master_config["policy"]["make_sequence_length_divisible_by"],
     )
     preference_batch.to("cpu")
+    # Kept out of preference_batch on purpose: the tensor is consumed only by
+    # the driver-side gen-vs-train tripwire and must not ride along to the
+    # training workers.
+    generation_logprobs = gather_generation_logprobs_for_pairs(
+        preference_datums,
+        sequence_length=preference_batch["input_ids"].shape[1],
+    )
 
     return (
         preference_batch,
+        generation_logprobs,
         _aggregate_pair_metrics(pair_metrics),
         _aggregate_numeric_metrics(rollout_metrics),
         consumed_prompts,
@@ -1034,6 +1149,12 @@ def online_dpo_train(
     max_num_steps = online_dpo_config["max_num_steps"]
     max_num_epochs = online_dpo_config["max_num_epochs"]
     val_period = online_dpo_config["val_period"]
+    gen_logprob_warn_threshold = online_dpo_config.get(
+        "gen_logprob_error_warn_threshold",
+        DEFAULT_GEN_LOGPROB_ERROR_WARN_THRESHOLD,
+    )
+    # Announce a disabled tripwire once, not every step.
+    gen_logprob_tripwire_missing_announced = False
 
     if online_dpo_config["val_at_start"] and total_steps == 0:
         print("\nRunning initial Online DPO validation...", flush=True)
@@ -1085,6 +1206,7 @@ def online_dpo_train(
 
                 (
                     preference_batch,
+                    generation_logprobs,
                     pair_metrics,
                     rollout_metrics,
                     consumed_prompts,
@@ -1179,6 +1301,57 @@ def online_dpo_train(
                         timer=timer,
                     )
 
+                # Gen-vs-train logprob tripwire (grpo parity: generation
+                # logprobs vs the training graph's recompute, measured before
+                # the optimizer step while both stem from identical weights).
+                # Observable, never fatal: the known refit bug must show up in
+                # metrics, not kill the run.
+                gen_logprob_error_metrics: dict[str, float] = {}
+                if generation_logprobs is not None:
+                    with timer.time("gen_logprob_tripwire"):
+                        # Slim dict, like grpo's logprob_data: don't ship
+                        # reference logprobs back to the workers.
+                        policy_logprobs = policy.get_logprobs(
+                            BatchedDataDict(
+                                {
+                                    "input_ids": preference_batch["input_ids"],
+                                    "input_lengths": preference_batch[
+                                        "input_lengths"
+                                    ],
+                                    "token_mask": preference_batch["token_mask"],
+                                    "sample_mask": preference_batch["sample_mask"],
+                                }
+                            ),
+                            timer=timer,
+                        )["logprobs"]
+                    gen_logprob_error_metrics = compute_gen_logprob_error_metrics(
+                        generation_logprobs,
+                        policy_logprobs,
+                        token_mask=preference_batch["token_mask"],
+                        sample_mask=preference_batch["sample_mask"],
+                    )
+                    del policy_logprobs
+                    if (
+                        gen_logprob_error_metrics["gen_logprob_error_mean"]
+                        > gen_logprob_warn_threshold
+                    ):
+                        warnings.warn(
+                            "Gen-vs-train logprob error of "
+                            f"{gen_logprob_error_metrics['gen_logprob_error_mean']:.6f} "
+                            f"(max {gen_logprob_error_metrics['gen_logprob_error_max']:.6f}) "
+                            "exceeds online_dpo.gen_logprob_error_warn_threshold="
+                            f"{gen_logprob_warn_threshold}. The generation engine "
+                            "and the training graph disagree about the sampled "
+                            "tokens; check refit and numerics."
+                        )
+                elif not gen_logprob_tripwire_missing_announced:
+                    print(
+                        "  - Rollouts carry no generation logprobs; the "
+                        "gen-vs-train logprob tripwire is disabled for this run.",
+                        flush=True,
+                    )
+                    gen_logprob_tripwire_missing_announced = True
+
                 print("Training policy with DPO loss...", flush=True)
                 with timer.time("training_prep"):
                     policy.prepare_for_training()
@@ -1229,6 +1402,7 @@ def online_dpo_train(
                 metrics = _aggregate_train_metrics(train_results)
                 metrics.update({f"online_dpo/{k}": v for k, v in pair_metrics.items()})
                 metrics.update(rollout_metrics)
+                metrics.update(gen_logprob_error_metrics)
                 total_valid_tokens += metrics["global_valid_toks"]
 
                 consumed_samples += consumed_prompts
