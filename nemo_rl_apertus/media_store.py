@@ -27,6 +27,8 @@ Units contract: ``offset_elems``/``length_elems`` are TOKEN ELEMENTS; the
 ``raw_*`` columns are bytes.
 
 This class is a deliberate copy of the producer's ``MediaStoreReader``
+(last synced: VT c3eee5e; re-sync on schema_version bump — the golden-store
+conformance test is the drift detector)
 (``vision_tokenization/pipeline/output/media_store.py``): the contract between
 the repos is the on-disk format — pinned by the golden-store fixture under
 ``tests/fixtures/golden_store/`` — not a shared Python package.

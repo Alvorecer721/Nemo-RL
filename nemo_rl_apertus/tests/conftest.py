@@ -13,20 +13,11 @@
 # limitations under the License.
 """Shared fixtures and the nemo_rl runtime pin.
 
-Runtime pin: the adapter targets the LOCKED runtime at /opt/nemo-rl (v0.6.0 —
-every upstream signature was verified there). This repository also contains a
-*different* (newer) ``nemo_rl`` source tree, and pytest prepends the repo root
-to ``sys.path`` to import ``nemo_rl_apertus`` — accidentally shadowing the
-locked ``nemo_rl`` with the unverified one (which additionally needs deps the
-locked venv does not ship, e.g. soundfile). This conftest restores the
-contract by importing ``nemo_rl`` while /opt/nemo-rl is first on ``sys.path``:
-once the top package is cached in ``sys.modules``, its ``__path__`` pins every
-submodule to the locked tree, immune to pytest's later sys.path prepends.
-``nemo_rl_apertus`` still resolves to this repo (absent under /opt).
-
-The real tokenizer takes ~200 s to LOAD — it is loaded at most once per pytest
-session (session scope) and only when a test requests it, so format/manifest
-tests stay fast.
+The adapter targets the LOCKED runtime at /opt/nemo-rl (v0.6.0); this repo also
+carries a newer ``nemo_rl`` tree that pytest's repo-root sys.path prepend would
+shadow it with. Importing ``nemo_rl`` here while /opt/nemo-rl is first caches
+the locked package in ``sys.modules``, pinning every submodule for the session.
+The real tokenizer (~200 s load) is session-scoped and loaded only on request.
 """
 
 import os

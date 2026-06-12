@@ -46,7 +46,7 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
-from functools import partial
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Optional
 
@@ -71,6 +71,12 @@ from nemo_rl_apertus.media_store import MediaStoreReader
 
 # No hardcoded token ids: the marker string and its id come from the store
 # manifest's token_layout, derived from the tokenizer at build time.
+
+
+@lru_cache(maxsize=8)
+def _sha256_file(path: str) -> str:
+    """Cached file hash — both splits validate the same tokenizer.json."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 class OmniPreferenceDataset:
@@ -117,18 +123,16 @@ class OmniPreferenceDataset:
         if manifest["token_dtype"] != "<i4":
             raise ValueError(f"unsupported token_dtype {manifest['token_dtype']!r}")
         for rel, size in manifest["files"].items():
-            path = root / rel
-            if not path.exists():
-                raise ValueError(f"manifest lists missing file: {rel}")
-            if path.stat().st_size != size:
+            try:
+                actual = (root / rel).stat().st_size
+            except FileNotFoundError:
+                raise ValueError(f"manifest lists missing file: {rel}") from None
+            if actual != size:
                 raise ValueError(
-                    f"size mismatch for {rel}: manifest says {size}, "
-                    f"on disk {path.stat().st_size}"
+                    f"size mismatch for {rel}: manifest says {size}, on disk {actual}"
                 )
         if tokenizer_path is not None:
-            sha = hashlib.sha256(
-                (Path(tokenizer_path) / "tokenizer.json").read_bytes()
-            ).hexdigest()
+            sha = _sha256_file(str(Path(tokenizer_path) / "tokenizer.json"))
             if sha != manifest["tokenizer"]["sha256"]:
                 raise ValueError(
                     f"tokenizer sha256 mismatch: store was generated with "

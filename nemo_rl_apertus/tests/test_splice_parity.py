@@ -61,10 +61,8 @@ def test_gate1_splice_parity(tokenizer, tmp_path):
         messages, tokenizer, ds.task_spec, add_bos_token=True, add_eos_token=True
     )
 
-    # Independent check 2: the concatenated per-message render equals the
-    # one-shot template render, modulo the BOS/EOS get_formatted_message_log
-    # documents adding (BOS prepended to the first chunk if absent; EOS appended
-    # to the last chunk if absent ignoring trailing newlines).
+    # Check 2: concatenated per-message render == one-shot template render,
+    # modulo the BOS/EOS that get_formatted_message_log documents adding.
     expected_str = tokenizer.apply_chat_template(messages, tokenize=False)
     if not expected_str.startswith(tokenizer.bos_token):
         expected_str = tokenizer.bos_token + expected_str
