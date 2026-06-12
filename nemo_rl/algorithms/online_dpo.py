@@ -200,6 +200,45 @@ def _validate_online_dpo_config(
         "must equal online_dpo.num_prompts_per_step. This keeps each optimizer "
         "step at one full batch of usable preference pairs."
     )
+    assert generation_config["temperature"] > 0, (
+        "Online DPO requires stochastic sampling (policy.generation.temperature > 0). "
+        "Deterministic sampling generates identical responses per prompt, making "
+        "every pair a tie."
+    )
+    assert generation_config.get("top_k") != 1, (
+        "Online DPO requires stochastic sampling (policy.generation.top_k must not "
+        "be 1). Greedy sampling generates identical responses per prompt, making "
+        "every pair a tie."
+    )
+
+    # Chosen/rejected rows are interleaved, so each data-parallel shard must
+    # receive an even number of rows or pairs would be split across shards.
+    cluster_config = master_config["cluster"]
+    if policy_config["megatron_cfg"]["enabled"]:
+        tp_size = policy_config["megatron_cfg"]["tensor_model_parallel_size"]
+        pp_size = policy_config["megatron_cfg"]["pipeline_model_parallel_size"]
+        cp_size = policy_config["megatron_cfg"]["context_parallel_size"]
+    else:
+        tp_size = policy_config["dtensor_cfg"]["tensor_parallel_size"]
+        pp_size = 1
+        cp_size = policy_config["dtensor_cfg"]["context_parallel_size"]
+    model_parallel_size = tp_size * pp_size * cp_size
+    world_size = cluster_config["num_nodes"] * cluster_config["gpus_per_node"]
+    assert world_size % model_parallel_size == 0, (
+        f"World size ({world_size}) must be divisible by TP * PP * CP "
+        f"({model_parallel_size}) so the data-parallel size is an integer."
+    )
+    dp_size = world_size // model_parallel_size
+    training_rows = 2 * policy_config["train_global_batch_size"]
+    assert training_rows % dp_size == 0, (
+        f"Online DPO trains on 2 * train_global_batch_size = {training_rows} rows "
+        f"per step, which must be divisible by the data-parallel size ({dp_size})."
+    )
+    assert (training_rows // dp_size) % 2 == 0, (
+        f"Each data-parallel shard must receive an even number of rows so "
+        f"chosen/rejected pairs stay together, got {training_rows // dp_size} rows "
+        f"per shard with data-parallel size {dp_size}."
+    )
 
 
 def setup(
@@ -450,13 +489,24 @@ def build_preference_datums_from_rollouts(
     processed_pairs = 0
 
     truncated = rollout_batch.get("truncated")
+    if drop_truncated_pairs and truncated is None:
+        raise ValueError(
+            "online_dpo.drop_truncated_pairs=true requires the rollout batch to "
+            "contain a 'truncated' key, but none was found."
+        )
 
     for pair_start in range(0, rollout_batch.size, 2):
         processed_pairs += 1
         first_idx = pair_start
         second_idx = pair_start + 1
+        assert _as_int(rollout_batch["idx"][first_idx]) == _as_int(
+            rollout_batch["idx"][second_idx]
+        ), (
+            f"Online DPO pair adjacency violated: rollout rows {first_idx} and "
+            f"{second_idx} come from different prompts."
+        )
 
-        if drop_truncated_pairs and truncated is not None:
+        if drop_truncated_pairs:
             first_truncated = bool(truncated[first_idx])
             second_truncated = bool(truncated[second_idx])
             if first_truncated or second_truncated:
@@ -858,6 +908,76 @@ def _aggregate_train_metrics(train_results: dict[str, Any]) -> dict[str, float]:
     return aggregated
 
 
+def _save_checkpoint(
+    policy: ColocatablePolicyInterface,
+    checkpointer: CheckpointManager,
+    train_dataloader: StatefulDataLoader,
+    online_dpo_save_state: OnlineDPOSaveState,
+    master_config: MasterConfig,
+    *,
+    step: int,
+    current_step: int,
+    current_prompt_batch: int,
+    current_epoch: int,
+    total_valid_tokens: int,
+    consumed_samples: int,
+    metrics: Optional[dict[str, float]],
+    val_metrics: Optional[dict[str, Any]],
+    timer: Timer,
+) -> None:
+    """Update the save state with the given counters and write a checkpoint for ``step``."""
+    policy.prepare_for_training()
+    online_dpo_save_state["current_step"] = current_step
+    online_dpo_save_state["current_prompt_batch"] = current_prompt_batch
+    online_dpo_save_state["total_steps"] = step
+    online_dpo_save_state["current_epoch"] = current_epoch
+    online_dpo_save_state["total_valid_tokens"] = total_valid_tokens
+    online_dpo_save_state["consumed_samples"] = consumed_samples
+    if val_metrics is not None:
+        online_dpo_save_state["val_reward"] = val_metrics["reward"]
+    elif "val_reward" in online_dpo_save_state:
+        del online_dpo_save_state["val_reward"]
+
+    full_metric_name = master_config["checkpointing"]["metric_name"]
+    if full_metric_name is not None:
+        assert full_metric_name.startswith("train:") or full_metric_name.startswith(
+            "val:"
+        ), f"metric_name={full_metric_name} must start with 'val:' or 'train:'."
+        prefix, metric_name = full_metric_name.split(":", 1)
+        metrics_source = metrics if prefix == "train" else val_metrics
+        if not metrics_source:
+            warnings.warn(
+                f"No {prefix} metrics were collected for "
+                f"checkpoint metric {metric_name}.",
+                stacklevel=2,
+            )
+            if full_metric_name in online_dpo_save_state:
+                del online_dpo_save_state[full_metric_name]
+        elif metric_name not in metrics_source:
+            raise ValueError(f"Metric {metric_name} not found in {prefix} metrics")
+        else:
+            online_dpo_save_state[full_metric_name] = metrics_source[metric_name]
+
+    with timer.time("checkpointing"):
+        print(f"Saving checkpoint for step {step}...")
+        checkpoint_path = checkpointer.init_tmp_checkpoint(
+            step, online_dpo_save_state, master_config
+        )
+        policy.save_checkpoint(
+            weights_path=os.path.join(checkpoint_path, "policy", "weights"),
+            optimizer_path=os.path.join(checkpoint_path, "policy", "optimizer")
+            if checkpointer.save_optimizer
+            else None,
+            tokenizer_path=os.path.join(checkpoint_path, "policy", "tokenizer"),
+            checkpointing_cfg=master_config["checkpointing"],
+        )
+        torch.save(
+            train_dataloader.state_dict(),
+            os.path.join(checkpoint_path, "train_dataloader.pt"),
+        )
+        checkpointer.finalize_checkpoint(checkpoint_path)
+
+
 def online_dpo_train(
     policy: ColocatablePolicyInterface,
     policy_generation: Optional[GenerationInterface],
@@ -873,6 +993,10 @@ def online_dpo_train(
     master_config: MasterConfig,
 ) -> None:
     """Run Online DPO training."""
+    # Smoke-gate invariant: at step 1 the policy still equals the frozen reference
+    # policy, which forces preference_loss == ln(2) = 0.6931. A step-1
+    # preference_loss away from ln(2) means reference init, logprob alignment
+    # (torch.roll), or chosen/rejected interleaving is broken.
     timer = Timer()
     timeout = TimeoutChecker(
         timeout=master_config["checkpointing"]["checkpoint_must_save_by"],
@@ -896,6 +1020,11 @@ def online_dpo_train(
     current_epoch = online_dpo_save_state["current_epoch"]
     consumed_samples = online_dpo_save_state["consumed_samples"]
     total_valid_tokens = online_dpo_save_state.get("total_valid_tokens", 0)
+    # Suppress duplicate work on the end-of-data exit path: a resumed run starts
+    # with its checkpoint already on disk, and an exactly-detected last step has
+    # already saved and validated before the dataloader raises StopIteration.
+    last_saved_step = total_steps
+    last_val_step = -1
 
     online_dpo_config = master_config["online_dpo"]
     max_num_steps = online_dpo_config["max_num_steps"]
@@ -967,11 +1096,69 @@ def online_dpo_train(
                 current_prompt_batch += consumed_prompt_batches
                 policy_generation.finish_generation()
                 if preference_batch is None:
+                    # The dataloader is exhausted, so no further optimizer step is
+                    # possible this epoch. Because pairs are dropped data-dependently,
+                    # is_last_step cannot anticipate this exit: run val_at_end and
+                    # the final save here before leaving the epoch.
                     if consumed_prompts > 0:
                         warnings.warn(
                             "Discarding the final partial Online DPO batch because it "
                             "did not contain enough usable preference pairs."
                         )
+                        consumed_samples += consumed_prompts
+                    is_final_exit = current_epoch + 1 >= max_num_epochs
+                    if is_final_exit and total_steps > 0:
+                        if (
+                            online_dpo_config["val_at_end"]
+                            and total_steps > last_val_step
+                        ):
+                            generation_stale = _prepare_generation(
+                                policy,
+                                policy_generation,
+                                need_refit=need_refit,
+                                generation_stale=generation_stale,
+                                colocated_inference=colocated_inference,
+                            )
+                            val_metrics, validation_timings = validate(
+                                policy_generation,
+                                val_dataloader,
+                                tokenizer,
+                                val_task_to_env,
+                                step=total_steps,
+                                master_config=master_config,
+                                logger=logger,
+                            )
+                            policy_generation.finish_generation()
+                            logger.log_metrics(
+                                validation_timings,
+                                total_steps,
+                                prefix="timing/validation",
+                            )
+                            logger.log_metrics(
+                                val_metrics, total_steps, prefix="validation"
+                            )
+                            last_val_step = total_steps
+                        if (
+                            master_config["checkpointing"]["enabled"]
+                            and total_steps > last_saved_step
+                        ):
+                            _save_checkpoint(
+                                policy,
+                                checkpointer,
+                                train_dataloader,
+                                online_dpo_save_state,
+                                master_config,
+                                step=total_steps,
+                                current_step=current_step,
+                                current_prompt_batch=current_prompt_batch,
+                                current_epoch=current_epoch,
+                                total_valid_tokens=total_valid_tokens,
+                                consumed_samples=consumed_samples,
+                                metrics=None,
+                                val_metrics=val_metrics,
+                                timer=timer,
+                            )
+                            last_saved_step = total_steps
                     timer.reset()
                     break
 
@@ -1036,6 +1223,7 @@ def online_dpo_train(
                     logger.log_metrics(
                         val_metrics, total_steps + 1, prefix="validation"
                     )
+                    last_val_step = total_steps + 1
 
                 metrics = _aggregate_train_metrics(train_results)
                 metrics.update({f"online_dpo/{k}": v for k, v in pair_metrics.items()})
@@ -1055,69 +1243,23 @@ def online_dpo_train(
                 if master_config["checkpointing"]["enabled"] and (
                     should_save_by_step or should_save_by_timeout
                 ):
-                    policy.prepare_for_training()
-                    online_dpo_save_state["current_step"] = current_step + 1
-                    online_dpo_save_state["current_prompt_batch"] = current_prompt_batch
-                    online_dpo_save_state["total_steps"] = total_steps + 1
-                    online_dpo_save_state["current_epoch"] = current_epoch
-                    online_dpo_save_state["total_valid_tokens"] = total_valid_tokens
-                    online_dpo_save_state["consumed_samples"] = consumed_samples
-                    if val_metrics is not None:
-                        online_dpo_save_state["val_reward"] = val_metrics["reward"]
-                    elif "val_reward" in online_dpo_save_state:
-                        del online_dpo_save_state["val_reward"]
-
-                    full_metric_name = master_config["checkpointing"]["metric_name"]
-                    if full_metric_name is not None:
-                        assert full_metric_name.startswith(
-                            "train:"
-                        ) or full_metric_name.startswith("val:"), (
-                            f"metric_name={full_metric_name} must start with "
-                            "'val:' or 'train:'."
-                        )
-                        prefix, metric_name = full_metric_name.split(":", 1)
-                        metrics_source = metrics if prefix == "train" else val_metrics
-                        if not metrics_source:
-                            warnings.warn(
-                                f"No {prefix} metrics were collected for "
-                                f"checkpoint metric {metric_name}.",
-                                stacklevel=2,
-                            )
-                            if full_metric_name in online_dpo_save_state:
-                                del online_dpo_save_state[full_metric_name]
-                        elif metric_name not in metrics_source:
-                            raise ValueError(
-                                f"Metric {metric_name} not found in {prefix} metrics"
-                            )
-                        else:
-                            online_dpo_save_state[full_metric_name] = metrics_source[
-                                metric_name
-                            ]
-
-                    with timer.time("checkpointing"):
-                        print(f"Saving checkpoint for step {total_steps + 1}...")
-                        checkpoint_path = checkpointer.init_tmp_checkpoint(
-                            total_steps + 1, online_dpo_save_state, master_config
-                        )
-                        policy.save_checkpoint(
-                            weights_path=os.path.join(
-                                checkpoint_path, "policy", "weights"
-                            ),
-                            optimizer_path=os.path.join(
-                                checkpoint_path, "policy", "optimizer"
-                            )
-                            if checkpointer.save_optimizer
-                            else None,
-                            tokenizer_path=os.path.join(
-                                checkpoint_path, "policy", "tokenizer"
-                            ),
-                            checkpointing_cfg=master_config["checkpointing"],
-                        )
-                        torch.save(
-                            train_dataloader.state_dict(),
-                            os.path.join(checkpoint_path, "train_dataloader.pt"),
-                        )
-                        checkpointer.finalize_checkpoint(checkpoint_path)
+                    _save_checkpoint(
+                        policy,
+                        checkpointer,
+                        train_dataloader,
+                        online_dpo_save_state,
+                        master_config,
+                        step=total_steps + 1,
+                        current_step=current_step + 1,
+                        current_prompt_batch=current_prompt_batch,
+                        current_epoch=current_epoch,
+                        total_valid_tokens=total_valid_tokens,
+                        consumed_samples=consumed_samples,
+                        metrics=metrics,
+                        val_metrics=val_metrics,
+                        timer=timer,
+                    )
+                    last_saved_step = total_steps + 1
 
             timing_metrics = timer.get_timing_metrics(reduction_op="sum")
             total_time = timing_metrics.get("total_step_time", 0)

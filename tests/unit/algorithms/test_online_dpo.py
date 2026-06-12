@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
 from nemo_rl.algorithms.online_dpo import (
@@ -48,8 +49,9 @@ def _rollout_batch(
             "task_name": ["math", "math"],
         }
     )
-    if truncated is not None:
-        batch["truncated"] = truncated
+    batch["truncated"] = (
+        truncated if truncated is not None else torch.tensor([False, False])
+    )
     return batch
 
 
@@ -66,6 +68,7 @@ def _two_pair_rollout_batch() -> BatchedDataDict:
             "loss_multiplier": torch.ones(4),
             "idx": [0, 0, 1, 1],
             "task_name": ["math", "math", "math", "math"],
+            "truncated": torch.tensor([False, False, False, False]),
         }
     )
 
@@ -133,6 +136,30 @@ def test_build_preference_datums_drops_truncated_pairs_when_enabled():
     assert datums == []
     assert metrics["truncated_pairs"] == 1.0
     assert metrics["dropped_pairs"] == 1.0
+
+
+def test_build_preference_datums_requires_truncated_key_when_dropping():
+    batch = _rollout_batch(torch.tensor([0.25, 0.75]))
+    del batch["truncated"]
+
+    with pytest.raises(ValueError, match="truncated"):
+        build_preference_datums_from_rollouts(
+            batch,
+            min_reward_margin=0.0,
+            drop_truncated_pairs=True,
+        )
+
+
+def test_build_preference_datums_asserts_pair_idx_adjacency():
+    batch = _rollout_batch(torch.tensor([0.25, 0.75]))
+    batch["idx"] = [123, 456]
+
+    with pytest.raises(AssertionError, match="adjacency"):
+        build_preference_datums_from_rollouts(
+            batch,
+            min_reward_margin=0.0,
+            drop_truncated_pairs=False,
+        )
 
 
 def test_collate_preference_datums_uses_dpo_interleaving_and_final_mask():
