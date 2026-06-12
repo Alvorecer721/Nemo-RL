@@ -15,6 +15,13 @@
 set -euo pipefail
 echo "START TIME: $(date)"
 
+# ~1,921 steps x ~30-45 s exceeds one 12 h window: chain windows with
+# singleton dependency; auto-resume picks up from the latest checkpoint.
+AUTO_REQUEUE=${AUTO_REQUEUE:-true}
+if [ "$AUTO_REQUEUE" = true ]; then
+    sbatch --dependency=singleton --job-name="$SLURM_JOB_NAME" "$0"
+fi
+
 ###############################################################################
 # Apertus-1.5 8B DPO — MaxMin full set, reference-identical hyperparameters.
 # Science lives in the RECIPE yaml (no science overrides here); this script

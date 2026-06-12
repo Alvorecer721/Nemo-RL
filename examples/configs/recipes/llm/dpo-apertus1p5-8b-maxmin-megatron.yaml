@@ -23,8 +23,8 @@ dpo:
 checkpointing:
   enabled: true
   checkpoint_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/results/dpo-apertus1p5-8b-maxmin
-  save_period: 400
-  keep_top_k: 3
+  save_period: 150
+  keep_top_k: 5
 data:
   max_input_seq_length: 4096
   dataset_name: BinaryPreferenceDataset
