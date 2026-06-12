@@ -48,7 +48,6 @@ srun \
     set -euo pipefail
     export PYTHONUNBUFFERED=1
     export HF_HOME=/iopsstor/scratch/cscs/${USER}/.cache/huggingface
-    export WANDB_DISABLED=true
     export PYTHONPATH="'"$BRIDGE_ROOT"'/src:'"$XIELU_SITE"'"
     cd /opt/nemo-rl
 

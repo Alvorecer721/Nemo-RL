@@ -65,7 +65,7 @@ policy:
       lr_decay_iters: 1921
       lr_decay_style: linear
 logger:
-  wandb_enabled: false
+  wandb_enabled: true
   tensorboard_enabled: true
   log_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo-apertus1p5-8b-maxmin
   wandb:
