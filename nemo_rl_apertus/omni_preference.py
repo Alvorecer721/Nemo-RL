@@ -23,7 +23,9 @@ never re-tokenizes, so this module can splice pretokenized image blocks into
 the rendered text without touching any upstream file.
 
 Data flow per sample: the stock ``get_formatted_message_log`` templates and
-tokenizes the text live; each ``<|image|>`` marker (id from the manifest token_layout) is
+tokenizes the text live — under a per-pair ``enable_thinking`` decided from the
+CHOSEN response's think markers (see ``has_think_markers``); each ``<|image|>``
+marker (id from the manifest token_layout) is
 then replaced by the next pretokenized block from that *field's* media refs
 (``prompt_media_refs`` for prompt messages, ``{side}_media_refs`` for the
 response message — the chosen sequence must never consume rejected's refs).
@@ -46,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+from contextlib import contextmanager
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Optional
@@ -71,6 +74,56 @@ from nemo_rl_apertus.media_store import MediaStoreReader
 
 # No hardcoded token ids: the marker string and its id come from the store
 # manifest's token_layout, derived from the tokenizer at build time.
+
+# Mirrors _THINKING_OPEN_MARKERS in the SFT tokenization pipeline
+# (vision_tokenization/discrete/sft_segments.py in benchmark-image-tokenzier)
+# EXACTLY: preference rendering must key `enable_thinking` on the same opener
+# set the SFT corpus was rendered with, or DPO would condition CoT pairs
+# differently from their SFT counterparts. Openers only — an unclosed or
+# partial trace still marks the sample as CoT; close-side markers add nothing.
+THINKING_OPEN_MARKERS: tuple[str, ...] = (
+    "<think>",            # Qwen 3, DeepSeek R1, prompted-style outputs
+    "<|channel>thought",  # Gemma 4 native (`<|channel>thought\n…<channel|>`)
+    "<thought>",          # Gemini API streamed-text mode
+)
+
+
+def has_think_markers(text: str) -> bool:
+    """True if ``text`` carries a CoT opening marker (``THINKING_OPEN_MARKERS``)."""
+    return any(marker in text for marker in THINKING_OPEN_MARKERS)
+
+
+@contextmanager
+def _deliberation_bound(tokenizer: TokenizerType, enable_thinking: bool):
+    """Bind ``enable_thinking`` onto every chat-template render in scope.
+
+    Mechanism — the same one NeMo-RL uses for config-level
+    ``chat_template_kwargs`` (``nemo_rl/algorithms/utils.py:341-348``, locked
+    v0.6.0 runtime): rebind ``tokenizer.apply_chat_template`` with
+    ``functools.partial``. The stock ``get_formatted_message_log`` builds its
+    template kwargs internally and cannot forward extras, so the per-pair
+    value must ride the tokenizer attribute. Partial stacking resolves in our
+    favor: an outer partial's kwargs override an inner (config-level) one's,
+    and no stock call site passes ``enable_thinking`` itself — the value bound
+    here always wins. Because the binding is uniform across every incremental
+    per-turn render AND the one-shot render, Gate-1 parity (concatenated
+    per-message render == one-shot template render) is preserved per mode.
+
+    Restored on exit. Per-sample mutation of the tokenizer is safe here:
+    dataloader workers are processes (fork is enforced at dataset init) and
+    rendering is synchronous within a worker.
+    """
+    prior = tokenizer.__dict__.get("apply_chat_template")
+    tokenizer.apply_chat_template = partial(
+        tokenizer.apply_chat_template, enable_thinking=enable_thinking
+    )
+    try:
+        yield
+    finally:
+        if prior is None:
+            del tokenizer.apply_chat_template  # back to the plain class method
+        else:
+            tokenizer.apply_chat_template = prior
 
 
 @lru_cache(maxsize=8)
@@ -213,6 +266,9 @@ def omni_preference_preprocessor(
 ) -> PreferenceDatumSpec:
     """Render both preference sides live, then splice media blocks per field.
 
+    Both sides render under one per-pair ``enable_thinking`` keyed on the
+    chosen response's think markers (see the CONTRACT comment in the body).
+
     Mirrors the stock ``preference_preprocessor`` output contract exactly
     (``nemo_rl/data/processors.py``), including the overlength policy: a pair
     exceeding ``max_seq_length`` is loss-masked AND physically shrunk to the
@@ -227,22 +283,35 @@ def omni_preference_preprocessor(
         "idx": idx,
         "task_name": "omni_preference",
     }
-    for side in ("chosen", "rejected"):
-        messages = list(datum_dict["prompt"]) + [
-            {"role": "assistant", "content": datum_dict[side]}
-        ]
-        message_log = get_formatted_message_log(
-            messages, tokenizer, task_data_spec, add_bos_token=True, add_eos_token=True
-        )
-        # Per-field refs: prompt markers consume prompt_media_refs; the response
-        # message consumes only this side's refs (empty today — image-bearing
-        # completions work the day they exist). This also re-checks, in token
-        # space, that responses carry no accidental markers.
-        side_refs = list(datum_dict.get(f"{side}_media_refs") or [])
-        _splice_field(message_log[:-1], prompt_refs, media, image_marker_id)
-        _splice_field(message_log[-1:], side_refs, media, image_marker_id)
-        output[f"message_log_{side}"] = message_log
-        output[f"length_{side}"] = sum(len(m["token_ids"]) for m in message_log)
+    # CONTRACT (per-pair deliberation): ``enable_thinking`` is decided ONCE per
+    # pair, keyed on the CHOSEN response only, and conditions BOTH sides'
+    # renders — prompt conditioning stays identical across the pair, so the
+    # DPO logprob difference is attributable to the responses alone. A rejected
+    # response carrying think markers under ``Deliberation: disabled`` is
+    # intentional negative signal (thinking when not asked), not an error.
+    enable_thinking = has_think_markers(datum_dict["chosen"])
+    with _deliberation_bound(tokenizer, enable_thinking):
+        for side in ("chosen", "rejected"):
+            messages = list(datum_dict["prompt"]) + [
+                {"role": "assistant", "content": datum_dict[side]}
+            ]
+            message_log = get_formatted_message_log(
+                messages,
+                tokenizer,
+                task_data_spec,
+                add_bos_token=True,
+                add_eos_token=True,
+            )
+            # Per-field refs: prompt markers consume prompt_media_refs; the
+            # response message consumes only this side's refs (empty today —
+            # image-bearing completions work the day they exist). This also
+            # re-checks, in token space, that responses carry no accidental
+            # markers.
+            side_refs = list(datum_dict.get(f"{side}_media_refs") or [])
+            _splice_field(message_log[:-1], prompt_refs, media, image_marker_id)
+            _splice_field(message_log[-1:], side_refs, media, image_marker_id)
+            output[f"message_log_{side}"] = message_log
+            output[f"length_{side}"] = sum(len(m["token_ids"]) for m in message_log)
 
     if max(output["length_chosen"], output["length_rejected"]) > max_seq_length:
         for side in ("chosen", "rejected"):
