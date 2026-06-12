@@ -1161,8 +1161,6 @@ def online_dpo_train(
                             last_saved_step = total_steps
                     break
 
-                logger.log_metrics(rollout_metrics, total_steps + 1, prefix="train")
-
                 print("Computing reference policy logprobs...", flush=True)
                 with timer.time("logprob_inference_prep"):
                     policy.prepare_for_lp_inference()
