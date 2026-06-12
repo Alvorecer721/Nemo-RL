@@ -1159,7 +1159,6 @@ def online_dpo_train(
                                 timer=timer,
                             )
                             last_saved_step = total_steps
-                    timer.reset()
                     break
 
                 logger.log_metrics(rollout_metrics, total_steps + 1, prefix="train")
@@ -1322,6 +1321,10 @@ def online_dpo_train(
                 print("Max number of steps has been reached, stopping training early")
                 return
 
+        # Reached only via the exhaustion break above; reset here, outside the
+        # total_step_time context — Timer.time's exit calls stop(label), which
+        # raises if reset() already cleared the running start time.
+        timer.reset()
         current_epoch += 1
         current_step = 0
         current_prompt_batch = 0
