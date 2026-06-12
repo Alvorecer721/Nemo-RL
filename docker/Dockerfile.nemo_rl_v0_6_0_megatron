@@ -43,4 +43,9 @@ COPY 3rdparty/kernels/xielu /opt/xielu-src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --no-build-isolation /opt/xielu-src
 
-RUN python -c "import transformer_engine.pytorch as te; import modelopt; from modelopt.torch.opt.plugins import restore_modelopt_state; import xielu, torch; assert hasattr(torch.ops.xielu, 'xielu'); print('TE', te.__file__); print('ModelOpt', modelopt.__file__); print('xielu CUDA', xielu.__file__)"
+# Backport: raw Megatron checkpoint loading (upstream d9efd04, post-v0.6.0).
+# One auditable patch onto the image's own NeMo-RL; delete at the next bump.
+COPY docker/patches/0001-pretrained-checkpoint-backport.patch /tmp/mlm-restore.patch
+RUN cd /opt/nemo-rl && git apply --check /tmp/mlm-restore.patch     && git apply /tmp/mlm-restore.patch && rm /tmp/mlm-restore.patch
+
+RUN python -c "import transformer_engine.pytorch as te; import modelopt; from modelopt.torch.opt.plugins import restore_modelopt_state; import xielu, torch; assert hasattr(torch.ops.xielu, 'xielu'); print('TE', te.__file__); print('ModelOpt', modelopt.__file__); print('xielu CUDA', xielu.__file__); import nemo_rl.utils.checkpoint as c; assert hasattr(c.CheckpointManager, 'get_resume_paths'), 'backport missing'"
