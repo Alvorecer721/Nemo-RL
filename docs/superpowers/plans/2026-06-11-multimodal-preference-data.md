@@ -1,4 +1,15 @@
-# Multimodal Preference Data (views+media) Implementation Plan — FINAL (post 4-reviewer verification)
+# Multimodal Preference Data (views+media) Implementation Plan — EXECUTED 2026-06-12
+
+> **STATUS: COMPLETE.** All parts landed and gated. Mode CLI name: `posttraining`
+> (not `alignment` — internal module names keep `alignment`). Output roots are
+> task-keyed: `vision-datasets/tokenized/preference/<name>`, `tokenized/rl/<name>`.
+> Producer was subsequently UNIFIED into the one executor path (runner dissolved).
+> Multimodal probe fingerprint (ckpt 4200, seed 42, gbs 8, seq 16384):
+> step-1 loss 2.2859 / sft 159.2725 / pref 0.6931 (ln 2). RUNBOOK CORRECTIONS:
+> (1) consumer PYTHONPATH must be `<repo>/infra/pythonpath` (NEVER the repo root —
+> the repo's newer nemo_rl shadows the locked /opt runtime); pytest needs
+> `--import-mode=importlib`. (2) One uv-venv writer at a time — concurrent
+> `uv run` invocations mutate /opt/nemo_rl_venv and SIGBUS running workers.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

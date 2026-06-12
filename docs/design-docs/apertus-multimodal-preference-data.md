@@ -1,7 +1,14 @@
 # Apertus Multimodal Preference Data: Pretokenization Format and Pipeline Design
 
-**Status**: Draft v2 (post adversarial review) · 2026-06-11
-**Scope**: storage format + producer (`vision_tokenization` `preference` mode, new) + consumer (NeMo-RL adapter, new) for DPO/RL preference data, text-only today and multi-image later (audio reserved).
+**Status**: IMPLEMENTED & PROVEN · 2026-06-12 — producer = `posttraining` mode
+(CLI name; internal modules keep `alignment` naming) unified into the one
+executor path; consumer = `nemo_rl_apertus` adapter. End-to-end probe green:
+step-1 preference_loss = ln 2 exact on spliced image-text sequences at seq
+16384, 8/8 valid. Canonical store: vision-datasets/tokenized/preference/mllm_dpo
+(task-keyed roots: tokenized/preference/, tokenized/rl/). All gates green:
+Gate 1 parity, Gate 2 64/64, source audit 5,182/5,182, C2.0 64/64, suites
+433+19, regression canary (resume/spill/merge) clean.
+**Scope**: storage format + producer (`vision_tokenization` `posttraining` mode, new) + consumer (NeMo-RL adapter, new) for DPO/RL preference data, text-only today and multi-image later (audio reserved).
 
 ## Assumptions
 
@@ -22,7 +29,7 @@
 - The existing text-only `MaxMin_…-binpref` arrow dataset remains valid for the
   text-only era but is NOT this format; new multimodal sets use only the layout
   below. No shims between the two.
-- `preference` mode does not exist yet; this design specifies it. No attempt is
+- The mode (CLI: `posttraining`, task-keyed) is implemented per this design. No attempt is
   made to read `sft`-mode `.bin/.idx` output for RL.
 - Audio is **permanently out of scope** (user decision 2026-06-12): audio data
   prep lives in the separate audio pipeline (`benchmark-audio-tokenizer`). This
