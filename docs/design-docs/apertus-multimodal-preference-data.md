@@ -62,6 +62,12 @@
                            #   media_roots: ["media/"]  (union-indexed; duplicate
                            #     media_id across roots is an error)
                            #   files: {relpath: byte_size}  (existence+size check)
+                           #   token_layout: {image_marker, image_marker_id,
+                           #     img_start, img_end, img_token_start, eol, eof,
+                           #     vision_lo, vision_hi} — derived from the live
+                           #     tokenizer at BUILD; consumers/gates read these,
+                           #     never hardcode ids (user decision 2026-06-12);
+                           #     cross-check convert_tokens_to_ids(marker) at init
   media/                   # log-structured: immutable sealed triples
     media.000000.parquet   #   media_id (sha256 hex), shard, offset_elems,
                            #   length_elems, resize_h, resize_w, kind ("image"), source,
