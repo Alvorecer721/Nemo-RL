@@ -24,9 +24,10 @@
   below. No shims between the two.
 - `preference` mode does not exist yet; this design specifies it. No attempt is
   made to read `sft`-mode `.bin/.idx` output for RL.
-- Audio (`kind=audio`) is **reserved, not designed**: block structure, marker id,
-  and dim semantics for wavtok are a follow-up section; producers MUST NOT write
-  `kind=audio` rows until it is specified. Fail loud.
+- Audio is **permanently out of scope** (user decision 2026-06-12): audio data
+  prep lives in the separate audio pipeline (`benchmark-audio-tokenizer`). This
+  format defines `kind="image"` only; producers MUST NOT write any other kind.
+  Fail loud.
 
 ## Decision summary (the four invariants)
 
@@ -63,7 +64,7 @@
                            #   files: {relpath: byte_size}  (existence+size check)
   media/                   # log-structured: immutable sealed triples
     media.000000.parquet   #   media_id (sha256 hex), shard, offset_elems,
-                           #   length_elems, resize_h, resize_w, kind, source,
+                           #   length_elems, resize_h, resize_w, kind ("image"), source,
                            #   raw_offset_bytes, raw_length_bytes, raw_ext
     tokens.000000.bin      #   raw <i4, concatenated encapsulated blocks
     raw.000000.bin         #   original image file bytes, as-is (jpeg/png/...),
