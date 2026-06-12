@@ -23,6 +23,13 @@ ARG NVTE_BUILD_THREADS_PER_JOB=1
 ENV MAX_JOBS=${MAX_JOBS}
 ENV NVTE_BUILD_THREADS_PER_JOB=${NVTE_BUILD_THREADS_PER_JOB}
 
+# Tokenizer cold-load fix: tokenizers 0.22.1 (as shipped) loads our 135k-added-
+# token tokenizer in 204s; 0.22.2 (hf tokenizers#1635, fixed by #1891) in 3.3s,
+# byte-identical tokenization. Within transformers 5.3.0's pin. Lock-level so
+# `uv run --locked` cannot revert it. Drop when the upstream lock reaches >=0.22.2.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv lock --upgrade-package tokenizers==0.22.2
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --inexact --extra mcore --extra modelopt --no-install-project
 
@@ -48,4 +55,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY docker/patches/0001-pretrained-checkpoint-backport.patch /tmp/mlm-restore.patch
 RUN cd /opt/nemo-rl && git apply --check /tmp/mlm-restore.patch     && git apply /tmp/mlm-restore.patch && rm /tmp/mlm-restore.patch
 
-RUN python -c "import transformer_engine.pytorch as te; import modelopt; from modelopt.torch.opt.plugins import restore_modelopt_state; import xielu, torch; assert hasattr(torch.ops.xielu, 'xielu'); print('TE', te.__file__); print('ModelOpt', modelopt.__file__); print('xielu CUDA', xielu.__file__); import nemo_rl.utils.checkpoint as c; assert hasattr(c.CheckpointManager, 'get_resume_paths'), 'backport missing'"
+RUN python -c "import transformer_engine.pytorch as te; import modelopt; from modelopt.torch.opt.plugins import restore_modelopt_state; import xielu, torch; assert hasattr(torch.ops.xielu, 'xielu'); print('TE', te.__file__); print('ModelOpt', modelopt.__file__); print('xielu CUDA', xielu.__file__); import nemo_rl.utils.checkpoint as c; assert hasattr(c.CheckpointManager, 'get_resume_paths'), 'backport missing'; import tokenizers; assert tokenizers.__version__ >= '0.22.2', f'slow tokenizer load: {tokenizers.__version__}'"

@@ -23,6 +23,14 @@ docker buildx build \
   --push .
 ```
 
+The overlay also re-locks `tokenizers` to 0.22.2: the shipped 0.22.1 loads our
+135k-added-token tokenizer in 204 s per fresh process (hf tokenizers#1635;
+fixed by #1891), 0.22.2 loads it in 3.3 s with byte-identical tokenization
+(verified in swiss-ai/apertus-omni-tokenizer#1). The pin lives in `uv.lock` so
+`uv run --locked` cannot revert it; drop the `uv lock --upgrade-package` step
+when a future base image ships tokenizers >= 0.22.2 (the build assert keeps
+honesty either way).
+
 Then distribute via the shared containers dir (preferred — no registry auth
 for consumers): `enroot import -o nemo-rl-v0.6.0-apertus-mcore-gh200.sqsh
 docker://<tag>` and move the .sqsh to
