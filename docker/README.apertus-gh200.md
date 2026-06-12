@@ -55,3 +55,20 @@ Gates (run them in the real env via `uv run --locked --extra mcore python ...`):
 `${VAR:-default}`-overridable at submission. The default tokenizer
 (`apertus_emu3.5_wavtok_instruct_thinking_token_fixed`) is the data-prep
 variant — do not use it for GRPO rollouts or eval, see its NOTES.md.
+
+## Raw Megatron checkpoint loading (backport branch)
+
+`yxu/v0.6.0-mlm-restore` = the v0.6.0 tag + upstream `d9efd04`
+(`checkpointing.pretrained_checkpoint`, landed post-release). It keeps
+v0.6.0's `uv.lock`, so it runs in the stock v0.6.0 container unchanged.
+
+```sh
+git clone --recurse-submodules -b yxu/v0.6.0-mlm-restore <this repo> nemo-rl-mlm
+cd nemo-rl-mlm && uv run --locked examples/run_dpo.py --config <recipe> \
+  '+checkpointing.pretrained_checkpoint.path=<.../checkpoints/iter_0004200>' \
+  '+checkpointing.pretrained_checkpoint.format=megatron_lm'
+```
+
+Validated: loads raw iter_0004200 with a step-1 fingerprint identical to the
+certified HF conversion. Delete this branch at the next NeMo-RL version bump
+(the feature is native upstream from May 2026).
