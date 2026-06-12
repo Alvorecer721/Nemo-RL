@@ -1099,6 +1099,32 @@ def _extract_prompt_only_messages(message_logs: list) -> list:
     return prompt_only_message_logs
 
 
+def _debug_refit_selfdiff_dump(policy_generation, tag: str) -> None:
+    """DEBUG (refit self-diff): dump vLLM engine weight fingerprints.
+
+    Active only when NRL_DEBUG_REFIT_SELFDIFF_DIR is set. Dumps go to
+    {NRL_DEBUG_REFIT_SELFDIFF_DIR}/{tag}.{device_uuid}.pt via the
+    debug_dump_weights RPC chain (VllmGenerationWorker ->
+    VllmInternalWorkerExtension).
+    """
+    debug_dir = os.getenv("NRL_DEBUG_REFIT_SELFDIFF_DIR")
+    if not debug_dir:
+        return
+    if not hasattr(policy_generation, "worker_group"):
+        print(
+            "[refit-selfdiff] policy_generation has no worker_group; skipping dump",
+            flush=True,
+        )
+        return
+    futures = policy_generation.worker_group.run_all_workers_single_data(
+        "debug_dump_weights",
+        path=os.path.join(debug_dir, tag),
+        run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
+    )
+    paths = ray.get(futures)
+    print(f"[refit-selfdiff] dumped {tag}: {paths}", flush=True)
+
+
 def refit_policy_generation(
     policy: ColocatablePolicyInterface,
     policy_generation: GenerationInterface,
@@ -1121,6 +1147,10 @@ def refit_policy_generation(
     if colocated_inference:
         policy.offload_before_refit()
         policy_generation.prepare_for_generation(tags=["weights"])
+
+    # DEBUG (refit self-diff): PRE dump — engine state after disk-load/wake,
+    # before any refit bytes arrive. No-op unless env var is set.
+    _debug_refit_selfdiff_dump(policy_generation, "pre")
 
     # Create a context manager that does nothing when timer is None
     timer_context = (
@@ -1190,6 +1220,19 @@ def refit_policy_generation(
                 "a problem within the generation backend (e.g., vLLM worker).\n"
             )
             raise RuntimeError(error_message)
+
+    # DEBUG (refit self-diff): POST dump — engine state after the refit wrote
+    # weights (incl. the trailing process_weights_after_loading). No-op unless
+    # env var is set; optional hard exit to skip rollout/training entirely.
+    _debug_refit_selfdiff_dump(policy_generation, "post")
+    if os.getenv("NRL_DEBUG_REFIT_SELFDIFF_EXIT") == "1":
+        print(
+            "[refit-selfdiff] post dump complete; exiting before rollout as requested",
+            flush=True,
+        )
+        import sys
+
+        sys.exit(0)
 
     if colocated_inference:
         policy.offload_after_refit()

@@ -344,6 +344,59 @@ class VllmInternalWorkerExtension:
 
         return True
 
+    def debug_dump_weights(self, path: str) -> str:
+        """DEBUG (refit self-diff): fingerprint every model param/buffer.
+
+        Writes a torch.save'd dict to f"{path}.{device_uuid}.pt":
+          - "meta": {name: (shape, dtype_str, sha256_of_raw_bytes)} for ALL
+            named_parameters and named_buffers of the engine's model.
+          - "full": full CPU copies of layer-0/1 tensors plus
+            embed_tokens/lm_head row slices [0:1024] for pattern analysis.
+
+        Names of buffers are prefixed with "BUFFER:" to keep the two
+        namespaces distinct in the diff.
+        """
+        import hashlib
+        import os as _os
+
+        model = self.model_runner.model
+        meta: dict[str, tuple] = {}
+        full: dict[str, torch.Tensor] = {}
+
+        def _fingerprint(name: str, t: torch.Tensor) -> None:
+            t = t.detach()
+            raw = (
+                t.reshape(-1)
+                .contiguous()
+                .view(torch.uint8)
+                .cpu()
+                .numpy()
+                .tobytes()
+            )
+            meta[name] = (
+                tuple(t.shape),
+                str(t.dtype),
+                hashlib.sha256(raw).hexdigest(),
+            )
+
+        def _maybe_full(name: str, t: torch.Tensor) -> None:
+            if ".layers.0." in name or ".layers.1." in name:
+                full[name] = t.detach().to("cpu", copy=True)
+            elif "embed_tokens.weight" in name or "lm_head.weight" in name:
+                full[name + "[:1024]"] = t.detach()[:1024].to("cpu", copy=True)
+
+        for name, p in sorted(model.named_parameters()):
+            _fingerprint(name, p)
+            _maybe_full(name, p)
+        for name, b in sorted(model.named_buffers()):
+            _fingerprint("BUFFER:" + name, b)
+            _maybe_full("BUFFER:" + name, b)
+
+        out = f"{path}.{self.report_device_id()}.pt"
+        _os.makedirs(_os.path.dirname(out), exist_ok=True)
+        torch.save({"meta": meta, "full": full}, out)
+        return out
+
     def cleanup(self) -> None:
         """Shutdown and cleanup resources."""
         # Close ZMQ socket and context if they exist

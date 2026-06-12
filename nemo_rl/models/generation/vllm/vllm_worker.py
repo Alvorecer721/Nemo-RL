@@ -905,6 +905,18 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
         """Prepare the info for refit."""
         self.llm.collective_rpc("prepare_refit_info", args=(state_dict_info,))
 
+    def debug_dump_weights(self, path: str) -> list[str]:
+        """DEBUG (refit self-diff): dump engine weight fingerprints.
+
+        See VllmInternalWorkerExtension.debug_dump_weights for the format.
+        """
+        assert self.llm is not None, (
+            "Attempting to dump weights with an uninitialized vLLM"
+        )
+        return cast(
+            list[str], self.llm.collective_rpc("debug_dump_weights", args=(path,))
+        )
+
     @wrap_with_nvtx_name("vllm_genertion_worker/update_weights_via_ipc_zmq")
     def update_weights_via_ipc_zmq(self) -> bool:
         """Update weights from IPC handles via ZMQ socket."""
