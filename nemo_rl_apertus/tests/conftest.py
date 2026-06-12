@@ -29,6 +29,7 @@ session (session scope) and only when a test requests it, so format/manifest
 tests stay fast.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -51,3 +52,26 @@ def tokenizer():
     from transformers import AutoTokenizer
 
     return AutoTokenizer.from_pretrained(TOKENIZER_PATH)
+
+
+_exit_status = 0
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    global _exit_status
+    _exit_status = int(exitstatus)
+
+
+def pytest_unconfigure(config):
+    """Bypass CPython finalization, which segfaults after green runs here.
+
+    With the ~136k-added-token tokenizer plus the torch/decord native stack
+    loaded, interpreter teardown crashes (exit 139) AFTER the full summary has
+    been printed, turning green suites red. All reporting is done by the time
+    unconfigure runs; exit with pytest's real status instead of risking the
+    native teardown.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_exit_status)
