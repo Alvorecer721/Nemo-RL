@@ -46,10 +46,15 @@ Gate 1 parity, Gate 2 64/64, source audit 5,182/5,182, C2.0 64/64, suites
    not inconvenience). Tokenizer/codebook version is **store-generation** state
    pinned in `manifest.json`, NOT part of the id — a codebook upgrade produces a
    new media store with identical media_ids and leaves `views/` untouched.
-3. **Blocks are canonical per store**: `preference` mode encodes each unique
-   image at its **exact `smart_resize` dims** (no spillover/cluster-mean dims —
-   that path is a pretrain-throughput optimization; at preference scale, exact
-   dims keep `media_id → block` a pure function within a store).
+3. **Blocks are canonical per store generation**: dedup ⇒ one encode per
+   `media_id`; deterministic plan ⇒ the same input set reproduces a
+   bit-identical store. `posttraining` uses the **standard planner including
+   spillover cluster-packing** (user decision 2026-06-12: less complexity,
+   better GPU occupancy — the earlier exact-dims policy rested on a refuted
+   spillover-waste measurement). Named costs: a changed input set may re-dim
+   unchanged images (regeneration is all-or-nothing), and cross-store
+   bit-identity of shared images is not guaranteed (the union reader already
+   errors on duplicate media_ids).
 4. **Fail loudly on provenance.** `manifest.json` is the commit record (below);
    the consumer refuses mismatched tokenizer sha / vision-tokenizer version /
    unknown dtype, and treats a manifest-less directory as unpublished garbage.
@@ -171,7 +176,7 @@ Reuse map (corrected post-review):
 | `_SUCCESS` / shard recovery / `finalize_shard_writer` atomic-publish idiom | reuse |
 | chat-template render of text (incl. its marker validator) | **dropped** — text stays raw |
 | content-hash dedup | **new, at scan/manifest stage** — the plan layer never reads source bytes (header-only scan), so hashing means a full-byte read pass at scan time; cheap fallback: dedup by manifest physical coordinates (same stored row ⇒ same image) with byte-hash as the canonical id |
-| unique-media plan | **new shape**: the plan iterates the *deduped media inventory* (one planned unit per media_id, exact smart_resize dims), not preference documents — downstream rebuild assumes every planned component is encoded, so dedup cannot be an encode-time skip |
+| unique-media plan | **new shape**: the plan iterates the *deduped media inventory* (one planned unit per media_id; batching via the standard shared planner incl. spillover), not preference documents — downstream rebuild assumes every planned component is encoded, so dedup cannot be an encode-time skip |
 | media store + view writer | **new** (the spill writer's schema/keying is hard-coded to `(document_id, component_index)`; what is reused is the idiom, not the class) |
 | raw-text marker validator (count vs refs, accidental-marker rejection) | new |
 

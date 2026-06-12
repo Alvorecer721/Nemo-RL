@@ -41,7 +41,7 @@ policy:
   tokenizer:
     name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed.snapshot-20260611
   train_global_batch_size: 128
-  train_micro_batch_size: 2
+  train_micro_batch_size: 1
   max_total_sequence_length: 4096
   max_grad_norm: 20.0
   make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
