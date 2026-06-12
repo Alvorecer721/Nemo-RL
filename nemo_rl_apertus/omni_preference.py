@@ -23,7 +23,7 @@ never re-tokenizes, so this module can splice pretokenized image blocks into
 the rendered text without touching any upstream file.
 
 Data flow per sample: the stock ``get_formatted_message_log`` templates and
-tokenizes the text live; each ``<|image|>`` marker (id ``IMAGE_TOKEN_ID``) is
+tokenizes the text live; each ``<|image|>`` marker (id from the manifest token_layout) is
 then replaced by the next pretokenized block from that *field's* media refs
 (``prompt_media_refs`` for prompt messages, ``{side}_media_refs`` for the
 response message — the chosen sequence must never consume rejected's refs).
@@ -69,9 +69,8 @@ from nemo_rl.data.interfaces import (
 from nemo_rl.data.llm_message_utils import get_formatted_message_log
 from nemo_rl_apertus.media_store import MediaStoreReader
 
-# The literal "<|image|>" marker in view text encodes to exactly this id with
-# the pinned tokenizer snapshot (atomicity re-verified every run by Gate 1).
-IMAGE_TOKEN_ID = 131079
+# No hardcoded token ids: the marker string and its id come from the store
+# manifest's token_layout, derived from the tokenizer at build time.
 
 
 class OmniPreferenceDataset:
@@ -136,6 +135,14 @@ class OmniPreferenceDataset:
                     f"{manifest['tokenizer']['sha256']}, runtime tokenizer at "
                     f"{tokenizer_path} hashes to {sha}"
                 )
+        layout = manifest.get("token_layout")
+        if layout is None:
+            raise ValueError(
+                f"{root}: manifest has no token_layout — stores must record "
+                "their token conventions; regenerate with a current producer"
+            )
+        self.image_marker: str = layout["image_marker"]
+        self.image_marker_id: int = int(layout["image_marker_id"])
         self.manifest = manifest
         self.media = MediaStoreReader(
             [root / r for r in manifest["media_roots"]],
@@ -154,12 +161,15 @@ class OmniPreferenceDataset:
 
 
 def _splice_field(
-    messages: LLMMessageLogType, refs: list[str], media: MediaStoreReader
+    messages: LLMMessageLogType,
+    refs: list[str],
+    media: MediaStoreReader,
+    marker_id: int,
 ) -> None:
-    """Replace each IMAGE_TOKEN_ID in one view field's messages with its blocks.
+    """Replace each marker id in one view field's messages with its blocks.
 
     ``refs`` are the field's media_ids in marker order. Enforces the spec
-    marker contract at field granularity: id-131079 count == len(refs), hard
+    marker contract at field granularity: marker count == len(refs), hard
     error on mismatch. Mutates ``token_ids`` in place; blocks become owned
     int64 tensors (``torch.tensor`` copies out of the arena/memmap).
     """
@@ -167,7 +177,7 @@ def _splice_field(
     n_spliced = 0
     for msg in messages:
         ids = msg["token_ids"]
-        positions = (ids == IMAGE_TOKEN_ID).nonzero(as_tuple=True)[0].tolist()
+        positions = (ids == marker_id).nonzero(as_tuple=True)[0].tolist()
         if not positions:
             continue
         pieces, prev = [], 0
@@ -195,6 +205,7 @@ def omni_preference_preprocessor(
     idx: int,
     *,
     media: MediaStoreReader,
+    image_marker_id: int,
 ) -> PreferenceDatumSpec:
     """Render both preference sides live, then splice media blocks per field.
 
@@ -224,8 +235,8 @@ def omni_preference_preprocessor(
         # completions work the day they exist). This also re-checks, in token
         # space, that responses carry no accidental markers.
         side_refs = list(datum_dict.get(f"{side}_media_refs") or [])
-        _splice_field(message_log[:-1], prompt_refs, media)
-        _splice_field(message_log[-1:], side_refs, media)
+        _splice_field(message_log[:-1], prompt_refs, media, image_marker_id)
+        _splice_field(message_log[-1:], side_refs, media, image_marker_id)
         output[f"message_log_{side}"] = message_log
         output[f"length_{side}"] = sum(len(m["token_ids"]) for m in message_log)
 
@@ -264,7 +275,11 @@ def build_processed_datasets(
             ds,
             tokenizer,
             ds.task_spec,
-            partial(omni_preference_preprocessor, media=ds.media),
+            partial(
+                omni_preference_preprocessor,
+                media=ds.media,
+                image_marker_id=ds.image_marker_id,
+            ),
             max_seq_length=max_seq_length,
         )
 

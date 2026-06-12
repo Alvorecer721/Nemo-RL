@@ -134,6 +134,11 @@ def build_toy_dataset(root: Path, tokenizer_sha: str = "") -> dict[str, Any]:
         "tokenizer": {"path": "", "sha256": tokenizer_sha},
         "vision_tokenizer": {"version": "toy"},
         "token_dtype": "<i4",
+        "token_layout": {
+            "image_marker": "<|image|>", "image_marker_id": 131079,
+            "img_start": 131073, "img_end": 131074, "img_token_start": 131075,
+            "eol": 131076, "eof": 131077, "vision_lo": 131272, "vision_hi": 262343,
+        },
         "expected_min_model_vocab": 266440,
         "media_roots": ["media/"],
         "store_raw": True,

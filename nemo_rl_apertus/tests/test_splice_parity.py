@@ -30,7 +30,6 @@ import torch
 
 from nemo_rl.data.llm_message_utils import get_formatted_message_log
 from nemo_rl_apertus.omni_preference import (
-    IMAGE_TOKEN_ID,
     OmniPreferenceDataset,
     omni_preference_preprocessor,
 )
@@ -41,7 +40,8 @@ def test_gate1_splice_parity(tokenizer, tmp_path):
     meta = build_toy_dataset(tmp_path / "ds")
     ds = OmniPreferenceDataset(tmp_path / "ds", split="train")
     datum = omni_preference_preprocessor(
-        ds[1], ds.task_spec, tokenizer, 8192, 1, media=ds.media
+        ds[1], ds.task_spec, tokenizer, 8192, 1,
+        media=ds.media, image_marker_id=ds.image_marker_id
     )
     got = torch.cat([m["token_ids"] for m in datum["message_log_chosen"]])
 
@@ -54,7 +54,7 @@ def test_gate1_splice_parity(tokenizer, tmp_path):
         tokenizer.apply_chat_template(messages, tokenize=False),
         add_special_tokens=False,
     ).input_ids
-    assert list(one_shot_ids).count(IMAGE_TOKEN_ID) == 2
+    assert list(one_shot_ids).count(ds.image_marker_id) == 2
 
     # Reference render (same stock path the adapter uses).
     ref_log = get_formatted_message_log(
@@ -77,7 +77,7 @@ def test_gate1_splice_parity(tokenizer, tmp_path):
     blocks = iter([meta["blocks"]["img1"], meta["blocks"]["img2"]])
     expected = []
     for token in ref_flat:
-        if token == IMAGE_TOKEN_ID:
+        if token == ds.image_marker_id:
             expected.extend(next(blocks))
         else:
             expected.append(token)

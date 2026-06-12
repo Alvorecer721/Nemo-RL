@@ -87,6 +87,12 @@ def main():
     vocab = AutoConfig.from_pretrained(config["policy"]["model_name"]).vocab_size
     need = dataset.dataset.manifest["expected_min_model_vocab"]
     assert vocab >= need, f"model vocab {vocab} < required {need}"
+    # Runtime tokenizer must agree with the store's recorded marker id.
+    ds = dataset.dataset
+    got = tokenizer.convert_tokens_to_ids(ds.image_marker)
+    assert got == ds.image_marker_id, (
+        f"marker id mismatch: tokenizer says {got}, store recorded {ds.image_marker_id}"
+    )
     # stock key — keeps the 'validation-default_loss' metric and
     # checkpointing.metric_name working
     val_dataset = {"default": val_dataset}

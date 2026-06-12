@@ -24,7 +24,6 @@ import pytest
 import torch
 
 from nemo_rl_apertus.omni_preference import (
-    IMAGE_TOKEN_ID,
     OmniPreferenceDataset,
     build_processed_datasets,
     omni_preference_preprocessor,
@@ -119,7 +118,8 @@ def toy(tmp_path):
 
 def _process(ds, tokenizer, i, max_seq_length=4096):
     return omni_preference_preprocessor(
-        ds[i], ds.task_spec, tokenizer, max_seq_length, i, media=ds.media
+        ds[i], ds.task_spec, tokenizer, max_seq_length, i,
+        media=ds.media, image_marker_id=ds.image_marker_id
     )
 
 
@@ -135,7 +135,7 @@ def test_splice_replaces_marker_with_block(tokenizer, toy):
     ds = _make_dataset(root)
     datum = _process(ds, tokenizer, 0)
     flat = torch.cat([m["token_ids"] for m in datum["message_log_chosen"]])
-    assert int((flat == IMAGE_TOKEN_ID).sum()) == 0  # marker consumed
+    assert int((flat == ds.image_marker_id).sum()) == 0  # marker consumed
     assert flat.dtype == torch.int64
     # block appears contiguously in the chosen sequence
     assert _contains_contiguous(flat.tolist(), meta["blocks"]["img0"])
@@ -186,7 +186,8 @@ def test_marker_ref_count_mismatch_raises(tokenizer, toy):
     datum_dict["prompt_media_refs"] = [meta["ids"]["img0"], meta["ids"]["img1"]]
     with pytest.raises(ValueError, match="marker"):
         omni_preference_preprocessor(
-            datum_dict, ds.task_spec, tokenizer, 4096, 0, media=ds.media
+            datum_dict, ds.task_spec, tokenizer, 4096, 0,
+            media=ds.media, image_marker_id=ds.image_marker_id
         )
 
 
