@@ -75,9 +75,9 @@ def main() -> None:
     save_file(state, str(out / "model.safetensors"), metadata={"format": "pt"})
 
     tok_src = Path(args.tokenizer) if args.tokenizer else Path(args.hf_base)
-    for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+    for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
                  "generation_config.json", "chat_template.jinja"):
-        src = tok_src / name
+        src = (Path(args.hf_base) if name == "config.json" else tok_src) / name
         if src.exists():
             shutil.copy2(src, out / name)
     print(f"exported -> {out}")
