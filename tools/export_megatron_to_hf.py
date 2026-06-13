@@ -33,6 +33,7 @@ def main() -> None:
     out = Path(args.out)
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"refusing to overwrite non-empty {out}")
+    out.mkdir(parents=True, exist_ok=True)
 
     import torch
 
