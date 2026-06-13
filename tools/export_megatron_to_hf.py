@@ -77,7 +77,7 @@ def main() -> None:
     tok_src = Path(args.tokenizer) if args.tokenizer else Path(args.hf_base)
     for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
                  "generation_config.json", "chat_template.jinja"):
-        src = (Path(args.hf_base) if name == "config.json" else tok_src) / name
+        src = (Path(args.hf_base) if name in ("config.json", "generation_config.json") else tok_src) / name
         if src.exists():
             shutil.copy2(src, out / name)
     print(f"exported -> {out}")
