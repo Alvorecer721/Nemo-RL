@@ -34,6 +34,17 @@ def main() -> None:
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"refusing to overwrite non-empty {out}")
 
+    import torch
+
+    # load_megatron_model requires initialized distributed + parallel state
+    # even single-process (TP1/PP1); torch-dist re-shards any source geometry.
+    torch.distributed.init_process_group("nccl", world_size=1, rank=0)
+    from megatron.core import parallel_state
+    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+
+    parallel_state.initialize_model_parallel(1, 1)
+    model_parallel_cuda_manual_seed(42)
+
     from megatron.bridge import AutoBridge
 
     bridge = AutoBridge.from_hf_pretrained(args.hf_base, trust_remote_code=True)
