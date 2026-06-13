@@ -49,7 +49,29 @@ def main() -> None:
 
     bridge = AutoBridge.from_hf_pretrained(args.hf_base, trust_remote_code=True)
     models = bridge.load_megatron_model(args.megatron_ckpt, wrap_with_ddp=False)
-    bridge.save_hf_pretrained(models, str(out), show_progress=True)
+
+    # The bridge exports trainable parameters only; non-trainable buffers
+    # (Apertus xIELU beta/eps) come from the base checkpoint — the same
+    # constants-from-disk rule as the vLLM refit fix. save_hf_pretrained's
+    # shard writer refuses incomplete shards, so we assemble and write the
+    # full 451-tensor state dict ourselves as a single safetensors file.
+    import json
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    state = {name: t.detach().to("cpu", torch.bfloat16).contiguous()
+             for name, t in bridge.export_hf_weights(models, show_progress=True)}
+    base = Path(args.hf_base)
+    index = json.load(open(base / "model.safetensors.index.json"))["weight_map"]
+    missing = [k for k in index if k not in state]
+    for name in missing:
+        with safe_open(base / index[name], framework="pt") as f:
+            state[name] = f.get_tensor(name)
+    extra = [k for k in state if k not in index]
+    assert not extra, f"exported keys absent from base index: {extra[:5]}"
+    assert set(state) == set(index), "tensor set mismatch vs base checkpoint"
+    print(f"exported {len(state) - len(missing)} params + {len(missing)} buffers from base")
+    save_file(state, str(out / "model.safetensors"), metadata={"format": "pt"})
 
     tok_src = Path(args.tokenizer) if args.tokenizer else Path(args.hf_base)
     for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
