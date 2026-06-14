@@ -128,6 +128,13 @@ Learn how to add support for new model architectures in NeMo RL.
 Extend a model's context window with YaRN RoPE scaling on the Megatron backend for SFT, GRPO, and other workflows.
 :::
 
+:::{grid-item-card} {octicon}`rocket` Apertus 1.5 8B (CSCS GH200)
+:link: apertus-quickstart
+:link-type: doc
+
+Clone-and-run online GRPO for Apertus 1.5 8B on a CSCS GH200 node: setup, the validated smoke, and the colocation memory knobs.
+:::
+
 ::::
 
 ## Advanced Topics
@@ -238,6 +245,14 @@ guides/yarn-long-context.md
 guides/muon-optimizer.md
 guides/dtensor-tp-accuracy.md
 guides/ft-launcher-guide.md
+```
+
+```{toctree}
+:caption: Apertus
+:hidden:
+
+apertus-quickstart.md
+apertus-traps-and-invariants.md
 ```
 
 ```{toctree}

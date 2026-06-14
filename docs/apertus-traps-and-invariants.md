@@ -4,6 +4,8 @@ Hard-won knowledge from bringing Apertus 1.5 up on NeMo-RL (2026-06-12/13).
 Every entry names a *class* of failure, not just the instance we hit — the pattern is always the same: **two stacks agreeing by coincidence instead of by contract**.
 When you add a model variant or bump a dependency, re-read this page.
 
+> New here? Start with the [Apertus quickstart](apertus-quickstart.md) to clone-and-run; this page is the deeper gotchas behind the gates.
+
 ## 1. vLLM dummy-load orphans non-trainable state  ⚠ fixed, stays fixable
 
 NeMo-RL forces `load_format="dummy"` for training-mode vLLM engines (`nemo_rl/models/generation/__init__.py`) — engines start as noise and rely on refit to deliver real weights.
