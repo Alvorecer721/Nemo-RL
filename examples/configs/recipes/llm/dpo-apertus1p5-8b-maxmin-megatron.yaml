@@ -1,0 +1,76 @@
+# Apertus-1.5 8B DPO on MaxMin_Tr_3600-Filtered-Decontaminated (full set).
+# Hyperparameters IDENTICAL to swiss-ai/posttraining reference (generate_submit.py
+# + trainers/preference.py + train-preference.yaml defaults, apertus-1.5-alignment):
+#   loss: dpo, beta 25 length-normalized (== preference_average_log_probs), lr 1e-6,
+#   adamw (0.9/0.999/1e-8, wd 0), warmup_ratio 0.1, linear decay to 0, clip 20,
+#   gbs 128, 1 epoch, seed 5315, bf16, full train set, no holdout.
+# Known non-identical (cross-framework, unavoidable): data order (different
+# samplers), numerics (ZeRO-2+FA2 vs Megatron TP+TE). Monitoring val (1,024-row
+# subset of train) is additive observation; reference ran eval_strategy=no.
+defaults: ../../dpo.yaml
+dpo:
+  max_num_epochs: 1
+  max_num_steps: 100000
+  seed: 5315
+  val_period: 200
+  val_batches: 8
+  val_global_batch_size: 128
+  val_at_start: false
+  sft_loss_weight: 0.0
+  preference_loss_weight: 1.0
+  reference_policy_kl_penalty: 25.0
+  preference_average_log_probs: true
+checkpointing:
+  enabled: true
+  checkpoint_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/results/dpo-apertus1p5-8b-maxmin
+  save_period: 150
+  keep_top_k: 5
+data:
+  max_input_seq_length: 4096
+  dataset_name: BinaryPreferenceDataset
+  train:
+    dataset_name: BinaryPreferenceDataset
+    data_path: /capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-FD-nemo-rl-binpref-full/train.parquet
+    split: train
+  validation:
+    dataset_name: BinaryPreferenceDataset
+    data_path: /capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-FD-nemo-rl-binpref/validation
+    split: null
+policy:
+  model_name: /capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200
+  tokenizer:
+    name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed.snapshot-20260611
+  train_global_batch_size: 128
+  train_micro_batch_size: 1
+  max_total_sequence_length: 4096
+  max_grad_norm: 20.0
+  make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
+  optimizer: null
+  dtensor_cfg:
+    enabled: false
+  megatron_cfg:
+    enabled: true
+    tensor_model_parallel_size: 2
+    sequence_parallel: false
+    bias_activation_fusion: false
+    optimizer:
+      lr: 1.0e-6
+      min_lr: 0.0
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+    scheduler:
+      lr_warmup_iters: 192
+      lr_decay_iters: 1921
+      lr_decay_style: linear
+logger:
+  wandb_enabled: true
+  tensorboard_enabled: true
+  log_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo-apertus1p5-8b-maxmin
+  wandb:
+    project: apertus-nemo-rl
+    name: dpo-apertus1p5-8b-maxmin-beta25-lr1e-6
+cluster:
+  gpus_per_node: 4
+  num_nodes: 1
