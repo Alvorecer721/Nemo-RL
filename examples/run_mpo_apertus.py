@@ -43,6 +43,11 @@ def main():
     """Main entry point."""
     args, overrides = parse_args()
 
+    # Fail loud if nemo_rl is the stock /opt copy, not this checkout (see nemo_rl_apertus/runtime_guard.py).
+    from nemo_rl_apertus.runtime_guard import assert_apertus_runtime
+
+    assert_apertus_runtime()
+
     if not args.config:
         args.config = os.path.join(os.path.dirname(__file__), "configs", "dpo.yaml")
 
