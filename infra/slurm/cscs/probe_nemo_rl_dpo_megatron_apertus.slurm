@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --job-name=ap1p5-probe
-#SBATCH --output=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/nemo_rl_dpo_apertus_%j.out
-#SBATCH --error=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/nemo_rl_dpo_apertus_%j.err
+#SBATCH --output=logs/nemo_rl_dpo_apertus_%j.out
+#SBATCH --error=logs/nemo_rl_dpo_apertus_%j.err
 #SBATCH --time=01:30:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -14,18 +14,19 @@
 
 set -euo pipefail
 
-# NOTE: sbatch runs a copy of this script from /var/spool/slurmd, so the
-# usual dirname(BASH_SOURCE) trick resolves to the wrong place — pin the repo.
-REPO_DIR=${REPO_DIR:-/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL}
+# Run from the repo root (`cd <repo> && sbatch ...`) or anywhere with `sbatch --chdir=<repo> ...`.
+# REPO_DIR defaults to the job working dir ($PWD), which is also where the relative #SBATCH logs/ land.
+# (sbatch copies this script to /var/spool/slurmd, so BASH_SOURCE doesn't resolve here.)
+REPO_DIR=${REPO_DIR:-$PWD}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nemo_rl_dpo_apertus_${SLURM_JOB_ID}}
 
 # Apertus stack: bridge fork (apertus support) shadows the image's bundled
 # bridge; megatron-core comes from the worker venvs. All overridable.
-# NOTE: the xielu .so is ABI-bound — site-v060 matches the v0.6.0 image
-# (cp313 / torch 2.10+cu129); the kernel is optional (eager fallback warns).
+# NOTE: XIELU_SITE is an optional CUDA xielu .so dir (ABI-bound to the image: cp313 / torch 2.10+cu129).
+# Leave it empty when using the apertus overlay image (kernel baked in) — eager fallback warns but is correct.
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/iopsstor/scratch/cscs/xyixuan/apertus/xielu-kernel/site-v060}
+XIELU_SITE=${XIELU_SITE:-}
 APERTUS_CKPT=${APERTUS_CKPT:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200}
 APERTUS_TOKENIZER=${APERTUS_TOKENIZER:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed}
 
@@ -46,12 +47,12 @@ srun \
     export HF_HOME=${HF_HOME:-/iopsstor/scratch/cscs/${USER:-$(id -un)}/.cache/huggingface}
     export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
     export WANDB_DISABLED=true
+    export REPO_DIR='"$REPO_DIR"'
     export BRIDGE_ROOT='"$BRIDGE_ROOT"'
     export XIELU_SITE='"$XIELU_SITE"'
-    # bridge fork first (rebased onto the SHA this image ships), optional CUDA
-    # xielu last. megatron-core comes from the worker venvs — NeMo-RL v0.6.0
-    # needs its own mcore version (e.g. megatron.core.inference.config).
-    export PYTHONPATH="$BRIDGE_ROOT/src:$XIELU_SITE"
+    # our nemo_rl checkout first (Apertus deltas: xIELU fix + #2329), then bridge fork src, then optional CUDA xielu.
+    # megatron-core comes from the worker venvs — NeMo-RL v0.6.0 needs its own mcore version.
+    export PYTHONPATH="$REPO_DIR:$BRIDGE_ROOT/src${XIELU_SITE:+:$XIELU_SITE}"
     export RUN_DIR='"$RUN_DIR"'
     export LOG_DIR="$RUN_DIR/tb"
     export JSON_METRICS="$RUN_DIR/metrics.json"
@@ -60,8 +61,12 @@ srun \
     APERTUS_TOKENIZER='"$APERTUS_TOKENIZER"'
 
     mkdir -p "$LOG_DIR" "$HF_HOME" "$HF_DATASETS_CACHE"
-    cd /opt/nemo-rl
-    git config --global --add safe.directory /opt/nemo-rl || true
+    cd "$REPO_DIR"
+    git config --global --add safe.directory "$REPO_DIR" || true
+
+    # Apertus runtime guard: fail loud if nemo_rl is the stock /opt copy rather than this checkout.
+    # See nemo_rl_apertus/runtime_guard.py.
+    python -c "from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()"
 
     echo "=== prologue: apertus unit suite + tokenizer check in the real runtime env ==="
     # mcore extra env = the one Megatron workers run under (the base
