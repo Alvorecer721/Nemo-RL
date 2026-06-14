@@ -35,7 +35,7 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     cd $REPO_DIR
     # Apertus runtime guard: fail loud if nemo_rl is the stock /opt copy rather than this checkout (online GRPO otherwise silently regresses to gen-KL ~0.79).
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'
-    uv run --locked python examples/run_grpo.py --config $RECIPE \
+    uv run --locked --extra mcore python examples/run_grpo.py --config $RECIPE \
       grpo.max_num_steps=3 \
       policy.generation.vllm_cfg.gpu_memory_utilization=0.40
   "
