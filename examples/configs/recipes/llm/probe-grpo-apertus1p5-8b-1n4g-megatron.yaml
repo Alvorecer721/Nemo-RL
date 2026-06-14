@@ -3,9 +3,8 @@
 #   (1) vLLM 0.17.1 loading Apertus inside NeMo-RL's generation workers
 #   (2) per-step Megatron->vLLM weight refit for our arch (xIELU/QK-norm/266k)
 #   (3) generation-vs-training logprob agreement (lp_error gate)
-# Defaults chain DELIBERATELY to the worktree's v0.6.0 configs (the repo-local
-# newer grpo yamls dropped converter_type, which v0.6.0's refit requires).
-defaults: /iopsstor/scratch/cscs/xyixuan/apertus/nemo-rl-worktrees/v060-mlm-restore/examples/configs/grpo_math_8B_megatron.yaml
+# Chain to the repo-local v0.6.0 base config (has converter_type, which v0.6.0's refit requires).
+defaults: ../../grpo_math_8B_megatron.yaml
 
 grpo:
   num_prompts_per_step: 8
