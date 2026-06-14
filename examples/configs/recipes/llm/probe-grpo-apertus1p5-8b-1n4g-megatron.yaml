@@ -36,6 +36,10 @@ policy:
     pipeline_model_parallel_size: 1
     sequence_parallel: false
     bias_activation_fusion: false
+    optimizer:
+      # ZeRO-1: shard the Adam state + fp32 master across the DP group (=2 here at TP2/PP1); this already matches the stock base default (grpo_math_1B_megatron.yaml) and the Apertus Megatron pretraining (--use-distributed-optimizer).
+      # Kept explicit to document the colocation reliance, but it is NOT the OOM fix — that is vllm_cfg.sleep_level below; the optimizer was already sharded (inherited) when the run OOM'd.
+      use_distributed_optimizer: true
 
   generation:
     max_new_tokens: 512
@@ -43,6 +47,8 @@ policy:
       tensor_parallel_size: 1
       gpu_memory_utilization: 0.55
       max_model_len: 2048
+      # sleep level 2 discards vLLM weights on offload instead of backing them up to host RAM (~17 GiB/worker); refit overwrites them next step anyway, so this removes the host-RAM term that OOM-killed the step-2 refit.
+      sleep_level: 2
 
 logger:
   wandb_enabled: false

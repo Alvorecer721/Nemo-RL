@@ -1151,7 +1151,7 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         # the receiver and sends data=None, causing an assertion error.
         if hasattr(self.llm, "reset_mm_cache"):
             await self.llm.reset_mm_cache()
-        await self.llm.sleep(level=1)
+        await self.llm.sleep(level=self.cfg["vllm_cfg"].get("sleep_level", 1))
 
         gc.collect()
         torch.cuda.empty_cache()
