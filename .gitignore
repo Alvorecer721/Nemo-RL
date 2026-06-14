@@ -35,9 +35,11 @@ hf_datasets_cache/
 *logs/
 /datasets/
 docker/*
-!docker/Dockerfile
-!docker/Dockerfile.ngc_pytorch
-!docker/README.md
+!docker/Dockerfile*
+!docker/README*.md
+!docker/*.toml
+!docker/patches/
+!docker/patches/*.patch
 wandb/
 checkpoints/
 results/
@@ -50,3 +52,7 @@ code_snapshots*/
 
 # Claude Code review memory (local only)
 .claude/review-memory/
+
+# crash-dump stubs from segfault-on-teardown
+core_nid*
+core.*
