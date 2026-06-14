@@ -25,9 +25,9 @@ The pin lives in `uv.lock` so `uv run --locked` cannot revert it; drop the `uv l
 Then distribute via the shared containers dir (preferred — no registry auth for consumers): `enroot import -o nemo-rl-v0.6.0-apertus-mcore-gh200.sqsh docker://<tag>` and move the .sqsh to `/capstor/store/cscs/swissai/infra01/containers/`; point the EDF `image =` at that absolute path.
 Or put the registry tag into `docker/nemo_rl_apertus_gh200.toml` (kept in sync with `docker/nemo_rl.toml` — same mounts/env, only the image differs) and copy it to `~/.edf/` or point `sbatch`/`srun` at it.
 
-## Apertus on stock megatron-core
+## Apertus on upstream megatron-core
 
-The Bridge fork checkout at `3rdparty/Megatron-Bridge-workspace/Megatron-Bridge` (branch `yxu/apertus-v060`, rebased onto the Bridge SHA the v0.6.0 release records) runs Apertus on stock megatron-core: bridge-owned XIELU (`models/apertus/xielu_activation.py`, optional fused CUDA kernel; the eager fallback logs a WARNING with the reason, the CUDA path logs INFO), native llama3 RoPE scaling driven by the HF config, and a finalize()-time guard that forces `bias_activation_fusion` off (incompatible with a module activation, and NeMo-RL's `megatron_cfg` would otherwise clobber it back on).
+The Bridge fork checkout at `3rdparty/Megatron-Bridge-workspace/Megatron-Bridge` (branch `yxu/apertus-v060`, rebased onto the Bridge SHA the v0.6.0 release records) runs Apertus on upstream megatron-core: bridge-owned XIELU (`models/apertus/xielu_activation.py`, optional fused CUDA kernel; the eager fallback logs a WARNING with the reason, the CUDA path logs INFO), native llama3 RoPE scaling driven by the HF config, and a finalize()-time guard that forces `bias_activation_fusion` off (incompatible with a module activation, and NeMo-RL's `megatron_cfg` would otherwise clobber it back on).
 
 At runtime only the fork's `src` goes on `PYTHONPATH` — megatron-core must come from the worker venvs (NeMo-RL needs its own mcore version).
 
@@ -45,7 +45,7 @@ The default tokenizer (`apertus_emu3.5_wavtok_instruct_thinking_token_fixed`) is
 ## Raw Megatron checkpoint loading (backport branch)
 
 `yxu/v0.6.0-mlm-restore` = the v0.6.0 tag + upstream `d9efd04` (`checkpointing.pretrained_checkpoint`, landed post-release).
-It keeps v0.6.0's `uv.lock`, so it runs in the stock v0.6.0 container unchanged.
+It keeps v0.6.0's `uv.lock`, so it runs in the upstream v0.6.0 container unchanged.
 
 ```sh
 git clone --recurse-submodules -b yxu/v0.6.0-mlm-restore <this repo> nemo-rl-mlm
