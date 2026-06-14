@@ -22,7 +22,7 @@ set -euo pipefail
 REPO_DIR=${REPO_DIR:-$PWD}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-}  # optional CUDA xielu .so dir; baked into the apertus overlay image
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.0-cp313}  # shared CUDA xielu kernel; unset for eager fallback
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron.yaml}
 
 unset LD_PRELOAD
