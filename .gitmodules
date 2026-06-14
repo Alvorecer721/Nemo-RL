@@ -1,12 +1,7 @@
-[submodule "3rdparty/Megatron-LM"]
-	path = 3rdparty/Megatron-LM-workspace/Megatron-LM
-	url = https://github.com/NVIDIA/Megatron-LM.git
-	branch = main
-	shallow = true
 [submodule "3rdparty/Megatron-Bridge"]
 	path = 3rdparty/Megatron-Bridge-workspace/Megatron-Bridge
-	url = https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
-	branch = main
+	url = https://github.com/Alvorecer721/Megatron-Bridge.git
+	branch = yxu/apertus-v060
 	shallow = true
 [submodule "3rdparty/Automodel-workspace/Automodel"]
 	path = 3rdparty/Automodel-workspace/Automodel
@@ -18,3 +13,6 @@
 	url = https://github.com/NVIDIA-NeMo/Gym.git
 	branch = main
 	shallow = true
+[submodule "3rdparty/kernels"]
+	path = 3rdparty/kernels
+	url = https://github.com/Alvorecer721/kernels.git
