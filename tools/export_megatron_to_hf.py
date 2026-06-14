@@ -63,7 +63,8 @@ def main() -> None:
     state = {name: t.detach().to("cpu", torch.bfloat16).contiguous()
              for name, t in bridge.export_hf_weights(models, show_progress=True)}
     base = Path(args.hf_base)
-    index = json.load(open(base / "model.safetensors.index.json"))["weight_map"]
+    with open(base / "model.safetensors.index.json") as f:
+        index = json.load(f)["weight_map"]
     missing = [k for k in index if k not in state]
     for name in missing:
         with safe_open(base / index[name], framework="pt") as f:
@@ -74,10 +75,10 @@ def main() -> None:
     print(f"exported {len(state) - len(missing)} params + {len(missing)} buffers from base")
     save_file(state, str(out / "model.safetensors"), metadata={"format": "pt"})
 
-    tok_src = Path(args.tokenizer) if args.tokenizer else Path(args.hf_base)
+    tok_src = Path(args.tokenizer) if args.tokenizer else base
     for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
                  "generation_config.json", "chat_template.jinja"):
-        src = (Path(args.hf_base) if name in ("config.json", "generation_config.json") else tok_src) / name
+        src = (base if name in ("config.json", "generation_config.json") else tok_src) / name
         if src.exists():
             shutil.copy2(src, out / name)
     print(f"exported -> {out}")
