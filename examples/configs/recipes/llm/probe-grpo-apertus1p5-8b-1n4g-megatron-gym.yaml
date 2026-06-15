@@ -1,0 +1,69 @@
+# Single-turn NeMo-Gym GRPO smoke for Apertus 1.5 8B (math_with_judge, no judge).
+# Inherits the validated colocated probe (Apertus model/tokenizer/megatron/sleep_level=2)
+# and overlays the gym wiring: HTTP-served async vLLM + math_with_judge env + simple_agent.
+defaults: probe-grpo-apertus1p5-8b-1n4g-megatron.yaml
+
+grpo:
+  num_prompts_per_step: 4
+  num_generations_per_prompt: 4
+  max_rollout_turns: 1
+  max_num_steps: 3
+  val_period: 0
+  val_at_start: false
+  max_val_samples: null
+  normalize_rewards: true
+  use_leave_one_out_baseline: true
+  skip_reference_policy_logprobs_calculation: true
+
+loss_fn:
+  reference_policy_kl_penalty: 0
+
+policy:
+  train_global_batch_size: 16
+  generation:
+    vllm_cfg:
+      async_engine: true
+      expose_http_server: true
+      http_server_serving_chat_kwargs:
+        chat_template: /capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200/chat_template.jinja  # pragma: allowlist secret
+
+data:
+  shuffle: false
+  num_workers: 0
+  train:
+    dataset_name: NemoGymDataset
+    data_path: 3rdparty/Gym-workspace/Gym/resources_servers/math_with_judge/data/example_prepare.jsonl   # example.jsonl + per-row agent_ref; gitignored, prep once
+    split_validation_size: null
+  validation:
+    data_path: 3rdparty/Gym-workspace/Gym/resources_servers/math_with_judge/data/example_prepare.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+
+env:
+  should_use_nemo_gym: true
+  nemo_gym:
+    # gym binds its servers on random ports in [low, high]; keep this disjoint from the
+    # Ray worker port range (10002-11000 in the multinode launcher) to avoid bind collisions.
+    port_range_low: 11001
+    port_range_high: 20000
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/math_with_judge/configs/math_with_judge.yaml
+    math_with_judge:
+      resources_servers:
+        math_with_judge:
+          should_use_judge: false
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          uses_reasoning_parser: false
+          extra_body:
+            chat_template_kwargs:
+              enable_thinking: false
+
+logger:
+  log_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/grpo-apertus-gym

@@ -104,7 +104,7 @@ def _replace_prefix_tokens(
     if not model_prefix_token_ids:
         return template_token_ids
 
-    eos_ids = set(eos_token_ids) if eos_token_ids else set()
+    eos_ids = set(eos_token_ids or [])
     if tokenizer.eos_token_id is not None:
         eos_ids.add(tokenizer.eos_token_id)
     assert eos_ids, "Your tokenizer must have an EOS token ID!"
@@ -514,6 +514,13 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         serving_chat_kwargs = serving_chat_default_kwargs | self.cfg["vllm_cfg"].get(
             "http_server_serving_chat_kwargs", dict()
         )
+        # vLLM's serving-chat constructor treats chat_template as literal text, not a path; resolve it the way vLLM's own server does.
+        from vllm.entrypoints.chat_utils import load_chat_template
+
+        if serving_chat_kwargs.get("chat_template") is not None:
+            serving_chat_kwargs["chat_template"] = load_chat_template(
+                serving_chat_kwargs["chat_template"]
+            )
         serving_chat_kwargs.update(
             dict(
                 engine_client=engine_client,
