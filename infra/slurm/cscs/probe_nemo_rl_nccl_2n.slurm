@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --job-name=net-2n
-#SBATCH --output=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/nemo_rl_nccl_2n_%j.out
-#SBATCH --error=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/nemo_rl_nccl_2n_%j.err
+#SBATCH --output=logs/nemo_rl_nccl_2n_%j.out
+#SBATCH --error=logs/nemo_rl_nccl_2n_%j.err
 #SBATCH --time=00:15:00
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1

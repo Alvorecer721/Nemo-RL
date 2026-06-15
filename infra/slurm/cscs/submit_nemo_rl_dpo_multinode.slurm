@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --job-name=ap1p5-train
-#SBATCH --output=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo_maxmin_mn_%j.out
-#SBATCH --error=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo_maxmin_mn_%j.err
+#SBATCH --output=logs/dpo_maxmin_mn_%j.out
+#SBATCH --error=logs/dpo_maxmin_mn_%j.err
 #SBATCH --time=08:00:00
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
@@ -25,12 +25,15 @@ echo "START TIME: $(date)"
 # N nodes execute identical training math (DP width changes, updates do not),
 # and the run auto-resumes from the latest checkpoint.
 ###############################################################################
-REPO_DIR=${REPO_DIR:-/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL}
+# Run from the repo root (`cd <repo> && sbatch <this>`) or use `sbatch --chdir=<repo> <this>`; REPO_DIR defaults to $PWD, where the relative #SBATCH logs/ also land (run `mkdir -p logs` first).
+REPO_DIR=${REPO_DIR:-$PWD}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/iopsstor/scratch/cscs/xyixuan/apertus/xielu-kernel/site-v060}
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.1-cp313}
 RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
+# Opt-in worker-venv rebuild — pass on EVERY stock-image run when RUNTIME_DIR's uv.lock diverges from the baked venvs: the rebuild lands in /opt/ray_venvs (the container's ephemeral overlay) and does NOT persist (else the worker's numpy fails to load libscipy_openblas). Default off; `sbatch --export=ALL,NRL_FORCE_REBUILD_VENVS=true ...`. See infra/slurm/cscs/README.md (incl. NEMO_RL_VENV_DIR for real reuse).
+NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-false}
 # Raw Megatron base/reference loading (requires the mlm-restore worktree as
 # RUNTIME_DIR — the pretrained_checkpoint backport lives there): set
 # PRETRAINED_CKPT_PATH to an iter_XXXXXXX dir to skip the HF conversion cache.
@@ -51,7 +54,7 @@ fi
 EXPECTED_UNITS=$((NUM_NODES * GPUS_PER_NODE))
 echo "head: $head_node ($HEAD_IP), nodes: $NUM_NODES, expected worker_units: $EXPECTED_UNITS"
 
-export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES
+export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES NRL_FORCE_REBUILD_VENVS
 # sbatch --export=<list> propagates to srun via SLURM_EXPORT_ENV and would
 # strip the exports above from the tasks; force full propagation.
 export SLURM_EXPORT_ENV=ALL

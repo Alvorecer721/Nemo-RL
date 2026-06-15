@@ -8,7 +8,7 @@ For the architecture gotchas behind the gates here, see [apertus-traps-and-invar
 
 - A CSCS GH200 allocation (e.g. Clariden), account `infra01`.
 - The stock image `nvcr.io/nvidia/nemo-rl:v0.6.0` — referenced by `docker/nemo_rl.toml`, no build needed.
-- The shared wheelhouse `/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/` — provides the prebuilt CUDA xIELU kernel (`aarch64/xielu-site-0.1.0-cp313`) and the `libjson-c.so.5` used for compute-node submission.
+- The shared wheelhouse `/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/` — provides the prebuilt CUDA xIELU kernel (`aarch64/xielu-site-0.1.1-cp313`) and the `libjson-c.so.5` used for compute-node submission.
 - The Apertus SFT checkpoint and tokenizer referenced in the recipe (already staged under `/capstor/store/cscs/swissai/infra01/`).
 
 ## 1. Get the code
@@ -27,6 +27,14 @@ The submodules are required: the Megatron driver imports `megatron.core` (an edi
 mkdir -p logs
 sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm
 ```
+
+> **First run on a fresh stock image — rebuild the worker venvs.** The checkout's `uv.lock` diverges from the image's pre-baked Ray worker venvs (the `tokenizers` relock + the forked Bridge/`kernels` submodules). `uv run --locked` re-syncs only the *driver* venv, so the first submission must rebuild the worker venvs too — otherwise the vLLM worker dies with `ImportError: libscipy_openblas64_-*.so: cannot open shared object file` (NumPy). Submit the first time with the opt-in rebuild knob:
+>
+> ```bash
+> sbatch --export=ALL,NRL_FORCE_REBUILD_VENVS=true infra/slurm/cscs/probe_grpo_fixgate.slurm
+> ```
+>
+> This is slow (it recompiles the worker venvs), and it **does not persist** — they build into `/opt/ray_venvs`, the container's ephemeral overlay, so you must pass the flag on *every* run on the stock image (a prior rebuild never carries over, even on the same node). `NRL_IGNORE_VERSION_MISMATCH` alone is **not** enough — it only silences the version-check gate, it does not rebuild venvs. For real cross-job reuse, set `NEMO_RL_VENV_DIR` to a persistent mounted path (see the Slurm README).
 
 This runs 3 steps of colocated online GRPO on one node (4 GPUs, TP2/PP1) against `examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron.yaml`.
 
