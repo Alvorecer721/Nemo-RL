@@ -32,10 +32,10 @@ data:
   num_workers: 0
   train:
     dataset_name: NemoGymDataset
-    data_path: 3rdparty/Gym-workspace/Gym/resources_servers/math_with_judge/data/example_prepare.jsonl   # example.jsonl + per-row agent_ref; gitignored, prep once
+    data_path: 3rdparty/Gym-workspace/Gym/resources_servers/math_with_judge/data/example_agent.jsonl   # committed smoke fixture; each row carries its own agent_ref
     split_validation_size: null
   validation:
-    data_path: 3rdparty/Gym-workspace/Gym/resources_servers/math_with_judge/data/example_prepare.jsonl
+    data_path: 3rdparty/Gym-workspace/Gym/resources_servers/math_with_judge/data/example_agent.jsonl
   default:
     dataset_name: NemoGymDataset
     env_name: nemo_gym
