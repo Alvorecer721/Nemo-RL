@@ -34,6 +34,13 @@ REPO_DIR=${REPO_DIR:-$PWD}
 # checkout) to run changed core/lock without rebuilding the image.
 RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
+# Anchor checkpoints + NeMo-RL logs to the persistent REPO_DIR. The recipe's
+# checkpoint_dir/log_dir are relative, so they resolve against the driver's CWD
+# — which is RUNTIME_DIR (default /opt/nemo-rl, the container's ephemeral
+# overlay; see `cd "$RUNTIME_DIR"` below) and would be discarded at job end,
+# breaking auto-resume. Override via CHECKPOINT_DIR/LOG_DIR.
+CHECKPOINT_DIR=${CHECKPOINT_DIR:-$REPO_DIR/results/dpo-apertus1p5-8b-maxmin}
+LOG_DIR=${LOG_DIR:-$REPO_DIR/logs/dpo-apertus1p5-8b-maxmin}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.1-cp313}
@@ -77,6 +84,7 @@ PYEOF
     fi
 
     echo "=== DPO training: $(basename "'"$RECIPE"'") ==="
-    uv run --locked examples/run_dpo.py --config "'"$RECIPE"'"
+    uv run --locked examples/run_dpo.py --config "'"$RECIPE"'" \
+      checkpointing.checkpoint_dir="'"$CHECKPOINT_DIR"'" logger.log_dir="'"$LOG_DIR"'"
   '
 echo "END TIME: $(date)"

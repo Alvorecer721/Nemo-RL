@@ -28,10 +28,17 @@ echo "START TIME: $(date)"
 # Run from the repo root (`cd <repo> && sbatch <this>`) or use `sbatch --chdir=<repo> <this>`; REPO_DIR defaults to $PWD, where the relative #SBATCH logs/ also land (run `mkdir -p logs` first).
 REPO_DIR=${REPO_DIR:-$PWD}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
+RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
+# Anchor checkpoints + NeMo-RL logs to the persistent REPO_DIR. The recipe's
+# checkpoint_dir/log_dir are relative, so they resolve against the driver's CWD
+# — which is RUNTIME_DIR (default /opt/nemo-rl, the container's ephemeral
+# overlay; see `cd "$RUNTIME_DIR"` below) and would be discarded at job end,
+# breaking auto-resume. Override via CHECKPOINT_DIR/LOG_DIR.
+CHECKPOINT_DIR=${CHECKPOINT_DIR:-$REPO_DIR/results/dpo-apertus1p5-8b-maxmin}
+LOG_DIR=${LOG_DIR:-$REPO_DIR/logs/dpo-apertus1p5-8b-maxmin}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.1-cp313}
-RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
 # Opt-in worker-venv rebuild — pass on EVERY stock-image run when RUNTIME_DIR's uv.lock diverges from the baked venvs: the rebuild lands in /opt/ray_venvs (the container's ephemeral overlay) and does NOT persist (else the worker's numpy fails to load libscipy_openblas). Default off; `sbatch --export=ALL,NRL_FORCE_REBUILD_VENVS=true ...`. See infra/slurm/cscs/README.md (incl. NEMO_RL_VENV_DIR for real reuse).
 NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-false}
 # Raw Megatron base/reference loading (requires the mlm-restore worktree as
@@ -54,7 +61,7 @@ fi
 EXPECTED_UNITS=$((NUM_NODES * GPUS_PER_NODE))
 echo "head: $head_node ($HEAD_IP), nodes: $NUM_NODES, expected worker_units: $EXPECTED_UNITS"
 
-export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES NRL_FORCE_REBUILD_VENVS
+export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES NRL_FORCE_REBUILD_VENVS CHECKPOINT_DIR LOG_DIR
 # sbatch --export=<list> propagates to srun via SLURM_EXPORT_ENV and would
 # strip the exports above from the tasks; force full propagation.
 export SLURM_EXPORT_ENV=ALL
@@ -93,7 +100,7 @@ srun \
         echo "=== ray cluster complete: ${units}/$EXPECTED_UNITS units; starting driver ==="
         cd "$RUNTIME_DIR"
         # shellcheck disable=SC2086  # EXTRA_OVERRIDES is intentionally word-split
-        uv run --locked examples/run_dpo.py --config "$RECIPE" cluster.num_nodes="$NUM_NODES" $EXTRA_OVERRIDES
+        uv run --locked examples/run_dpo.py --config "$RECIPE" cluster.num_nodes="$NUM_NODES" checkpointing.checkpoint_dir="$CHECKPOINT_DIR" logger.log_dir="$LOG_DIR" $EXTRA_OVERRIDES
         ray stop
     else
         # Workers: wait for the head port, join, then live exactly as long as
