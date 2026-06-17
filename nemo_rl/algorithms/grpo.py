@@ -1596,8 +1596,17 @@ def grpo_train(
                 )
                 # Process rewards with custom reward function
                 if master_config["grpo"]["reward_shaping"]["enabled"]:
+                    reward_shaping_cfg = master_config["grpo"]["reward_shaping"]
+                    pass_rate = None
+                    if reward_shaping_cfg.get("alp_coef") is not None:
+                        pass_rate, _ = calculate_baseline_and_std_per_prompt(
+                            input_ids,
+                            repeated_batch["total_reward"],
+                            torch.ones_like(repeated_batch["total_reward"]),
+                            leave_one_out_baseline=False,
+                        )
                     repeated_batch = apply_reward_shaping(
-                        repeated_batch, master_config["grpo"]["reward_shaping"]
+                        repeated_batch, reward_shaping_cfg, pass_rate=pass_rate
                     )
 
                 # Calculate rewards & advantages

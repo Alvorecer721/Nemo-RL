@@ -23,6 +23,7 @@ grpo:
     overlong_buffer_penalty: 1
     max_response_length: ${policy.max_total_sequence_length}
     stop_properly_penalty_coef: null
+    alp_coef: null  # Adaptive Length Penalty (Xiang 2025); mutually exclusive with DAPO/stop-properly
 
   # Advantage Estimator Configuration
   # Options: "grpo" (default) or "reinforce_plus_plus"
