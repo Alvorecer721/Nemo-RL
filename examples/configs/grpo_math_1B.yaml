@@ -369,6 +369,7 @@ env:
 logger:
   log_dir: "logs"  # Base directory for all logs
   num_val_samples_to_print: 0 # Number of validation samples to pretty print on terminal
+  metric_denylist: [] # fully-qualified metric names (prefix/key) or fnmatch globs to drop from all backends
   wandb_enabled: false
   tensorboard_enabled: false
   mlflow_enabled: false  # Disable MLflow logging
