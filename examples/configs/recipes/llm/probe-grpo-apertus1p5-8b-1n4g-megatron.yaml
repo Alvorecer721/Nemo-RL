@@ -32,6 +32,7 @@ policy:
 
   megatron_cfg:
     converter_type: "ApertusForCausalLM"
+    force_reconvert_from_hf: false   # load the cached Megatron ckpt directly (skip HF reconvert)
     tensor_model_parallel_size: 2
     pipeline_model_parallel_size: 1
     sequence_parallel: false

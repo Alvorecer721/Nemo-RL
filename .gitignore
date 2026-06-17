@@ -56,3 +56,4 @@ code_snapshots*/
 # crash-dump stubs from segfault-on-teardown
 core_nid*
 core.*
+outputs/

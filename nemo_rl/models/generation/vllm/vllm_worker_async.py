@@ -43,6 +43,7 @@ def _replace_prefix_tokens(
     model_prefix_token_ids: list[int],
     template_prefix_token_ids: list[int],
     template_token_ids: list[int],
+    eos_token_ids: Optional[list[int]] = None,
 ) -> list[int]:
     """This is a subroutine used inside the vLLM Chat Completion server.
 
@@ -50,6 +51,12 @@ def _replace_prefix_tokens(
     to match the model output tokenization up to the last assistant turn,
     in order to preserve the monotonic tokens property for optimized multi-turn
     training.
+
+    ``eos_token_ids`` enumerates every token that can end a model turn; it is
+    unioned with the tokenizer's scalar EOS and defaults to that scalar alone
+    when omitted. A model whose chat template closes turns with a non-default
+    special token (such as Apertus, which uses ``<|assistant_end|>``) needs the
+    full set to locate the turn boundary.
 
     Some environments (namely NeMo-Gym) require an OpenAI compatible server
     endpoint rather than an inference engine handle. This is fine for the most
@@ -97,14 +104,16 @@ def _replace_prefix_tokens(
     if not model_prefix_token_ids:
         return template_token_ids
 
-    eos_token_id = tokenizer.eos_token_id
-    assert eos_token_id is not None, "Your tokenizer must have an EOS token ID!"
+    eos_ids = set(eos_token_ids or [])
+    if tokenizer.eos_token_id is not None:
+        eos_ids.add(tokenizer.eos_token_id)
+    assert eos_ids, "Your tokenizer must have an EOS token ID!"
 
     model_cut_end = len(model_prefix_token_ids)
     if model_prefix_token_ids:
         # We are not always guaranteed that the model outputs an EOS token as the stop criteria of the previous model call e.g. when the model reaches max_tokens.
         # And since chat templates will always add one for us, we just cut the model input to right before the EOS token ID (if applicable)
-        if model_prefix_token_ids[-1] == eos_token_id:
+        if model_prefix_token_ids[-1] in eos_ids:
             model_cut_end -= 1
 
     # Assert here to prepare for the logic below
@@ -123,7 +132,7 @@ Template repr (detokenized): {repr(tokenizer.decode(template_token_ids))}
     # We take everything starting with the EOS token ID.
     template_cut_start = -1
     for pos in reversed(range(len(template_prefix_token_ids))):
-        if template_token_ids[pos] == eos_token_id:
+        if template_token_ids[pos] in eos_ids:
             template_cut_start = pos
             break
 
@@ -142,6 +151,25 @@ Template repr (detokenized): {repr(tokenizer.decode(template_token_ids))}"""
     return (
         model_prefix_token_ids[:model_cut_end] + template_token_ids[template_cut_start:]
     )
+
+
+def _get_generation_eos_token_ids(model_path: str) -> Optional[list[int]]:
+    """Return ``generation_config.eos_token_id`` as a list, or None if unavailable.
+
+    These are the tokens vLLM treats as stop criteria, which is the set
+    _replace_prefix_tokens must match to find turn boundaries. Apertus lists
+    ``[</s>, <|assistant_end|>, <|tools_suffix|>]`` here while its tokenizer's
+    scalar ``eos_token_id`` is only ``</s>``.
+    """
+    from transformers import GenerationConfig
+
+    try:
+        eos = GenerationConfig.from_pretrained(model_path).eos_token_id
+    except (OSError, ValueError):
+        return None
+    if eos is None:
+        return None
+    return [eos] if isinstance(eos, int) else list(eos)
 
 
 @ray.remote(
@@ -332,6 +360,7 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
 
         engine_client = self.llm
         model_config = self.llm_async_engine_args.create_model_config()
+        generation_eos_token_ids = _get_generation_eos_token_ids(model_config.model)
         base_model_paths = [
             BaseModelPath(
                 name=model_config.served_model_name, model_path=model_config.model
@@ -455,6 +484,7 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                     model_prefix_token_ids=request.required_prefix_token_ids,
                     template_prefix_token_ids=actual_corresponding_token_ids,
                     template_token_ids=engine_prompt["prompt_token_ids"],
+                    eos_token_ids=generation_eos_token_ids,
                 )
 
                 engine_prompt["prompt_token_ids"] = final_prompt_token_ids
@@ -484,6 +514,13 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         serving_chat_kwargs = serving_chat_default_kwargs | self.cfg["vllm_cfg"].get(
             "http_server_serving_chat_kwargs", dict()
         )
+        # vLLM's serving-chat constructor treats chat_template as literal text, not a path; resolve it the way vLLM's own server does.
+        from vllm.entrypoints.chat_utils import load_chat_template
+
+        if serving_chat_kwargs.get("chat_template") is not None:
+            serving_chat_kwargs["chat_template"] = load_chat_template(
+                serving_chat_kwargs["chat_template"]
+            )
         serving_chat_kwargs.update(
             dict(
                 engine_client=engine_client,

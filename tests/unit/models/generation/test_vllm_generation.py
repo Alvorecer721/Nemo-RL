@@ -1509,6 +1509,72 @@ def test_replace_prefix_tokens_uses_last_eos_in_template_prefix():
     assert result == [100, 2, 77, 88]
 
 
+def test_replace_prefix_tokens_multi_eos_recognizes_non_default_terminator():
+    # Apertus: scalar EOS is </s>=2 but turns close with <|assistant_end|>=68; gen eos is [2, 68, 72]
+    class _T:
+        eos_token_id = 2
+
+    tokenizer = _T()
+    result = _replace_prefix_tokens(
+        tokenizer=tokenizer,
+        model_prefix_token_ids=[100, 101, 68],
+        template_prefix_token_ids=[9, 8, 68],
+        template_token_ids=[9, 8, 68, 55, 66],
+        eos_token_ids=[2, 68, 72],
+    )
+    assert result == [100, 101, 68, 55, 66]
+
+
+def test_replace_prefix_tokens_scalar_eos_misses_non_default_terminator_raises():
+    # Without the generation eos set, the turn-closing 68 is unrecognized -> no boundary -> raises
+    class _T:
+        eos_token_id = 2
+
+        def decode(self, *args, **kwargs):
+            return ""
+
+    tokenizer = _T()
+    with pytest.raises(AssertionError):
+        _replace_prefix_tokens(
+            tokenizer=tokenizer,
+            model_prefix_token_ids=[100, 101, 68],
+            template_prefix_token_ids=[9, 8, 68],
+            template_token_ids=[9, 8, 68, 55, 66],
+        )
+
+
+def test_replace_prefix_tokens_multi_eos_tool_suffix_terminator():
+    # A turn ending in a tool call closes on <|tools_suffix|>=72
+    class _T:
+        eos_token_id = 2
+
+    tokenizer = _T()
+    result = _replace_prefix_tokens(
+        tokenizer=tokenizer,
+        model_prefix_token_ids=[100, 72],
+        template_prefix_token_ids=[9, 72],
+        template_token_ids=[9, 72, 55],
+        eos_token_ids=[2, 68, 72],
+    )
+    assert result == [100, 72, 55]
+
+
+def test_replace_prefix_tokens_multi_eos_model_without_trailing_eos():
+    # Model hit max_tokens (no trailing terminator); template still closes the turn with 68
+    class _T:
+        eos_token_id = 2
+
+    tokenizer = _T()
+    result = _replace_prefix_tokens(
+        tokenizer=tokenizer,
+        model_prefix_token_ids=[100, 101],
+        template_prefix_token_ids=[9, 8, 68],
+        template_token_ids=[9, 8, 68, 55, 66],
+        eos_token_ids=[2, 68, 72],
+    )
+    assert result == [100, 101, 68, 55, 66]
+
+
 @pytest.mark.asyncio
 async def test_vllm_http_server_correct_merged_tokens_matches_baseline(
     cluster, tokenizer
