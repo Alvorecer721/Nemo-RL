@@ -26,9 +26,11 @@ RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nemo_rl_dpo_apertus_${SLURM_JOB_ID}}
 # NOTE: XIELU_SITE points at the shared prebuilt CUDA xielu kernel in the wheelhouse (ABI-bound: cp313 / torch 2.10+cu129).
 # Unset it for the eager fallback (correct, slower, warns).
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.0-cp313}
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.1-cp313}
 APERTUS_CKPT=${APERTUS_CKPT:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200}
 APERTUS_TOKENIZER=${APERTUS_TOKENIZER:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed}
+# Opt-in worker-venv rebuild — pass on EVERY stock-image run: the rebuild lands in /opt/ray_venvs (the container's ephemeral overlay) and does NOT persist, and the checkout's uv.lock diverges from the baked venvs (else the vLLM worker's numpy fails to load libscipy_openblas). Default off; `sbatch --export=ALL,NRL_FORCE_REBUILD_VENVS=true ...`. See infra/slurm/cscs/README.md (incl. NEMO_RL_VENV_DIR for real reuse).
+NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-false}
 
 mkdir -p "$RUN_DIR"
 echo "batch_host=$(hostname) run_dir=$RUN_DIR"
@@ -50,6 +52,7 @@ srun \
     export REPO_DIR='"$REPO_DIR"'
     export BRIDGE_ROOT='"$BRIDGE_ROOT"'
     export XIELU_SITE='"$XIELU_SITE"'
+    export NRL_FORCE_REBUILD_VENVS='"$NRL_FORCE_REBUILD_VENVS"'
     # our nemo_rl checkout first (Apertus deltas: xIELU fix + #2329), then bridge fork src, then optional CUDA xielu.
     # megatron-core comes from the worker venvs — NeMo-RL v0.6.0 needs its own mcore version.
     export PYTHONPATH="$REPO_DIR:$BRIDGE_ROOT/src${XIELU_SITE:+:$XIELU_SITE}"

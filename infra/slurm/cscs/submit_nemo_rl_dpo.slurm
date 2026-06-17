@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --job-name=ap1p5-train
-#SBATCH --output=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo_maxmin_%j.out
-#SBATCH --error=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo_maxmin_%j.err
+#SBATCH --output=logs/dpo_maxmin_%j.out
+#SBATCH --error=logs/dpo_maxmin_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -28,14 +28,24 @@ fi
 # owns the cluster only. gbs is config-level: 1 node executes the identical
 # training math as N nodes (DP width changes, updates do not).
 ###############################################################################
-REPO_DIR=${REPO_DIR:-/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL}
+# Run from the repo root (`cd <repo> && sbatch <this>`) or use `sbatch --chdir=<repo> <this>`; REPO_DIR defaults to $PWD, where the relative #SBATCH logs/ also land (run `mkdir -p logs` first).
+REPO_DIR=${REPO_DIR:-$PWD}
 # NeMo-RL runtime: image default, or a filesystem worktree (validated branch
 # checkout) to run changed core/lock without rebuilding the image.
 RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
+# Anchor checkpoints + NeMo-RL logs to the persistent REPO_DIR. The recipe's
+# checkpoint_dir/log_dir are relative, so they resolve against the driver's CWD
+# — which is RUNTIME_DIR (default /opt/nemo-rl, the container's ephemeral
+# overlay; see `cd "$RUNTIME_DIR"` below) and would be discarded at job end,
+# breaking auto-resume. Override via CHECKPOINT_DIR/LOG_DIR.
+CHECKPOINT_DIR=${CHECKPOINT_DIR:-$REPO_DIR/results/dpo-apertus1p5-8b-maxmin}
+LOG_DIR=${LOG_DIR:-$REPO_DIR/logs/dpo-apertus1p5-8b-maxmin}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/iopsstor/scratch/cscs/xyixuan/apertus/xielu-kernel/site-v060}
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.1-cp313}
+# Opt-in worker-venv rebuild — pass on EVERY stock-image run when RUNTIME_DIR's uv.lock diverges from the baked venvs: the rebuild lands in /opt/ray_venvs (the container's ephemeral overlay) and does NOT persist (else the worker's numpy fails to load libscipy_openblas). Default off; `sbatch --export=ALL,NRL_FORCE_REBUILD_VENVS=true ...`. See infra/slurm/cscs/README.md (incl. NEMO_RL_VENV_DIR for real reuse).
+NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-false}
 
 FULL_SET=/capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-FD-nemo-rl-binpref-full/train.parquet
 SRC_SET=/capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-Filtered-Decontaminated
@@ -52,6 +62,7 @@ srun \
     export PYTHONUNBUFFERED=1
     export HF_HOME=/iopsstor/scratch/cscs/${USER}/.cache/huggingface
     export PYTHONPATH="'"$BRIDGE_ROOT"'/src:'"$XIELU_SITE"'"
+    export NRL_FORCE_REBUILD_VENVS='"$NRL_FORCE_REBUILD_VENVS"'
     cd "'"$RUNTIME_DIR"'"
 
     # Prologue: full-set parquet (all 245,898 pairs, reference data parity).
@@ -73,6 +84,7 @@ PYEOF
     fi
 
     echo "=== DPO training: $(basename "'"$RECIPE"'") ==="
-    uv run --locked examples/run_dpo.py --config "'"$RECIPE"'"
+    uv run --locked examples/run_dpo.py --config "'"$RECIPE"'" \
+      checkpointing.checkpoint_dir="'"$CHECKPOINT_DIR"'" logger.log_dir="'"$LOG_DIR"'"
   '
 echo "END TIME: $(date)"

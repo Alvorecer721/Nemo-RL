@@ -66,3 +66,13 @@ Short resume tests: keep the config byte-identical and kill externally.
 ```
 
 Probe harnesses live in `nemo-rl-worktrees/v060-online-dpo/debug/` (self-diff analyzer, Megatron-vs-HF forward parity, vLLM disk parity).
+
+## 8. xIELU CUDA op has no Autograd-key registration  ⚠ benign today, deprecated
+
+The fused xIELU kernel (`3rdparty/kernels`) registers `torch.ops.xielu.xielu` on the CUDA and Meta dispatch keys but **not** the Autograd key. So every training backward through the activation prints:
+
+> `xielu::xielu: an autograd kernel was not registered to the Autograd key(s) but we are trying to backprop through it. This may lead to silently incorrect behavior.`
+
+- **Verified benign (torch 2.10, 2026-06-15):** a gradient check diffing the kernel's `grad_x`/`grad_alpha_p`/`grad_alpha_n` against the eager reference (`xielu_activation.py:compiled_xielu`, correct by construction) shows they match within bf16 rounding (~2e-3, sometimes closer to fp32 truth than eager-bf16). Gradients **do** flow: the kernel's `xielu()` wrapper calls `XIELUAutograd::apply`, which still records under PyTorch's autograd-not-implemented fallback because the fallback excludes the Autograd dispatch key but leaves `GradMode` on.
+- **Why it's a trap:** the backward is correct only **by coincidence of the current fallback**. The warning says the behavior is "deprecated and will be removed" — a future torch could switch the fallback to silently *drop* the gradient, corrupting training with no error. The `Generation KL Error` gate (forward-only) would not catch it.
+- **Fix (shipped):** `binding.cpp` adds `TORCH_LIBRARY_IMPL(xielu, Autograd, m) { m.impl("xielu", &xielu); }` so the op routes through `XIELUAutograd` explicitly. Verified on GH200 (2026-06-15): the patched kernel compiles, the op-level gradient check passes (warning gone, grads unchanged), and a full GRPO probe trained cleanly with **zero** autograd warnings (vs 2 on the old kernel) and KL 0.0003. Staged to the shared wheelhouse as `xielu-site-0.1.1-cp313` (the pre-fix `xielu-site-0.1.0-cp313` is retained for rollback), and the launchers' `XIELU_SITE` default is now `0.1.1`. For a new torch/python ABI, rebuild from `3rdparty/kernels/xielu` (`setup.py`) and re-stage a new wheel.
