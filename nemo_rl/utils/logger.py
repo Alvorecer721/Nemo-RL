@@ -886,8 +886,6 @@ class MLflowLogger(LoggerInterface):
 class Logger(LoggerInterface):
     """Main logger class that delegates to multiple backend loggers."""
 
-    _denylist: list[str] = []
-
     def __init__(self, cfg: LoggerConfig):
         """Create and configure enabled logging backends and optionally start GPU monitoring.
 
@@ -903,9 +901,11 @@ class Logger(LoggerInterface):
         self.wandb_logger = None
         self.swanlab_logger = None
 
-        self._denylist = cfg.get("metric_denylist") or []
+        self._denylist: tuple[str, ...] = tuple(cfg.get("metric_denylist") or ())
         self._unmatched_patterns = set(self._denylist)
         self._denylist_warned = False
+        self._denylist_lock = threading.Lock()
+        self._seen_train_metrics = False
 
         self.base_log_dir = cfg["log_dir"]
         os.makedirs(self.base_log_dir, exist_ok=True)
@@ -963,19 +963,30 @@ class Logger(LoggerInterface):
     def _is_denied(self, name: str) -> bool:
         """Whether a fully-qualified metric name matches the configured denylist."""
         for pat in self._denylist:
-            if fnmatch.fnmatch(name, pat):
-                self._unmatched_patterns.discard(pat)
+            if fnmatch.fnmatchcase(name, pat):
+                with self._denylist_lock:
+                    self._unmatched_patterns.discard(pat)
                 return True
         return False
 
+    @staticmethod
+    def _is_validation_metrics_prefix(prefix: Optional[str]) -> bool:
+        return prefix == "validation" or (prefix or "").startswith("validation-")
+
     def _warn_unmatched_denylist(self) -> None:
-        """Warn once about denylist patterns that matched no metric this run (likely stale)."""
-        if self._denylist_warned or not self._denylist:
-            return
-        self._denylist_warned = True
-        if self._unmatched_patterns:
+        """Warn once about denylist patterns that matched no metric before validation."""
+        with self._denylist_lock:
+            if (
+                self._denylist_warned
+                or not self._denylist
+                or not self._seen_train_metrics
+            ):
+                return
+            self._denylist_warned = True
+            unmatched_patterns = sorted(self._unmatched_patterns)
+        if unmatched_patterns:
             logging.getLogger(__name__).warning(
-                f"metric_denylist patterns matched no logged metric (stale or wrong surface?): {sorted(self._unmatched_patterns)}"
+                f"metric_denylist patterns matched no logged metric before validation (stale or later-only surface?): {unmatched_patterns}"
             )
 
     def log_metrics(
@@ -1005,7 +1016,10 @@ class Logger(LoggerInterface):
             }
         for logger in self.loggers:
             logger.log_metrics(metrics, step, prefix, step_metric, step_finished)
-        if prefix == "validation":
+        if prefix == "train":
+            with self._denylist_lock:
+                self._seen_train_metrics = True
+        if self._is_validation_metrics_prefix(prefix):
             self._warn_unmatched_denylist()
 
     def log_hyperparams(self, params: Mapping[str, Any]) -> None:

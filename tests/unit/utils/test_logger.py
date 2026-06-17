@@ -14,6 +14,8 @@
 
 import shutil
 import tempfile
+import threading
+import time
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -2024,6 +2026,17 @@ class TestLoggerMetricDenylist:
 
     @patch("nemo_rl.utils.logger.WandbLogger")
     @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_is_denied_uses_case_sensitive_fnmatchcase(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir
+    ):
+        """Denylist matching should stay case-sensitive even if fnmatch.fnmatch is patched."""
+        logger = Logger(self._make_cfg(temp_dir, ["Train/Reward"]))
+
+        with patch("nemo_rl.utils.logger.fnmatch.fnmatch", return_value=True):
+            assert logger._is_denied("train/reward") is False
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
     def test_log_metrics_drops_denied_keys_no_prefix(
         self, mock_tb_logger, mock_wandb_logger, temp_dir
     ):
@@ -2082,7 +2095,7 @@ class TestLoggerMetricDenylist:
         """The step_metric key is checked unprefixed, matching how backends log it.
 
         Mirrors RayGpuMonitorLogger.flush, which adds the already-qualified
-        step_metric key and passes the same name as prefix + step_metric.
+        step_metric key while passing the metric prefix separately.
         """
         logger = Logger(self._make_cfg(temp_dir, ["ray/ray_step"]))
         mock_wandb_instance = mock_wandb_logger.return_value
@@ -2182,7 +2195,7 @@ class TestLoggerMetricDenylist:
     def test_unmatched_denylist_warns_once(
         self, mock_tb_logger, mock_wandb_logger, temp_dir, caplog
     ):
-        """A pattern that matches nothing warns exactly once, after the first validation log."""
+        """A pattern that matches nothing warns exactly once, after validation follows train."""
         import logging
 
         logger = Logger(
@@ -2198,6 +2211,74 @@ class TestLoggerMetricDenylist:
         assert len(warns) == 1
         assert "train/ghost/*" in warns[0].getMessage()
         assert "train/total_reward/*" not in warns[0].getMessage()
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_unmatched_denylist_warns_on_named_validation_prefix(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir, caplog
+    ):
+        """DPO/RM validation prefixes include the dataset name and should still trigger the warning."""
+        import logging
+
+        logger = Logger(self._make_cfg(temp_dir, ["train/ghost/*"]))
+        logger.log_metrics({"loss": 1.0}, step=1, prefix="train")
+        with caplog.at_level(logging.WARNING, logger="nemo_rl.utils.logger"):
+            logger.log_metrics({"loss": 0.5}, step=1, prefix="validation-HelpSteer3")
+        warns = [
+            r for r in caplog.records if "matched no logged metric" in r.getMessage()
+        ]
+        assert len(warns) == 1
+        assert "train/ghost/*" in warns[0].getMessage()
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_unmatched_denylist_does_not_warn_before_training_surface(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir, caplog
+    ):
+        """Initial validation should not warn about train-only patterns before train logs exist."""
+        import logging
+
+        logger = Logger(self._make_cfg(temp_dir, ["train/ghost/*"]))
+        with caplog.at_level(logging.WARNING, logger="nemo_rl.utils.logger"):
+            logger.log_metrics({"accuracy": 0.5}, step=0, prefix="validation")
+            warns = [
+                r
+                for r in caplog.records
+                if "matched no logged metric" in r.getMessage()
+            ]
+            assert len(warns) == 0
+            logger.log_metrics({"loss": 1.0}, step=1, prefix="train")
+            logger.log_metrics({"accuracy": 0.6}, step=1, prefix="validation")
+        warns = [
+            r for r in caplog.records if "matched no logged metric" in r.getMessage()
+        ]
+        assert len(warns) == 1
+        assert warns[0].getMessage().count("train/ghost/*") == 1
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_unmatched_denylist_warning_uses_tracking_lock(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir
+    ):
+        """Warning snapshots should be synchronized with background metric filtering."""
+        logger = Logger(self._make_cfg(temp_dir, ["ray/node.*"]))
+        logger.log_metrics({"loss": 1.0}, step=1, prefix="train")
+
+        entered_warn = threading.Event()
+
+        def warn_unmatched():
+            entered_warn.set()
+            logger.log_metrics({"accuracy": 0.5}, step=1, prefix="validation")
+
+        with logger._denylist_lock:
+            warn_thread = threading.Thread(target=warn_unmatched)
+            warn_thread.start()
+            assert entered_warn.wait(timeout=1.0)
+            time.sleep(0.05)
+            assert warn_thread.is_alive()
+
+        warn_thread.join(timeout=1.0)
+        assert not warn_thread.is_alive()
 
     @patch("nemo_rl.utils.logger.WandbLogger")
     @patch("nemo_rl.utils.logger.TensorboardLogger")

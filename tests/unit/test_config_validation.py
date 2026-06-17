@@ -38,6 +38,9 @@ pytestmark = pytest.mark.run_first
 register_omegaconf_resolvers()
 
 
+_REGEX_ONLY_METACHARS = frozenset("()+{}|^$\\")
+
+
 def validate_config_section(
     section_config: Dict[str, Any],
     config_class: Type,
@@ -189,6 +192,45 @@ def test_all_config_no_tp_size_accuracy_issues(config_file):
         )
 
 
+def _assert_metric_denylist_pattern_is_clean_glob(
+    pat: Any, config_file: str, seen: set[str]
+) -> None:
+    assert isinstance(pat, str) and pat, (
+        f"{config_file}: empty/non-string metric_denylist entry {pat!r}"
+    )
+    assert pat == pat.strip(), (
+        f"{config_file}: metric_denylist entry has surrounding whitespace: {pat!r}"
+    )
+    assert not any(c in pat for c in _REGEX_ONLY_METACHARS), (
+        f"{config_file}: metric_denylist entry looks like a regex, not an fnmatch glob: {pat!r}"
+    )
+    assert pat not in seen, (
+        f"{config_file}: duplicate metric_denylist entry: {pat!r}"
+    )
+    seen.add(pat)
+
+
+def test_metric_denylist_pattern_rejects_regex_only_metacharacters():
+    """Regex-only syntax should fail the static denylist-pattern validation."""
+    seen: set[str] = set()
+    for pattern in (
+        "train/foo|bar",
+        "train/foo+",
+        "train/foo{1}",
+        "^train/foo",
+        "train/foo$",
+        r"train/foo\d",
+    ):
+        with pytest.raises(AssertionError, match="looks like a regex"):
+            _assert_metric_denylist_pattern_is_clean_glob(
+                pattern, "test-config.yaml", seen
+            )
+
+    _assert_metric_denylist_pattern_is_clean_glob(
+        "train/total_reward/[mp]*", "test-config.yaml", seen
+    )
+
+
 @pytest.mark.parametrize("config_file", config_files)
 def test_metric_denylist_patterns_are_valid_globs(config_file):
     """Every logger.metric_denylist entry is a clean fnmatch glob, not a typo that silently no-ops."""
@@ -201,16 +243,4 @@ def test_metric_denylist_patterns_are_valid_globs(config_file):
         return
     seen: set[str] = set()
     for pat in denylist:
-        assert isinstance(pat, str) and pat, (
-            f"{config_file}: empty/non-string metric_denylist entry {pat!r}"
-        )
-        assert pat == pat.strip(), (
-            f"{config_file}: metric_denylist entry has surrounding whitespace: {pat!r}"
-        )
-        assert not any(c in pat for c in "()"), (
-            f"{config_file}: metric_denylist entry looks like a regex, not an fnmatch glob: {pat!r}"
-        )
-        assert pat not in seen, (
-            f"{config_file}: duplicate metric_denylist entry: {pat!r}"
-        )
-        seen.add(pat)
+        _assert_metric_denylist_pattern_is_clean_glob(pat, config_file, seen)
