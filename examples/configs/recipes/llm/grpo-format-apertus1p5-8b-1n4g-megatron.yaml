@@ -1,0 +1,60 @@
+# Format-reward GRPO probe for Apertus 1.5 8B SFT.
+# Inherits the probe knobs (TP2/PP1, ApertusForCausalLM, sleep_level=2, vllm mem 0.40),
+# swaps DeepScaler+math for ifbench prompts + the structural format reward.
+# See nemo_rl_apertus/environments/format_env.py for the reward shape.
+defaults: ./probe-grpo-apertus1p5-8b-1n4g-megatron.yaml
+
+grpo:
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 8   # leave-one-out baseline; 8 covers the ~6% doom-loop rate seen at temp=0.7 in the vibe test
+  max_num_steps: 100
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+
+policy:
+  # 8K total sequence so think=True rollouts can actually finish their thinking instead of truncating at the budget (24% of think=True vibe-test runs hit max_tokens at 2K).
+  max_total_sequence_length: 8192
+  train_global_batch_size: 64   # = num_prompts_per_step * num_generations_per_prompt
+  tokenizer:
+    name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed.snapshot-20260611
+    # Force thinking on for every rollout — this is the regime we want to fix.
+    chat_template_kwargs:
+      enable_thinking: true
+  generation:
+    max_new_tokens: ${policy.max_total_sequence_length}
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+
+data:
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: ApertusFormatDataset
+    data_path: nemo_rl_apertus/data/format_blend_ifbench.jsonl
+  validation: null
+  default:
+    dataset_name: ApertusFormatDataset
+    prompt_file: null
+    system_prompt_file: null
+    processor: "math_data_processor"
+    env_name: "apertus_format"
+
+env:
+  apertus_format:
+    tokenizer_path: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed.snapshot-20260611
+    rep_ngram: 5
+    rep_threshold: 3
+    rep_full_weight_at: 23
+    unclosed_thinking_penalty: 0.5
+    repetition_penalty: 0.5
+    clip_min: 0.0
+    clip_max: 1.0
+
+logger:
+  # Probe recipe hardcodes another user's path; override to land under this repo's logs/.
+  log_dir: logs/grpo-format-apertus
+  wandb_enabled: false
+  tensorboard_enabled: false
