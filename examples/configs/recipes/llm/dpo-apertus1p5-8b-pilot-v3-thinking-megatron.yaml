@@ -1,0 +1,71 @@
+# Pilot DPO v3 — aggressive thinking-degeneration target.
+#
+# Goal: drive down unclosed-thinking + pattern-lock-in-thinking specifically.
+# v3 is more aggressive than v2 in three ways:
+#   - Tighter pair predicates (chosen ttr ≥ 0.30, top_5gram < 5; rejected =
+#     unclosed-thinking OR pattern-lock-inside-thinking; length-match 0.3).
+#     Result: 5,276 high-contrast pairs from 2,070 prompts.
+#   - Lower β (10 vs 25) — looser KL anchor, more policy movement.
+#   - Higher lr (2e-6 vs 1e-6), 4 epochs vs 2.
+#
+# Trade-off: smaller dataset, so more risk of overfit. Compensated by
+# extra-aggressive hyperparams in case overfit is the price of actually
+# moving the metrics.
+defaults: ./dpo-apertus1p5-8b-pilot-megatron.yaml
+
+dpo:
+  max_num_epochs: 4
+  max_num_steps: 165   # 5,276 / 128 ≈ 41 steps/epoch × 4 epochs
+  val_period: 0
+  val_batches: 0
+  val_at_start: false
+  val_at_end: false
+  seed: 42
+  reference_policy_kl_penalty: 10.0
+  preference_average_log_probs: true
+  sft_average_log_probs: true
+  preference_loss_weight: 1.0
+  sft_loss_weight: 0.0
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: results/dpo-apertus-pilot-v3
+  save_period: 25
+  keep_top_k: 5
+
+policy:
+  max_total_sequence_length: 8192
+  train_global_batch_size: 128
+  train_micro_batch_size: 1
+  megatron_cfg:
+    tensor_model_parallel_size: 4
+    activation_checkpointing: true
+    optimizer:
+      lr: 2.0e-6
+      min_lr: 0.0
+    scheduler:
+      lr_warmup_iters: 15
+      lr_decay_iters: 165
+      lr_decay_style: linear
+
+data:
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  train:
+    dataset_name: BinaryPreferenceDataset
+    data_path: logs/dpo_pairs_thinking_focused.jsonl
+    split: train
+  validation: null
+
+logger:
+  log_dir: logs/dpo-apertus-pilot-v3
+  wandb_enabled: true
+  tensorboard_enabled: false
+  mlflow_enabled: false
+  swanlab_enabled: false
+  wandb:
+    project: apertus-nemo-rl
+    name: dpo-apertus-pilot-v3-beta10-thinking-8n
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 8
