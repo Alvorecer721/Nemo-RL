@@ -253,6 +253,7 @@ guides/ft-launcher-guide.md
 
 apertus-quickstart.md
 apertus-traps-and-invariants.md
+apertus-dpo.md
 ```
 
 ```{toctree}
