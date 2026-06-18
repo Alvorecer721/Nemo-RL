@@ -18,7 +18,7 @@ Where the fork-specific work lives:
 
 A few **edits do touch upstream in-tree files** (so the runtime guard above matters):
 
-- `nemo_rl/models/huggingface/common.py` — `is_apertus_model()` wired into `ModelFlag.VLLM_LOAD_FORMAT_AUTO`. Apertus must vLLM-disk-load (`load_format="auto"`), because its xIELU `beta`/`eps` **buffers** are in the HF checkpoint but NOT in the Bridge `export_hf_weights` refit stream; with `dummy` load they stay at noise and gen↔train KL silently regresses to ~0.79 (fixed: 0.0003).
+- `nemo_rl/models/huggingface/common.py` + the Bridge `apertus_bridge.py` — Apertus vLLM-**dummy**-loads like other refit-fed models: `apertus_bridge.maybe_modify_converted_hf_weight` emits the xIELU `beta`/`eps` constants into the `export_hf_weights` refit stream, so they reach the generation engine without a disk-load. `is_apertus_model()` is kept only as the runtime-guard checkout sentinel. (Previously Apertus forced `load_format="auto"` to disk-load those `beta`/`eps` **buffers** — with `dummy` they were noise and gen↔train KL silently regressed to ~0.79; the refit-emit keeps it ~0.0003.)
 - `nemo_rl/algorithms/grpo.py` — guards `vllm_cfg.sleep_level>=2` against `val_at_start` in colocated mode.
 
 Read these before changing anything in the weight/generation path: `docs/apertus-quickstart.md` (clone-and-run) and `docs/apertus-traps-and-invariants.md` (gates, the KL=0.0003 invariant, certification ladder). Both are also linked from `docs/index.md`.
