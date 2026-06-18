@@ -38,6 +38,26 @@ JUDGE_FREE_AGENTS = (
 )
 
 
+def _stringify_none(obj):
+    # Apertus chat template concatenates ``tool.description`` and friends
+    # directly; a None in any tool field raises at render time.
+    if obj is None:
+        return ""
+    if isinstance(obj, dict):
+        return {k: _stringify_none(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_stringify_none(x) for x in obj]
+    return obj
+
+
+def _normalize_row(row: dict) -> dict:
+    p = row.get("responses_create_params") or {}
+    if p.get("tools"):
+        p["tools"] = _stringify_none(p["tools"])
+        row["responses_create_params"] = p
+    return row
+
+
 def _load_blend_rows(repo: str, config: str) -> list[dict]:
     src = hf_hub_download(repo_id=repo, filename=f"{config}.jsonl", repo_type="dataset")
     rows: list[dict] = []
@@ -88,7 +108,7 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w") as f:
         for r in selected:
-            f.write(json.dumps(r) + "\n")
+            f.write(json.dumps(_normalize_row(r)) + "\n")
 
     final = Counter(r["agent_ref"]["name"] for r in selected)
     print(f"[done] wrote {len(selected)} rows → {args.out}", file=sys.stderr)
