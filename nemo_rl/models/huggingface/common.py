@@ -50,7 +50,7 @@ class ModelFlag(Enum):
     def matches(self, model_name: str) -> bool:
         match self:
             case ModelFlag.VLLM_LOAD_FORMAT_AUTO:
-                return is_gemma_model(model_name) or is_apertus_model(model_name)
+                return is_gemma_model(model_name)
             case _:
                 raise ValueError(f"Unknown ModelFlag: {self}")
 
@@ -65,17 +65,11 @@ def is_gemma_model(model_name: str) -> bool:
 
 
 def is_apertus_model(model_name: str) -> bool:
-    """Apertus must disk-load vLLM weights (load_format='auto'), not 'dummy'.
+    """Whether the model is Apertus (xIELU activation; model_type == "apertus").
 
-    vLLM's dummy loader fills *buffers* as well as parameters with noise.
-    Apertus' xIELU activation keeps `beta` (0.5) and `eps` (-1e-6) as
-    non-trainable buffers: they are present in the HF checkpoint but are NOT
-    part of the Megatron-Bridge `export_hf_weights` refit stream (which only
-    carries trainable parameters). With load_format='dummy' the buffers stay
-    at noise (~1e-3) forever, silently corrupting every MLP activation in the
-    generation engine (training/generation KL ~0.79 on Apertus 8B).
-    Disk-loading at engine init restores them; refit keeps overwriting the
-    trainable parameters as usual.
+    xIELU's beta/eps constants now flow through the Megatron-Bridge refit
+    (apertus_bridge.maybe_modify_converted_hf_weight), so Apertus no longer
+    needs load_format="auto" — it dummy-loads like other refit-fed models.
     """
     hf_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     return getattr(hf_config, "model_type", None) == "apertus"

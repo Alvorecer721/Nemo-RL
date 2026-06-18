@@ -12,6 +12,7 @@ grpo:
   max_num_steps: 3
   val_period: 0
   val_at_start: false
+  cot_think_token_ids: [32, 33]   # thinking-pair token ids, for CoT-length logging
 
 data:
   train:
@@ -24,7 +25,7 @@ checkpointing:
 policy:
   model_name: /capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200  # pragma: allowlist secret
   tokenizer:
-    name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed.snapshot-20260611
+    name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed_tools_fixed
   train_global_batch_size: 32   # = num_prompts_per_step * num_generations_per_prompt
   train_micro_batch_size: 1
   logprob_batch_size: 2

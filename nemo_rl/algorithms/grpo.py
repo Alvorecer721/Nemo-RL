@@ -169,6 +169,8 @@ class GRPOConfig(TypedDict):
     seq_logprob_error_threshold: float | None
     # Advantage estimator configuration (grpo or reinforce_plus_plus)
     adv_estimator: NotRequired[AdvEstimatorConfig]
+    # (start, end) token ids of the thinking span, for chain-of-thought length logging
+    cot_think_token_ids: NotRequired[list[int] | None]
 
 
 class GRPOSaveState(TypedDict):
@@ -567,6 +569,19 @@ def setup(
         policy_config["megatron_cfg"]["train_iters"] = total_train_iters
 
     # Define initialization functions that will be used in all paths
+    init_reference_model = loss_config["reference_policy_kl_penalty"] > 0
+
+    # Auto-enable skip_reference_policy_logprobs_calculation when the reference model is not loaded.
+    if not init_reference_model and not grpo_config.get(
+        "skip_reference_policy_logprobs_calculation"
+    ):
+        grpo_config["skip_reference_policy_logprobs_calculation"] = True
+        print(
+            "Auto-enabling `grpo.skip_reference_policy_logprobs_calculation=True` "
+            "because `loss_fn.reference_policy_kl_penalty == 0` "
+            "(reference model is not loaded)."
+        )
+
     def init_policy():
         """Initialize policy training workers."""
         t0 = time.perf_counter()
@@ -578,6 +593,7 @@ def setup(
             weights_path=weights_path,
             optimizer_path=optimizer_path,
             init_optimizer=True,
+            init_reference_model=init_reference_model,
         )
         return p, time.perf_counter() - t0
 
@@ -1534,6 +1550,11 @@ def grpo_train(
                             generation_config=generation_config,
                             max_rollout_turns=None,
                             greedy=False,
+                            cot_token_ids=(
+                                tuple(master_config["grpo"]["cot_think_token_ids"])
+                                if master_config["grpo"].get("cot_think_token_ids")
+                                else None
+                            ),
                         )
                         input_ids = nemo_gym_rollout_result.input_ids
                         repeated_batch = nemo_gym_rollout_result.final_batch
@@ -1563,6 +1584,11 @@ def grpo_train(
                                 "max_rollout_turns"
                             ],
                             greedy=False,
+                            cot_token_ids=(
+                                tuple(master_config["grpo"]["cot_think_token_ids"])
+                                if master_config["grpo"].get("cot_think_token_ids")
+                                else None
+                            ),
                         )
                     else:
                         repeated_batch, rollout_metrics = run_multi_turn_rollout(
@@ -1577,6 +1603,11 @@ def grpo_train(
                                 "max_rollout_turns"
                             ],
                             greedy=False,
+                            cot_token_ids=(
+                                tuple(master_config["grpo"]["cot_think_token_ids"])
+                                if master_config["grpo"].get("cot_think_token_ids")
+                                else None
+                            ),
                         )
                     policy_generation.finish_generation()
                     # Collect generation logger metrics for performance reporting after each generation step
@@ -1596,8 +1627,17 @@ def grpo_train(
                 )
                 # Process rewards with custom reward function
                 if master_config["grpo"]["reward_shaping"]["enabled"]:
+                    reward_shaping_cfg = master_config["grpo"]["reward_shaping"]
+                    pass_rate = None
+                    if reward_shaping_cfg.get("alp_coef") is not None:
+                        pass_rate, _ = calculate_baseline_and_std_per_prompt(
+                            input_ids,
+                            repeated_batch["total_reward"],
+                            torch.ones_like(repeated_batch["total_reward"]),
+                            leave_one_out_baseline=False,
+                        )
                     repeated_batch = apply_reward_shaping(
-                        repeated_batch, master_config["grpo"]["reward_shaping"]
+                        repeated_batch, reward_shaping_cfg, pass_rate=pass_rate
                     )
 
                 # Calculate rewards & advantages
@@ -2271,6 +2311,11 @@ def validate(
                     generation_config=generation_config,
                     max_rollout_turns=None,
                     greedy=False,
+                    cot_token_ids=(
+                        tuple(master_config["grpo"]["cot_think_token_ids"])
+                        if master_config["grpo"].get("cot_think_token_ids")
+                        else None
+                    ),
                 )
                 val_batch = nemo_gym_rollout_result.final_batch
                 gen_metrics = nemo_gym_rollout_result.rollout_metrics

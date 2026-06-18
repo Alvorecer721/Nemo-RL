@@ -49,9 +49,32 @@ class RewardShapingConfig(TypedDict):
     # When set to 1, no penalty is applied (default behavior).
     stop_properly_penalty_coef: NotRequired[float | None]
 
+    # Adaptive Length Penalty coefficient (Xiang et al. 2025): reward -= alp_coef * pass_rate *
+    # response_length / max_response_length. Difficulty-aware — harder prompts (lower pass rate)
+    # are penalized less. Mutually exclusive with the DAPO overlong / stop-properly penalties.
+    alp_coef: NotRequired[float | None]
+
+    # N-gram repetition penalty: reward -= ngram_penalty_coef * max(0, distinct-n rate - threshold).
+    # Additive with whichever length penalty runs (applied before the early-returning branches).
+    ngram_penalty_coef: NotRequired[float | None]
+
+    # Repetition rate at or below this threshold incurs no penalty (clean responses,
+    # including long-but-clean CoT, are untouched); the penalty scales with the excess.
+    ngram_penalty_threshold: NotRequired[float]
+
+
+def _assistant_response_length(message_log) -> int:
+    """Number of tokens in the assistant response of a single sample's message log."""
+    for message in message_log:
+        if message["role"] == "assistant":
+            return message["token_ids"].shape[0]
+    raise AssertionError("Assistant response not found during reward shaping")
+
 
 def apply_reward_shaping(
-    batch: BatchedDataDict, cfg: RewardShapingConfig
+    batch: BatchedDataDict,
+    cfg: RewardShapingConfig,
+    pass_rate: torch.Tensor | None = None,
 ) -> BatchedDataDict:
     """Process rewards by applying penalties for responses exceeding max_response_length. Currently, this function only supports DAPO reward shaping as illustrated in the DAPO paper : https://arxiv.org/pdf/2503.14476.
 
@@ -59,6 +82,53 @@ def apply_reward_shaping(
     """
     rewards = batch["total_reward"]
     if not cfg["enabled"]:
+        return batch
+
+    # N-gram repetition penalty applied first so it composes additively with whichever
+    # length penalty (ALP / stop-properly / DAPO) returns early below.
+    ngram_penalty_coef = cfg.get("ngram_penalty_coef")
+    if ngram_penalty_coef is not None:
+        ngram_rate = batch.get("ngram_repetition_rate")
+        if ngram_rate is not None:
+            threshold = cfg.get("ngram_penalty_threshold", 0.0)
+            excess = (
+                ngram_rate.to(device=rewards.device, dtype=rewards.dtype) - threshold
+            ).clamp(min=0.0)
+            rewards = rewards - ngram_penalty_coef * excess
+            batch["total_reward"] = rewards
+
+    # Adaptive Length Penalty (Xiang et al. 2025): difficulty-aware length penalty.
+    alp_coef = cfg.get("alp_coef", None)
+    if alp_coef is not None:
+        assert pass_rate is not None, (
+            "reward_shaping.alp_coef is set but pass_rate was not provided"
+        )
+        assert cfg.get("max_response_length"), (
+            "reward_shaping.alp_coef is set but max_response_length is not configured (must be > 0)"
+        )
+        shadowed = [
+            k
+            for k in (
+                "stop_properly_penalty_coef",
+                "overlong_buffer_length",
+                "overlong_buffer_penalty",
+            )
+            if cfg.get(k) is not None
+        ]
+        if shadowed:
+            print(
+                f"[WARN] alp_coef is set, so the following penalties are ignored: {', '.join(shadowed)}.",
+                flush=True,
+            )
+        ell_max = cfg["max_response_length"]
+        resp_lengths = torch.tensor(
+            [_assistant_response_length(ml) for ml in batch["message_log"]],
+            dtype=rewards.dtype,
+            device=rewards.device,
+        )
+        batch["total_reward"] = (
+            rewards - alp_coef * pass_rate.to(rewards.device) * resp_lengths / ell_max
+        )
         return batch
 
     # Apply stop properly penalty if configured
@@ -136,15 +206,7 @@ def apply_reward_shaping(
 
     updated_rewards = torch.zeros_like(rewards)
     for i, message_log in enumerate(batch["message_log"]):
-        # Get the assistant response length (index 1 is the assistant response)
-        message_response_length = None
-        for message in message_log:
-            if message["role"] == "assistant":
-                message_response_length = message["token_ids"].shape[0]
-                break
-        assert message_response_length is not None, (
-            "Assistant response not found during reward shaping"
-        )
+        message_response_length = _assistant_response_length(message_log)
 
         # Calculate the exceed length and the corresponding reward penalty
         exceed_length = message_response_length - expected_response_length

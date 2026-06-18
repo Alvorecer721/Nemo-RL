@@ -16,6 +16,7 @@
 
 import json
 import logging
+from functools import lru_cache
 from typing import Any, Dict, cast
 
 import torch
@@ -758,6 +759,60 @@ def nemo_gym_data_processor(
     return output
 
 
+@lru_cache(maxsize=8)
+def _open_rl_prompt_store(store_prefix: str):
+    """Open and cache the Megatron MMIDIDX store for the rl_prompt dataset.
+
+    Imported lazily so this module stays importable without megatron.
+    """
+    from megatron.core.datasets.indexed_dataset import IndexedDataset
+
+    return IndexedDataset(store_prefix)
+
+
+def mmididx_grpo_data_processor(
+    datum_dict: dict[str, Any],
+    task_data_spec: TaskDataSpec,
+    tokenizer: TokenizerType,
+    max_seq_length: int | None,
+    idx: int,
+) -> DatumSpec:
+    """Process one prompt-only omni ``rl_prompt`` doc into a DatumSpec.
+
+    The doc is already tokenized (text + inline image tokens), so its token-ids are
+    passed straight through with no chat template and no re-tokenization;
+    ``answer``/``answer_variants`` become the verifier env's ground truth.
+    """
+    store = _open_rl_prompt_store(datum_dict["store_prefix"])
+    record = store[int(datum_dict["doc_index"])]
+    if isinstance(record, tuple):  # multimodal stores return (tokens, modes)
+        record = record[0]
+    token_ids = torch.tensor(record, dtype=torch.long)
+    message_log: LLMMessageLogType = [
+        {"role": "user", "content": "", "token_ids": token_ids}
+    ]
+    length = int(token_ids.shape[0])
+
+    loss_multiplier = 1.0
+    if max_seq_length is not None and length >= max_seq_length:
+        # oversized prompt: shrink and mask out of the loss
+        message_log[0]["token_ids"] = token_ids[: max(1, min(4, max_seq_length))]
+        loss_multiplier = 0.0
+
+    output: DatumSpec = {
+        "message_log": message_log,
+        "length": length,
+        "extra_env_info": {
+            "ground_truth": datum_dict["ground_truth"],
+            "answer_variants": list(datum_dict.get("answer_variants") or []),
+        },
+        "loss_multiplier": loss_multiplier,
+        "idx": idx,
+        "task_name": datum_dict["task_name"],
+    }
+    return output
+
+
 # Processor registry. Key is the processor name, value is the processor function.
 # Note: We cast the literal dict to Dict[str, TaskDataProcessFnCallable] because
 # type checkers see each concrete function's signature as a distinct callable type.
@@ -776,6 +831,7 @@ PROCESSOR_REGISTRY: Dict[str, TaskDataProcessFnCallable] = cast(
         "sft_processor": sft_processor,
         "vlm_hf_data_processor": vlm_hf_data_processor,
         "nemo_gym_data_processor": nemo_gym_data_processor,
+        "mmididx_grpo_data_processor": mmididx_grpo_data_processor,
     },
 )
 

@@ -35,7 +35,7 @@ if Path(LOCKED_NEMO_RL_REPO, "nemo_rl").is_dir():
         LOCKED_NEMO_RL_REPO
     ), f"nemo_rl resolved outside the locked runtime: {nemo_rl.__file__}"
 
-TOKENIZER_PATH = "/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed.snapshot-20260611"
+TOKENIZER_PATH = "/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed_tools_fixed"
 
 
 @pytest.fixture(scope="session")

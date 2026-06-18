@@ -27,6 +27,7 @@ from nemo_rl.data.datasets.response_datasets.general_conversations_dataset impor
 from nemo_rl.data.datasets.response_datasets.geometry3k import Geometry3KDataset
 from nemo_rl.data.datasets.response_datasets.gsm8k import GSM8KDataset
 from nemo_rl.data.datasets.response_datasets.helpsteer3 import HelpSteer3Dataset
+from nemo_rl.data.datasets.response_datasets.math500_dataset import Math500Dataset
 from nemo_rl.data.datasets.response_datasets.nemogym_dataset import NemoGymDataset
 from nemo_rl.data.datasets.response_datasets.nemotron_cascade2_sft import (
     NemotronCascade2SFTMathDataset,
@@ -40,6 +41,7 @@ from nemo_rl.data.datasets.response_datasets.openmathinstruct2 import (
 )
 from nemo_rl.data.datasets.response_datasets.refcoco import RefCOCODataset
 from nemo_rl.data.datasets.response_datasets.response_dataset import ResponseDataset
+from nemo_rl.data.datasets.response_datasets.rl_prompt_dataset import RLPromptDataset
 from nemo_rl.data.datasets.response_datasets.squad import SquadDataset
 from nemo_rl.data.datasets.response_datasets.tulu3 import Tulu3SftMixtureDataset
 
@@ -60,11 +62,13 @@ DATASET_REGISTRY = {
     "squad": SquadDataset,
     "tulu3_sft_mixture": Tulu3SftMixtureDataset,
     "gsm8k": GSM8KDataset,
+    "math500": Math500Dataset,
     "Nemotron-Cascade-2-SFT-Math": NemotronCascade2SFTMathDataset,
     # load from local JSONL file or HuggingFace
     "openai_format": OpenAIFormatDataset,
     "NemoGymDataset": NemoGymDataset,
     "ResponseDataset": ResponseDataset,
+    "RLPromptDataset": RLPromptDataset,
 }
 
 
@@ -104,6 +108,7 @@ __all__ = [
     "DeepScalerDataset",
     "Geometry3KDataset",
     "HelpSteer3Dataset",
+    "Math500Dataset",
     "NemoGymDataset",
     "NemotronCascade2SFTMathDataset",
     "OasstDataset",
@@ -111,6 +116,7 @@ __all__ = [
     "OpenMathInstruct2Dataset",
     "RefCOCODataset",
     "ResponseDataset",
+    "RLPromptDataset",
     "SquadDataset",
     "Tulu3SftMixtureDataset",
     "load_response_dataset",
