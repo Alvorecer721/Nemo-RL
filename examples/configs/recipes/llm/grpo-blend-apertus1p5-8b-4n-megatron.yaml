@@ -1,0 +1,89 @@
+# Mixed-env GRPO smoke probe for Apertus 1.5 8B SFT.
+#
+# Threads 7 judge-free NeMo-Gym agents (IFEval, MCQA, structured outputs,
+# code_gen, tool-use × 2, calendar) through a single GRPO loop. Each prompt
+# in the input JSONL carries an ``agent_ref.name`` field that NeMo-Gym uses
+# to dispatch the rollout to the matching resources-server. One vLLM HTTP
+# endpoint serves all rollouts; one verifier rewards each.
+#
+# Goal: validate the full mixed-env pipeline end-to-end (registry → vLLM
+# HTTP → gym dispatch → per-agent reward → GRPO step). Not a tuned recipe.
+defaults: ./probe-grpo-apertus1p5-8b-1n4g-megatron.yaml
+
+grpo:
+  num_prompts_per_step: 16
+  num_generations_per_prompt: 4
+  max_num_steps: 5
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  max_val_samples: null
+
+policy:
+  max_total_sequence_length: 4096
+  train_global_batch_size: 64   # = num_prompts_per_step * num_generations_per_prompt
+  tokenizer:
+    name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed.snapshot-20260611
+    chat_template_kwargs:
+      enable_thinking: true
+  generation:
+    backend: vllm
+    max_new_tokens: ${policy.max_total_sequence_length}
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    vllm_cfg:
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.40
+      max_model_len: ${policy.max_total_sequence_length}
+      sleep_level: 2
+      async_engine: true
+      expose_http_server: true
+      http_server_serving_chat_kwargs:
+        enable_auto_tools: true
+
+data:
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: true
+  num_workers: 1
+  train:
+    dataset_name: NemoGymDataset
+    data_path: nemo_rl_apertus/data/blend_judge_free_smoke.jsonl
+  validation: null
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+
+env:
+  should_use_nemo_gym: true
+  nemo_gym:
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/instruction_following/configs/instruction_following.yaml
+    - resources_servers/mcqa/configs/mcqa.yaml
+    - resources_servers/structured_outputs/configs/structured_outputs_json.yaml
+    - resources_servers/code_gen/configs/code_gen.yaml
+    - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
+    - resources_servers/single_step_tool_use_with_argument_comparison/configs/toolcall_schema_single_step_tool_use_with_argument_comparison.yaml
+    - resources_servers/calendar/configs/calendar.yaml
+    code_gen:
+      resources_servers:
+        code_gen:
+          num_processes: 64
+          unit_test_timeout_secs: 10
+          debug: false
+
+logger:
+  log_dir: logs/grpo-blend-apertus-smoke
+  wandb_enabled: false
+  tensorboard_enabled: false
+  mlflow_enabled: false
+  swanlab_enabled: false
+  num_val_samples_to_print: 0
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 4
