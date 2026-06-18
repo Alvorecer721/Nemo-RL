@@ -1,0 +1,51 @@
+# Online DPO on the reference MaxMin online prompt set (SwissAI online-PO parity).
+#
+# Same fused online-DPO path as the probe recipe (GRPO rollouts + UltraFeedback judge +
+# DPO loss + optional reference refresh), but consumes the reference's PROMPT-ONLY
+# parquet (train_maxmin_online_full.parquet: a `prompt` column of {role,content} turns)
+# via the additive prompt_only loader + online_prompt_processor
+# (nemo_rl_apertus/online_data.py). The processor also stashes the raw prompt in
+# extra_env_info["judge_prompt"], so the judge scores a clean prompt (not the
+# chat-template-rendered string).
+#
+# Needs a reachable judge endpoint (JUDGE_BASE_URL / JUDGE_API_KEY / JUDGE_MODEL).
+# Launch via:  RECIPE=<this file> infra/slurm/cscs/probe_online_dpo.sh
+defaults: probe-online-dpo-apertus1p5-8b-1n4g-megatron.yaml
+
+# Consume the reference MaxMin online prompts via the additive prompt-only loader.
+data:
+  # Cap the prompt so it leaves room for generation within the model context:
+  # max_input_seq_length + generation.max_new_tokens(512) <= max_model_len(4096),
+  # else a long MaxMin prompt is vLLM-truncated and the pair is masked. Raise all
+  # three (max_input_seq_length / max_total_sequence_length / max_model_len) together
+  # for longer prompts (the reference used 8192 prompt + 2048 response).
+  max_input_seq_length: 3584
+  train:
+    dataset_name: prompt_only         # nemo_rl_apertus.online_data (registered at startup)
+    data_path: /iopsstor/scratch/cscs/rkreft/online-dpo-data/train_maxmin_online_full.parquet  # reference prompt-only parquet; repoint as needed
+    prompt_key: prompt                # column holding the {role,content} turns
+    processor: online_prompt_processor
+    split_validation_size: 0.0
+  default:
+    env_name: online_dpo_judge        # route prompts to the judge env
+    processor: online_prompt_processor
+
+# MaxMin prompts can be long; widen the budget so they aren't all length-masked.
+policy:
+  max_total_sequence_length: 4096
+  generation:
+    vllm_cfg:
+      max_model_len: 4096
+
+# Reasoning experiments (this recipe DOES use online_prompt_processor, so the per-prompt
+# thinking toggle applies here). Uncomment to make half the prompts reason and reward a
+# reasoning-trace length calibrated to the problem's difficulty (kept a minority weight so
+# helpfulness still drives the preference):
+# online_dpo:
+#   thinking:
+#     mode: random                 # default | on | off | random
+#     probability: 0.5             # P(thinking on) per prompt; deterministic, keyed by grpo.seed
+# env:
+#   online_dpo_judge:
+#     aspects: ["helpfulness", "thinking_appropriateness", "thinking_formatting"]
+#     aspect_weights: {helpfulness: 1.0, thinking_appropriateness: 0.3, thinking_formatting: 0.2}

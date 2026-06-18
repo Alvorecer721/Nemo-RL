@@ -648,6 +648,33 @@ class MegatronPolicyWorkerImpl(AbstractPolicyWorker, ColocatablePolicyInterface)
             if self.should_disable_forward_pre_hook:
                 self.enable_forward_pre_hook()
 
+    def update_reference_model(self) -> None:
+        """Refresh the reference weights to the current policy (online-DPO ref update).
+
+        Online DPO can periodically reset the reference to the current policy
+        (``reference_update_freq > 0``). This re-snapshots the live model into
+        ``self.reference_state_dict`` (the same CPU state dict ``use_reference_model``
+        swaps in), so the next ``get_reference_policy_logprobs`` uses the updated
+        reference. Mirrors the snapshot in ``use_reference_model``; each rank
+        snapshots its own shard, so no collective is needed (PP/TP-safe).
+        """
+        assert hasattr(self, "reference_state_dict"), (
+            "update_reference_model called but this worker has no reference model "
+            "(it was created with init_reference_model=False)"
+        )
+        ## disable overlap param gather while reading weights (as in use_reference_model)
+        if self.should_disable_forward_pre_hook:
+            self.disable_forward_pre_hook()
+        with torch.no_grad():
+            new_reference_state_dict = {}
+            for name, item in self.model.state_dict().items():
+                if isinstance(item, torch.Tensor):
+                    item = item.detach().to(device="cpu", non_blocking=True, copy=True)
+                new_reference_state_dict[name] = item
+            self.reference_state_dict = new_reference_state_dict
+        if self.should_disable_forward_pre_hook:
+            self.enable_forward_pre_hook()
+
     @wrap_with_nvtx_name("megatron_policy_worker/get_topk_logits")
     def get_topk_logits(
         self,

@@ -1,0 +1,109 @@
+# Probe: online DPO on Apertus 1.5 8B — GRPO rollouts + UltraFeedback judge + DPO loss.
+# Validates the fused online-DPO path on one GH200 node:
+#   (1) GRPO-style rollout + per-step Megatron->vLLM refit (reused from GRPO),
+#   (2) the pluggable HTTP judge scoring rollouts (env: online_dpo_judge),
+#   (3) on-the-fly chosen/rejected pair construction + the stock DPO loss,
+#   (4) optional reference refresh (reference_update_freq).
+# Run via examples/run_online_dpo_apertus.py. Needs a reachable judge endpoint:
+# set JUDGE_BASE_URL / JUDGE_API_KEY / JUDGE_MODEL (e.g. via infra/slurm/cscs/serve_judge.slurm).
+#
+# This is a GRPO recipe (rollout/cluster knobs live in `grpo:`) plus an `online_dpo:`
+# block for the DPO loss + online extras. The inherited GRPO `loss_fn:` is built and
+# discarded by the driver (see nemo_rl_apertus/online_dpo.py).
+defaults: ../../grpo_math_8B_megatron.yaml
+
+grpo:
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 4   # R rollouts per prompt; best=chosen, worst=rejected
+  max_num_steps: 3
+  max_num_epochs: 1
+  max_rollout_turns: 1            # single-turn generation for preference data
+  val_period: 0                   # >0 = held-out judge validation every N steps (needs val data, e.g. data.train.split_validation_size>0)
+  val_at_start: false             # validate once before training (step 0)
+  val_at_end: false               # validate once on the final step
+  seed: 42
+
+# DPO-specific deltas (consumed by nemo_rl_apertus/online_dpo.py).
+online_dpo:
+  reference_update_freq: -1            # -1/0 = frozen reference (stock DPO); N>0 = refresh every N steps
+  tie_eps: 1.0e-4                      # group whose (max-min) judge score <= tie_eps is masked
+  reference_policy_kl_penalty: 0.1     # DPO beta (stock DPOLossConfig key)
+  preference_loss_weight: 1.0
+  sft_loss_weight: 0.0
+  preference_average_log_probs: true
+  # num_logged_rollouts: -1            # rollouts/step -> <log_dir>/online_dpo_rollouts_step<N>.jsonl (<0/absent=all, 0=off, N=first N)
+  # val_batches: 4                     # cap held-out val batches per validation (absent = all); validation is judge-only (no DPO loss)
+  # train_on_truncated: false          # false (default) = mask truncated rollouts (GRPO parity); true = keep them so a low judge score (e.g. the thinking_* aspects) makes a truncated/incomplete rollout the rejected
+  # Per-prompt policy reasoning toggle. Applies ONLY when data.*.processor is
+  # online_prompt_processor (the MaxMin recipe; NOT this probe's DeepScaler +
+  # math_hf_data_processor). Decided once per prompt -> shared across its R rollouts.
+  # thinking:
+  #   mode: random                     # default (template default) | on | off | random
+  #   probability: 0.5                 # P(thinking on) per prompt when mode == random (deterministic, keyed by grpo.seed)
+
+# Pluggable judge environment (scores each rollout; the driver ranks by it).
+env:
+  online_dpo_judge:
+    type: ultrafeedback           # build_judge() backend; pairwise/reward_model/... can drop in later
+    aspects: ["helpfulness"]      # subset of {instruction_following, honesty, truthfulness, helpfulness, thinking_appropriateness, thinking_formatting}
+    # aspects: ["helpfulness", "thinking_appropriateness", "thinking_formatting"]   # add the reasoning axes (for thinking rollouts)
+    # aspect_weights: {helpfulness: 1.0, thinking_appropriateness: 0.3, thinking_formatting: 0.2}   # optional per-aspect weights (default: equal mean)
+    max_concurrency: 512          # concurrent judge HTTP calls per batch
+    # base_url / api_key / model resolve from JUDGE_BASE_URL / JUDGE_API_KEY / JUDGE_MODEL
+    # (JUDGE_MODEL must equal the server's served-model-name). Set here to pin them in-config.
+    # Further knobs (defaults shown; uncomment to override):
+    # request_timeout: 60.0       # per-call HTTP timeout (s)
+    # top_logprobs: 20            # first-token top-logprobs the score expectation reads
+    # enable_thinking: false      # passed as chat_template_kwargs (e.g. disable Qwen thinking)
+    # NOTE: this probe uses the inherited math_hf_data_processor, which does NOT set
+    # extra_env_info["judge_prompt"], so the judge sees the chat-template-rendered prompt
+    # (the fallback path). For clean prompts (SPIN-style), use a processor that stashes the
+    # raw prompt in extra_env_info["judge_prompt"] — the env prefers it automatically.
+
+data:
+  train:
+    dataset_name: DeepScaler      # prompt-only smoke set (few-MB download); judge ignores ground_truth
+    split_validation_size: 0.05
+  default:
+    env_name: online_dpo_judge    # route the task to the judge env (replaces the inherited "math")
+
+checkpointing:
+  enabled: false
+
+policy:
+  model_name: /capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200  # pragma: allowlist secret
+  tokenizer:
+    name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed_tools_fixed
+    disable_default_system_prompt: true   # emit an empty <|system_start|><|system_end|> instead of the Apertus Omni default
+  # One preference pair per prompt -> train_global_batch_size == num_prompts_per_step
+  # (the DPO loss doubles the batch internally for the chosen/rejected interleave).
+  train_global_batch_size: 8
+  train_micro_batch_size: 1
+  logprob_batch_size: 2
+  max_total_sequence_length: 2048
+
+  megatron_cfg:
+    converter_type: "ApertusForCausalLM"
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
+    sequence_parallel: false
+    bias_activation_fusion: false
+    optimizer:
+      use_distributed_optimizer: true
+
+  generation:
+    max_new_tokens: 512
+    vllm_cfg:
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.55
+      max_model_len: 2048
+      sleep_level: 2
+
+logger:
+  wandb_enabled: false
+  tensorboard_enabled: false
+  log_dir: logs/online-dpo-apertus-probe
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 1

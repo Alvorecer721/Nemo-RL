@@ -1754,6 +1754,25 @@ class DTensorPolicyWorkerImpl(AbstractPolicyWorker, ColocatablePolicyInterface):
                 val = to_local_if_dtensor(v)
                 val.copy_(curr_state_dict[k])
 
+    def update_reference_model(self) -> None:
+        """Refresh the reference weights to the current policy (online-DPO ref update).
+
+        Online DPO can periodically reset the reference to the current policy
+        (``reference_update_freq > 0``). This re-snapshots the live model into
+        ``self.reference_model_state_dict`` (the same CPU state dict
+        ``use_reference_model`` swaps in), so the next
+        ``get_reference_policy_logprobs`` uses the updated reference. Each rank
+        snapshots its own shard (DTensor-local), so no collective is needed.
+        """
+        assert hasattr(self, "reference_model_state_dict"), (
+            "update_reference_model called but this worker has no reference model "
+            "(it was created with init_reference_model=False)"
+        )
+        with torch.no_grad():
+            self.reference_model_state_dict = get_cpu_state_dict(
+                self.model.state_dict().items(), pin_memory=True
+            )
+
     def _add_noise_to_weights(self) -> None:
         """Add small Gaussian noise to the weights of the model. Note that this is used for testing purposes only."""
         noise_std = 0.01  # Standard deviation for the noise

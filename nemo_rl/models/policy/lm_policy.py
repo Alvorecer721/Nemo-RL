@@ -928,6 +928,16 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         futures = self.worker_group.run_all_workers_single_data("offload_after_refit")
         ray.get(futures)
 
+    def update_reference_model(self) -> None:
+        """Refresh the reference model to the current policy weights (online-DPO ref update).
+
+        Used by online DPO when ``reference_update_freq > 0`` to periodically reset
+        the frozen reference to the live policy. Each worker re-snapshots its own
+        shard into its reference state dict (no collective needed).
+        """
+        futures = self.worker_group.run_all_workers_single_data("update_reference_model")
+        ray.get(futures)
+
     def save_checkpoint(
         self,
         weights_path: str,
