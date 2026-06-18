@@ -1,0 +1,78 @@
+# Pilot DPO v2 — Apertus-only pairs (no Qwen teacher), maxmin-style loss.
+#
+# Why v2:
+#   v1 (β=0.1, token-sum loss, mixed teacher+on-policy data) had the loss
+#   converge cleanly (0.69 → 0.46) but barely moved the behavioral metrics:
+#   +0.40pp thinking_closed, +1.38pp is_correct format across 250 steps. The
+#   policy was effectively pinned to the reference: with token-sum DPO at
+#   mean ≈ 4,500 tokens/turn, the effective β scales up by sequence length,
+#   so β=0.1 → effective β ≈ 450, which is way too strong an anchor.
+#
+# v2 changes:
+#   - Drop teacher-fallback pairs entirely (chosen + rejected both from
+#     Apertus rollouts) → 19,504 pairs. No Qwen-style transfer signal.
+#   - Switch to the maxmin-reference loss formulation:
+#       preference_average_log_probs: true  (length-normalize the log-probs)
+#       reference_policy_kl_penalty: 25     (the reference recipe's β)
+#     These two together approximate effective β ≈ 25 / mean_len ≈ 0.005,
+#     which is *much* looser than v1 and lets the policy actually move.
+#   - 2 epochs over the 19.5K-pair dataset (≈ 305 steps at gbs=128).
+#   - 8 nodes (TP=4, DP=8) → ~12s/step → ~1h total compute.
+defaults: ./dpo-apertus1p5-8b-pilot-megatron.yaml
+
+dpo:
+  max_num_epochs: 2
+  max_num_steps: 305
+  val_period: 0
+  val_batches: 0
+  val_at_start: false
+  val_at_end: false
+  seed: 42
+  reference_policy_kl_penalty: 25.0
+  preference_average_log_probs: true
+  sft_average_log_probs: true
+  preference_loss_weight: 1.0
+  sft_loss_weight: 0.0
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: results/dpo-apertus-pilot-v2
+  save_period: 50
+  keep_top_k: 4
+
+policy:
+  max_total_sequence_length: 8192
+  train_global_batch_size: 128
+  train_micro_batch_size: 1
+  megatron_cfg:
+    tensor_model_parallel_size: 4
+    activation_checkpointing: true
+    optimizer:
+      lr: 1.0e-6   # back to the maxmin recipe's lr (was 5e-7 in v1)
+      min_lr: 0.0
+    scheduler:
+      lr_warmup_iters: 30
+      lr_decay_iters: 305
+      lr_decay_style: linear
+
+data:
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  train:
+    dataset_name: BinaryPreferenceDataset
+    data_path: logs/dpo_pairs_apertus_only_clean.jsonl
+    split: train
+  validation: null
+
+logger:
+  log_dir: logs/dpo-apertus-pilot-v2
+  wandb_enabled: true
+  tensorboard_enabled: false
+  mlflow_enabled: false
+  swanlab_enabled: false
+  wandb:
+    project: apertus-nemo-rl
+    name: dpo-apertus-pilot-v2-beta25-avglogprobs-8n
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 8
