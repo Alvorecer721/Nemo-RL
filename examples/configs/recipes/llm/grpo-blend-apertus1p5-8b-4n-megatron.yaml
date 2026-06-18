@@ -60,14 +60,17 @@ data:
 env:
   should_use_nemo_gym: true
   nemo_gym:
+    # Tool-bearing agents (single_step_tool_use_* and toolcall_schema_*) are
+    # excluded because the Apertus chat template's ``render_tools`` macro
+    # accesses ``tool.description`` unguardedly, and ``tool_simulation_agent``
+    # constructs chat requests whose tool descriptions Jinja sees as None.
+    # Re-add them once the chat template is patched to ``tool.description or ''``.
     config_paths:
     - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
     - resources_servers/instruction_following/configs/instruction_following.yaml
     - resources_servers/mcqa/configs/mcqa.yaml
     - resources_servers/structured_outputs/configs/structured_outputs_json.yaml
     - resources_servers/code_gen/configs/code_gen.yaml
-    - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
-    - resources_servers/single_step_tool_use_with_argument_comparison/configs/toolcall_schema_single_step_tool_use_with_argument_comparison.yaml
     - resources_servers/calendar/configs/calendar.yaml
     code_gen:
       resources_servers:

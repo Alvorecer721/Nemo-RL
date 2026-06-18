@@ -32,9 +32,11 @@ JUDGE_FREE_AGENTS = (
     "mcqa_simple_agent",
     "structured_outputs_simple_agent",
     "code_gen_simple_agent",
-    "single_step_tool_use_with_argument_comparison_agent",
-    "toolcall_schema_single_step_tool_use_with_argument_comparison_agent",
     "calendar_simple_agent",
+    # Tool-bearing agents (single_step_tool_use_*, toolcall_schema_*) are
+    # excluded until the Apertus chat template's render_tools macro is
+    # patched: it accesses tool.description unguardedly and Jinja errors
+    # on the tool_simulation_agent's synthesized request.
 )
 
 
