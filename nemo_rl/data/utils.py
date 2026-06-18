@@ -25,7 +25,7 @@ from nemo_rl.data.datasets import (
     load_response_dataset,
     update_single_dataset_config,
 )
-from nemo_rl.data.processors import preference_preprocessor
+from nemo_rl.data.processors import PROCESSOR_REGISTRY, preference_preprocessor
 from nemo_rl.environments.interfaces import EnvironmentInterface
 from nemo_rl.environments.utils import create_env
 
@@ -241,7 +241,17 @@ def setup_preference_data(
     if "default" in data_config:
         update_single_dataset_config(data_config["train"], data_config["default"])
     data = load_preference_dataset(data_config["train"])
-    task_data_processors = {data.task_name: (data.task_spec, preference_preprocessor)}
+    # Apertus: honor a configurable preference processor (data.processor) — e.g. a tools/thinking-
+    # aware one (nemo_rl_apertus.data_processors) — instead of always using preference_preprocessor.
+    pref_processor = preference_preprocessor
+    _pref_proc_name = data_config["train"].get("processor")
+    if _pref_proc_name:
+        assert _pref_proc_name in PROCESSOR_REGISTRY, (
+            f"Preference processor '{_pref_proc_name}' not in PROCESSOR_REGISTRY; register it first "
+            "(e.g. nemo_rl_apertus.data_processors.register_offline_dpo_processors())."
+        )
+        pref_processor = PROCESSOR_REGISTRY[_pref_proc_name]
+    task_data_processors = {data.task_name: (data.task_spec, pref_processor)}
     task_data_preprocessors = {}
     if hasattr(data, "preprocessor") and data.preprocessor is not None:
         task_data_preprocessors[data.task_name] = data.preprocessor
@@ -273,7 +283,7 @@ def setup_preference_data(
                 {"dataset_name": "PreferenceDataset", "data_path": val_dataset_path}
             )
             val_task_data_processors = {
-                val_data.task_name: (val_data.task_spec, preference_preprocessor)
+                val_data.task_name: (val_data.task_spec, pref_processor)
             }
             if hasattr(val_data, "preprocessor") and val_data.preprocessor is not None:
                 val_task_data_preprocessors = {
@@ -299,7 +309,7 @@ def setup_preference_data(
             )
         val_data = load_preference_dataset(data_config["validation"])
         val_task_data_processors = {
-            val_data.task_name: (val_data.task_spec, preference_preprocessor)
+            val_data.task_name: (val_data.task_spec, pref_processor)
         }
         if hasattr(val_data, "preprocessor") and val_data.preprocessor is not None:
             val_task_data_preprocessors = {val_data.task_name: val_data.preprocessor}
