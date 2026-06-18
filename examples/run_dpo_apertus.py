@@ -11,10 +11,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Entry point for Apertus offline DPO.
+
+Identical to ``run_dpo.py`` but (1) guards that ``nemo_rl`` resolves to this checkout, and
+(2) registers the Apertus tools/thinking-aware preference processor so a recipe can select it
+via ``data.processor: apertus_tool_thinking_preference`` (``setup_preference_data`` honors
+``data.processor``). Use it when the preference traces contain tool calls or thinking; for plain
+chosen/rejected text, stock ``run_dpo.py`` with ``BinaryPreferenceDataset`` is sufficient.
+"""
 
 import argparse
 import os
 import pprint
+import sys
+
+# Make this checkout's nemo_rl_apertus importable regardless of PYTHONPATH (the offline DPO
+# launchers add Bridge/xielu but not the repo root, unlike submit_online_dpo.slurm).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from omegaconf import OmegaConf
 
@@ -26,31 +39,30 @@ from nemo_rl.utils.config import load_config, parse_hydra_overrides
 from nemo_rl.utils.logger import get_next_experiment_dir
 
 
-def parse_args():
+def parse_args() -> tuple[argparse.Namespace, list[str]]:
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Run DPO training with configuration")
+    parser = argparse.ArgumentParser(description="Run Apertus offline DPO with configuration")
     parser.add_argument(
         "--config", type=str, default=None, help="Path to YAML config file"
     )
-
-    # Parse known args for the script
     args, overrides = parser.parse_known_args()
-
     return args, overrides
 
 
-def main():
+def main() -> None:
     """Main entry point."""
     args, overrides = parse_args()
 
-    # Fail loud if nemo_rl is the stock /opt copy, not this checkout (see nemo_rl_apertus/runtime_guard.py).
+    # Fail loud if nemo_rl is the stock /opt copy, and register the Apertus preference processors.
     from nemo_rl_apertus.config_utils import (
         default_tokenizer_to_model,
         disable_default_system_prompt,
     )
+    from nemo_rl_apertus.data_processors import register_offline_dpo_processors
     from nemo_rl_apertus.runtime_guard import assert_apertus_runtime
 
     assert_apertus_runtime()
+    register_offline_dpo_processors()
 
     if not args.config:
         args.config = os.path.join(os.path.dirname(__file__), "configs", "dpo.yaml")
@@ -65,7 +77,6 @@ def main():
     config: MasterConfig = OmegaConf.to_container(config, resolve=True)
     print("Applied CLI overrides")
 
-    # Print config
     print("Final config:")
     pprint.pprint(config)
 
@@ -78,13 +89,10 @@ def main():
 
     init_ray()
 
-    # setup tokenizer
     default_tokenizer_to_model(config["policy"])
     tokenizer = get_tokenizer(config["policy"]["tokenizer"])
     if config["policy"]["tokenizer"].get("disable_default_system_prompt"):
         disable_default_system_prompt(tokenizer)
-
-    # setup data
     dataset, val_dataset = setup_preference_data(tokenizer, config["data"])
 
     (
@@ -98,46 +106,6 @@ def main():
         dpo_save_state,
         master_config,
     ) = setup(config, tokenizer, dataset, val_dataset)
-
-    # MPO: swap the stock DPO loss for MPOLossFn (DPO preference + BCO quality
-    # + SFT generation; InternVL MPO, arXiv:2411.10442). Everything else in
-    # this file is byte-identical to examples/run_dpo.py.
-    #
-    # delta (the BCO running reward anchor) resume threading. The stock
-    # dpo_save_state cannot carry it without stock edits: it is driver-side
-    # while the loss state is worker-side, the per-step train-metrics path
-    # only reaches dpo_save_state through the single checkpointing.metric_name
-    # slot, and validate() filters val metrics to DPOValMetrics keys. So the
-    # state flows TRL-style (BCOTrainer's running.json):
-    #   backward (worker -> disk): every train-microbatch update all-reduces
-    #     (sum, count) over the data-parallel group and atomically rewrites
-    #     <checkpoint_dir>/mpo_delta.json; `delta`/`delta_count` also appear
-    #     in the train metrics (the driver SUMS metrics across microbatches x
-    #     DP ranks before logging, so logged values are monitoring aggregates
-    #     only — the sidecar is the source of truth).
-    #   forward (disk -> worker): on (re)start each worker seeds its
-    #     module-resident state from the sidecar if present, else from
-    #     dpo.quality_delta_init / dpo.quality_delta_resume_count (the manual
-    #     override surface, e.g. when resuming in a fresh checkpoint dir).
-    #   Fresh runs (no checkpoint to resume) delete any stale sidecar so a
-    #   previous experiment's delta cannot leak in. Caveat: resuming from a
-    #   non-latest checkpoint leaves the sidecar delta slightly ahead of that
-    #   checkpoint (later batches already folded); delta is a slow-moving
-    #   anchor, so the skew is bounded — set the config keys to override.
-    from nemo_rl_apertus.mpo_loss import MPOLossFn, delta_sidecar_path
-
-    if master_config["checkpointing"]["enabled"]:
-        sidecar = delta_sidecar_path(master_config["checkpointing"]["checkpoint_dir"])
-        if checkpointer.get_latest_checkpoint_path() is None and os.path.exists(
-            sidecar
-        ):
-            os.remove(sidecar)
-        master_config["dpo"]["quality_delta_state_path"] = sidecar
-    loss_fn = MPOLossFn(
-        master_config["dpo"],
-        use_linear_ce_fusion=master_config["policy"]["megatron_cfg"]["enabled"]
-        and master_config["policy"]["megatron_cfg"]["use_linear_ce_fusion_loss"],
-    )
 
     dpo_train(
         policy,

@@ -30,15 +30,15 @@ fi
 ###############################################################################
 # Run from the repo root (`cd <repo> && sbatch <this>`) or use `sbatch --chdir=<repo> <this>`; REPO_DIR defaults to $PWD, where the relative #SBATCH logs/ also land (run `mkdir -p logs` first).
 REPO_DIR=${REPO_DIR:-$PWD}
-# NeMo-RL runtime: image default, or a filesystem worktree (validated branch
-# checkout) to run changed core/lock without rebuilding the image.
-RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
+# NeMo-RL runtime dir (driver CWD; where `uv run` resolves the project + nemo_rl). Defaults to this
+# checkout — run_dpo_apertus.py + nemo_rl_apertus live here and the runtime guard requires this
+# checkout's nemo_rl, not the image's /opt/nemo-rl. Override to a validated worktree if desired.
+RUNTIME_DIR=${RUNTIME_DIR:-$REPO_DIR}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
-# Anchor checkpoints + NeMo-RL logs to the persistent REPO_DIR. The recipe's
-# checkpoint_dir/log_dir are relative, so they resolve against the driver's CWD
-# — which is RUNTIME_DIR (default /opt/nemo-rl, the container's ephemeral
-# overlay; see `cd "$RUNTIME_DIR"` below) and would be discarded at job end,
-# breaking auto-resume. Override via CHECKPOINT_DIR/LOG_DIR.
+# Anchor checkpoints + NeMo-RL logs to the persistent REPO_DIR explicitly: the recipe's
+# checkpoint_dir/log_dir are relative (they resolve against the driver CWD = RUNTIME_DIR), so
+# pinning them keeps outputs + auto-resume stable even if RUNTIME_DIR is overridden to an
+# ephemeral dir. Override via CHECKPOINT_DIR/LOG_DIR.
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-$REPO_DIR/results/dpo-apertus1p5-8b-maxmin}
 LOG_DIR=${LOG_DIR:-$REPO_DIR/logs/dpo-apertus1p5-8b-maxmin}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
@@ -46,10 +46,19 @@ BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.1-cp313}
 # Opt-in worker-venv rebuild — pass on EVERY stock-image run when RUNTIME_DIR's uv.lock diverges from the baked venvs: the rebuild lands in /opt/ray_venvs (the container's ephemeral overlay) and does NOT persist (else the worker's numpy fails to load libscipy_openblas). Default off; `sbatch --export=ALL,NRL_FORCE_REBUILD_VENVS=true ...`. See infra/slurm/cscs/README.md (incl. NEMO_RL_VENV_DIR for real reuse).
 NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-false}
+# W&B: WANDB_API_KEY is passed through via the environment only (never on a command line). Whether
+# W&B is used is decided by the recipe's logger.wandb_enabled (the MaxMin recipe defaults it ON);
+# set WANDB_DISABLED=true to force it OFF regardless of the recipe.
+export WANDB_API_KEY=${WANDB_API_KEY:-}
+export WANDB_DISABLED=${WANDB_DISABLED:-}
+WANDB_OVERRIDE=""
+[ "${WANDB_DISABLED:-}" = true ] && WANDB_OVERRIDE="logger.wandb_enabled=false"
 
 FULL_SET=/capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-FD-nemo-rl-binpref-full/train.parquet
 SRC_SET=/capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-Filtered-Decontaminated
 
+# Force srun to carry the full job env (incl. WANDB_API_KEY/WANDB_DISABLED) into the container.
+export SLURM_EXPORT_ENV=ALL
 unset LD_PRELOAD
 srun \
   --mpi=pmix \
@@ -84,7 +93,7 @@ PYEOF
     fi
 
     echo "=== DPO training: $(basename "'"$RECIPE"'") ==="
-    uv run --locked examples/run_dpo.py --config "'"$RECIPE"'" \
-      checkpointing.checkpoint_dir="'"$CHECKPOINT_DIR"'" logger.log_dir="'"$LOG_DIR"'"
+    uv run --locked examples/run_dpo_apertus.py --config "'"$RECIPE"'" \
+      checkpointing.checkpoint_dir="'"$CHECKPOINT_DIR"'" logger.log_dir="'"$LOG_DIR"'" '$WANDB_OVERRIDE'
   '
 echo "END TIME: $(date)"

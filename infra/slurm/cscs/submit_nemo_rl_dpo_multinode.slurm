@@ -28,12 +28,15 @@ echo "START TIME: $(date)"
 # Run from the repo root (`cd <repo> && sbatch <this>`) or use `sbatch --chdir=<repo> <this>`; REPO_DIR defaults to $PWD, where the relative #SBATCH logs/ also land (run `mkdir -p logs` first).
 REPO_DIR=${REPO_DIR:-$PWD}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
-RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
-# Anchor checkpoints + NeMo-RL logs to the persistent REPO_DIR. The recipe's
-# checkpoint_dir/log_dir are relative, so they resolve against the driver's CWD
-# — which is RUNTIME_DIR (default /opt/nemo-rl, the container's ephemeral
-# overlay; see `cd "$RUNTIME_DIR"` below) and would be discarded at job end,
-# breaking auto-resume. Override via CHECKPOINT_DIR/LOG_DIR.
+# Driver CWD + where `uv run` resolves the project + nemo_rl. Defaults to this checkout
+# (run_dpo_apertus.py + nemo_rl_apertus live here; the runtime guard requires the checkout's
+# nemo_rl, not /opt/nemo-rl). Override to a worktree — e.g. the mlm-restore worktree for raw
+# Megatron base loading (see PRETRAINED_CKPT_PATH below).
+RUNTIME_DIR=${RUNTIME_DIR:-$REPO_DIR}
+# Anchor checkpoints + NeMo-RL logs to the persistent REPO_DIR explicitly: the recipe's
+# checkpoint_dir/log_dir are relative (they resolve against the driver CWD = RUNTIME_DIR), so
+# pinning them keeps outputs + auto-resume stable even if RUNTIME_DIR is overridden to an
+# ephemeral dir. Override via CHECKPOINT_DIR/LOG_DIR.
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-$REPO_DIR/results/dpo-apertus1p5-8b-maxmin}
 LOG_DIR=${LOG_DIR:-$REPO_DIR/logs/dpo-apertus1p5-8b-maxmin}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
@@ -41,6 +44,10 @@ BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.1-cp313}
 # Opt-in worker-venv rebuild — pass on EVERY stock-image run when RUNTIME_DIR's uv.lock diverges from the baked venvs: the rebuild lands in /opt/ray_venvs (the container's ephemeral overlay) and does NOT persist (else the worker's numpy fails to load libscipy_openblas). Default off; `sbatch --export=ALL,NRL_FORCE_REBUILD_VENVS=true ...`. See infra/slurm/cscs/README.md (incl. NEMO_RL_VENV_DIR for real reuse).
 NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-false}
+# W&B: WANDB_API_KEY via env only (never on a command line; carried into the tasks by
+# SLURM_EXPORT_ENV=ALL below). Recipe's logger.wandb_enabled decides usage; WANDB_DISABLED=true forces off.
+export WANDB_API_KEY=${WANDB_API_KEY:-}
+export WANDB_DISABLED=${WANDB_DISABLED:-}
 # Raw Megatron base/reference loading (requires the mlm-restore worktree as
 # RUNTIME_DIR — the pretrained_checkpoint backport lives there): set
 # PRETRAINED_CKPT_PATH to an iter_XXXXXXX dir to skip the HF conversion cache.
@@ -50,6 +57,8 @@ EXTRA_OVERRIDES=""
 if [ -n "$PRETRAINED_CKPT_PATH" ]; then
     EXTRA_OVERRIDES="+checkpointing.pretrained_checkpoint.path=$PRETRAINED_CKPT_PATH +checkpointing.pretrained_checkpoint.format=$PRETRAINED_CKPT_FORMAT"
 fi
+# W&B force-off knob folds into EXTRA_OVERRIDES (already exported + word-split in the driver run line).
+[ "${WANDB_DISABLED:-}" = true ] && EXTRA_OVERRIDES="${EXTRA_OVERRIDES:+$EXTRA_OVERRIDES }logger.wandb_enabled=false"
 GPUS_PER_NODE=4
 
 NUM_NODES=$SLURM_JOB_NUM_NODES
@@ -100,7 +109,7 @@ srun \
         echo "=== ray cluster complete: ${units}/$EXPECTED_UNITS units; starting driver ==="
         cd "$RUNTIME_DIR"
         # shellcheck disable=SC2086  # EXTRA_OVERRIDES is intentionally word-split
-        uv run --locked examples/run_dpo.py --config "$RECIPE" cluster.num_nodes="$NUM_NODES" checkpointing.checkpoint_dir="$CHECKPOINT_DIR" logger.log_dir="$LOG_DIR" $EXTRA_OVERRIDES
+        uv run --locked examples/run_dpo_apertus.py --config "$RECIPE" cluster.num_nodes="$NUM_NODES" checkpointing.checkpoint_dir="$CHECKPOINT_DIR" logger.log_dir="$LOG_DIR" $EXTRA_OVERRIDES
         ray stop
     else
         # Workers: wait for the head port, join, then live exactly as long as
