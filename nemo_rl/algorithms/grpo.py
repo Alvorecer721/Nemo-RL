@@ -567,6 +567,19 @@ def setup(
         policy_config["megatron_cfg"]["train_iters"] = total_train_iters
 
     # Define initialization functions that will be used in all paths
+    init_reference_model = loss_config["reference_policy_kl_penalty"] > 0
+
+    # Auto-enable skip_reference_policy_logprobs_calculation when the reference model is not loaded.
+    if not init_reference_model and not grpo_config.get(
+        "skip_reference_policy_logprobs_calculation"
+    ):
+        grpo_config["skip_reference_policy_logprobs_calculation"] = True
+        print(
+            "Auto-enabling `grpo.skip_reference_policy_logprobs_calculation=True` "
+            "because `loss_fn.reference_policy_kl_penalty == 0` "
+            "(reference model is not loaded)."
+        )
+
     def init_policy():
         """Initialize policy training workers."""
         t0 = time.perf_counter()
@@ -578,6 +591,7 @@ def setup(
             weights_path=weights_path,
             optimizer_path=optimizer_path,
             init_optimizer=True,
+            init_reference_model=init_reference_model,
         )
         return p, time.perf_counter() - t0
 
