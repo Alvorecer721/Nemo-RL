@@ -1,0 +1,61 @@
+# Pilot DPO for Apertus 1.5 8B on the 39,815-pair dataset built from the
+# pass@8 + Qwen3.5-9B teacher pipeline.
+#
+# Inherits the existing Apertus DPO recipe (which itself inherits ../../dpo.yaml)
+# so we get every Apertus-Megatron knob for free; we override paths,
+# preference-loss flavor (token-sum not length-averaged), shorter run, and
+# logger/checkpoint directories.
+defaults: ./dpo-apertus1p5-8b-maxmin-megatron.yaml
+
+dpo:
+  max_num_steps: 311  # 39,815 / 128 gbs ≈ 311 steps for 1 epoch
+  val_period: 0
+  val_batches: 0
+  val_at_start: false
+  val_at_end: false
+  seed: 42
+  reference_policy_kl_penalty: 0.1   # stock DPO β, not the length-normalized β=25
+  preference_average_log_probs: false
+  sft_average_log_probs: false
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: results/dpo-apertus-pilot
+  save_period: 50   # save more often so a SIGKILL still leaves a usable checkpoint
+  keep_top_k: 3
+
+policy:
+  train_global_batch_size: 128
+  train_micro_batch_size: 1
+  # Full 8K seq to preserve the Qwen teacher pairs' tails (mean chosen ≈ 4.5K,
+  # some go to 8K). Need TP=4 to shrink the per-GPU vocab-parallel logits
+  # (266K vocab × 8K seq × 2 sequences/pair ≈ 8.7 GB at TP=2 → OOM on GH200,
+  # 2.2 GB at TP=4 → comfortable).
+  max_total_sequence_length: 8192
+  megatron_cfg:
+    tensor_model_parallel_size: 4
+    activation_checkpointing: true   # saves activation memory; ~20% step-time hit
+    optimizer:
+      lr: 5.0e-7
+      min_lr: 5.0e-8
+    scheduler:
+      lr_warmup_iters: 20
+      lr_decay_iters: 311
+
+data:
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  train:
+    data_path: logs/dpo_pairs_pilot_clean.jsonl
+    split: train
+  validation: null
+
+logger:
+  log_dir: logs/dpo-apertus-pilot
+  wandb_enabled: false
+  tensorboard_enabled: false
+  mlflow_enabled: false
+  swanlab_enabled: false
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 1
