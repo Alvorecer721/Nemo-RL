@@ -51,11 +51,11 @@ def main() -> None:
     bridge = AutoBridge.from_hf_pretrained(args.hf_base, trust_remote_code=True)
     models = bridge.load_megatron_model(args.megatron_ckpt, wrap_with_ddp=False)
 
-    # The bridge exports trainable parameters only; non-trainable buffers
-    # (Apertus xIELU beta/eps) come from the base checkpoint — the same
-    # constants-from-disk rule as the vLLM refit fix. save_hf_pretrained's
+    # The bridge exports trainable params plus the Apertus xIELU beta/eps
+    # buffers (via the refit-emit override); the loop below backfills any
+    # remaining base-only tensors from the checkpoint. save_hf_pretrained's
     # shard writer refuses incomplete shards, so we assemble and write the
-    # full 451-tensor state dict ourselves as a single safetensors file.
+    # full state dict ourselves as a single safetensors file.
     import json
     from safetensors import safe_open
     from safetensors.torch import save_file
