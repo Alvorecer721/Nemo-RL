@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import fnmatch
 import glob
 import json
 import logging
@@ -91,6 +92,7 @@ class LoggerConfig(TypedDict):
     monitor_gpus: bool
     gpu_monitoring: GPUMonitoringConfig
     num_val_samples_to_print: NotRequired[int]
+    metric_denylist: NotRequired[list[str]]
 
 
 def should_log_nemo_gym_full_result_tables(
@@ -964,6 +966,8 @@ class MLflowLogger(LoggerInterface):
 class Logger(LoggerInterface):
     """Main logger class that delegates to multiple backend loggers."""
 
+    _denylist: list[str] = []
+
     def __init__(self, cfg: LoggerConfig):
         """Create and configure enabled logging backends and optionally start GPU monitoring.
 
@@ -978,6 +982,10 @@ class Logger(LoggerInterface):
         self.loggers: list[LoggerInterface] = []
         self.wandb_logger = None
         self.swanlab_logger = None
+
+        self._denylist = cfg.get("metric_denylist") or []
+        self._unmatched_patterns = set(self._denylist)
+        self._denylist_warned = False
 
         self.base_log_dir = cfg["log_dir"]
         os.makedirs(self.base_log_dir, exist_ok=True)
@@ -1032,6 +1040,24 @@ class Logger(LoggerInterface):
         if not self.loggers:
             print("No loggers initialized")
 
+    def _is_denied(self, name: str) -> bool:
+        """Whether a fully-qualified metric name matches the configured denylist."""
+        for pat in self._denylist:
+            if fnmatch.fnmatch(name, pat):
+                self._unmatched_patterns.discard(pat)
+                return True
+        return False
+
+    def _warn_unmatched_denylist(self) -> None:
+        """Warn once about denylist patterns that matched no metric this run (likely stale)."""
+        if self._denylist_warned or not self._denylist:
+            return
+        self._denylist_warned = True
+        if self._unmatched_patterns:
+            logging.getLogger(__name__).warning(
+                f"metric_denylist patterns matched no logged metric (stale or wrong surface?): {sorted(self._unmatched_patterns)}"
+            )
+
     def log_metrics(
         self,
         metrics: dict[str, Any],
@@ -1049,8 +1075,18 @@ class Logger(LoggerInterface):
             step_metric: Optional name of a field in metrics to use as step instead
                          of the provided step value (currently only needed for wandb)
         """
+        if self._denylist:
+            metrics = {
+                k: v
+                for k, v in metrics.items()
+                if not self._is_denied(
+                    k if k == step_metric else (f"{prefix}/{k}" if prefix else k)
+                )
+            }
         for logger in self.loggers:
             logger.log_metrics(metrics, step, prefix, step_metric, step_finished)
+        if prefix == "validation":
+            self._warn_unmatched_denylist()
 
     def log_hyperparams(self, params: Mapping[str, Any]) -> None:
         """Log hyperparameters to all enabled backends.
@@ -1202,6 +1238,8 @@ class Logger(LoggerInterface):
             step: Global step value
             name: Name of the metric
         """
+        if self._is_denied(name):
+            return
         for logger in self.loggers:
             logger.log_histogram(histogram, step, name)
 
@@ -1213,6 +1251,8 @@ class Logger(LoggerInterface):
             step: Global step value
             name: Name of the plot
         """
+        if self._is_denied(name):
+            return
         for logger in self.loggers:
             logger.log_plot(figure, step, name)
 

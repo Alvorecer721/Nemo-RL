@@ -50,6 +50,9 @@ ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
     "vlm": {
         "actor_class_fqn": "nemo_rl.environments.vlm_environment.VLMEnvironment",
     },
+    "single_turn_verifier": {
+        "actor_class_fqn": "nemo_rl.environments.single_turn_verifier_environment.SingleTurnVerifierEnvironment",
+    },
     "nemo_gym": {
         "actor_class_fqn": "nemo_rl.environments.nemo_gym.NemoGym",
     },

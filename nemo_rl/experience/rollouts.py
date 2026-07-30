@@ -800,6 +800,79 @@ def calculate_rewards(
     )
 
 
+def _compute_generation_quality_metrics(
+    per_sample_token_parts: list[list[torch.Tensor]],
+    per_sample_truncated: "torch.Tensor | list[bool]",
+    cot_token_ids: tuple[int, int] | None,
+    ngram_size: int = 4,
+) -> tuple[dict[str, float], torch.Tensor]:
+    """Type-token ratio + chain-of-thought-length metrics from generated tokens.
+
+    Shared across all rollout paths (sync, async, gym) so the metric definitions
+    have one source of truth and need no re-decode / re-tokenize.
+
+    Args:
+        per_sample_token_parts: per sample, the assistant-generated token-id tensors
+            (one entry per turn; concatenated internally).
+        per_sample_truncated: per-sample bool (tensor or list) — response hit max tokens.
+        cot_token_ids: optional (start, end) thinking-block token ids; when set, also
+            emits CoT length + the unclosed-think breakdown.
+        ngram_size: n-gram width for the distinct-n repetition rate.
+
+    Returns:
+        Tuple of (metric dict to merge into rollout_metrics, per-sample n-gram
+        repetition rate tensor for reward shaping).
+    """
+    batch_size = len(per_sample_token_parts)
+    type_token_ratio = torch.zeros(batch_size)
+    cot_token_counts = torch.zeros(batch_size)
+    unclosed_think = torch.zeros(batch_size, dtype=torch.bool)
+    ngram_repetition_rate = torch.zeros(batch_size)
+    for idx, parts in enumerate(per_sample_token_parts):
+        if not parts:
+            continue
+        gen_ids = torch.cat([torch.as_tensor(p).flatten() for p in parts])
+        num_gen = gen_ids.numel()
+        if num_gen == 0:
+            continue
+        type_token_ratio[idx] = torch.unique(gen_ids).numel() / num_gen
+        if num_gen >= ngram_size:
+            windows = gen_ids.unfold(0, ngram_size, 1)
+            ngram_repetition_rate[idx] = (
+                1.0 - torch.unique(windows, dim=0).shape[0] / windows.shape[0]
+            )
+        if cot_token_ids is not None:
+            starts = (gen_ids == cot_token_ids[0]).nonzero(as_tuple=True)[0]
+            if starts.numel() > 0:
+                start = starts[0]
+                ends = (gen_ids == cot_token_ids[1]).nonzero(as_tuple=True)[0]
+                ends = ends[ends > start]
+                if ends.numel() > 0:
+                    cot_token_counts[idx] = ends[0] - start - 1
+                else:
+                    # opened a think block but never closed it (ran to EOD/truncation)
+                    cot_token_counts[idx] = num_gen - start - 1
+                    unclosed_think[idx] = True
+
+    metrics = {
+        "mean_type_token_ratio": float(type_token_ratio.mean().item()),
+        "mean_ngram_repetition_rate": float(ngram_repetition_rate.mean().item()),
+    }
+    if cot_token_ids is not None:
+        truncated = torch.as_tensor(per_sample_truncated, dtype=torch.bool)
+        metrics["mean_cot_tokens_per_sample"] = float(cot_token_counts.mean().item())
+        metrics["max_cot_tokens_per_sample"] = float(cot_token_counts.max().item())
+        # Unclosed think split by why generation stopped: max tokens mid-think vs EOD.
+        metrics["unclosed_think_rate"] = float(unclosed_think.float().mean().item())
+        metrics["max_tokens_while_thinking_rate"] = float(
+            (unclosed_think & truncated).float().mean().item()
+        )
+        metrics["eos_while_thinking_rate"] = float(
+            (unclosed_think & ~truncated).float().mean().item()
+        )
+    return metrics, ngram_repetition_rate
+
+
 def run_multi_turn_rollout(
     policy_generation: GenerationInterface,
     input_batch: BatchedDataDict[DatumSpec],
@@ -809,6 +882,7 @@ def run_multi_turn_rollout(
     max_rollout_turns: int = 999999,
     greedy: bool = False,
     deduplicate_multimodal_data: bool = False,
+    cot_token_ids: tuple[int, int] | None = None,
 ) -> tuple[BatchedDataDict[DatumSpec], dict[str, Any]]:
     """Runs a multi-turn rollout loop, interacting with the environment.
 
@@ -823,6 +897,8 @@ def run_multi_turn_rollout(
         deduplicate_multimodal_data: Send only native media through the vLLM
             generation boundary while retaining compact policy media for
             logprob and training.
+        cot_token_ids: Optional (start, end) thinking-block token ids; when set, logs
+            per-sample chain-of-thought length.
 
     Returns:
         Tuple containing:
@@ -844,6 +920,9 @@ def run_multi_turn_rollout(
     sample_turn_counts = torch.zeros(batch_size, dtype=torch.int32)
     sample_token_counts = torch.zeros(batch_size, dtype=torch.int32)
     sample_assistant_token_counts = torch.zeros(batch_size, dtype=torch.int32)
+    sample_assistant_token_ids: list[list[torch.Tensor]] = [
+        [] for _ in range(batch_size)
+    ]
     sample_env_token_counts = torch.zeros(batch_size, dtype=torch.int32)
     sample_terminated = torch.zeros(batch_size, dtype=torch.bool)
     sample_truncated = torch.zeros(batch_size, dtype=torch.bool)
@@ -913,6 +992,7 @@ def run_multi_turn_rollout(
         for i, global_idx in enumerate(active_indices.tolist()):
             sample_assistant_token_counts[global_idx] += len(generated_ids[i])
             sample_token_counts[global_idx] += len(generated_ids[i])
+            sample_assistant_token_ids[global_idx].append(generated_ids[i])
 
         # Track total generated tokens this turn
         total_gen_tokens_per_turn.append(sum(len(ids) for ids in generated_ids))
@@ -1047,6 +1127,11 @@ def run_multi_turn_rollout(
             sample_env_token_counts.float().mean().item()
         ),
     }
+    metrics, ngram_rate = _compute_generation_quality_metrics(
+        sample_assistant_token_ids, sample_truncated, cot_token_ids
+    )
+    rollout_metrics.update(metrics)
+    current_batch["ngram_repetition_rate"] = ngram_rate
     return current_batch, rollout_metrics
 
 
@@ -1554,6 +1639,7 @@ def run_async_multi_turn_rollout(
     max_rollout_turns: int = 999999,
     greedy: bool = False,
     deduplicate_multimodal_data: bool = False,
+    cot_token_ids: tuple[int, int] | None = None,
 ) -> tuple[BatchedDataDict[DatumSpec], dict[str, Any]]:
     """Run a complete native rollout batch from a synchronous call site.
 
@@ -1569,6 +1655,12 @@ def run_async_multi_turn_rollout(
         max_seq_len: Maximum total token length for each rollout sample.
         max_rollout_turns: Maximum number of agent-environment interaction turns.
         greedy: Whether policy generation should use greedy decoding.
+        deduplicate_multimodal_data: Send only native media through the vLLM
+            generation boundary while retaining compact policy media for
+            logprob and training.
+        cot_token_ids: accepted for call-site parity; generation-quality metrics are
+            not computed on this async path (see run_multi_turn_rollout /
+            run_async_nemo_gym_rollout)
 
     Returns:
         A tuple containing the completed rollout batch and metrics aggregated over
@@ -2240,6 +2332,7 @@ async def run_async_nemo_gym_rollout(
     sampling_params: Optional[GenerationSamplingParams] = None,
     deduplicate_multimodal_data: bool = False,
     debug_payload_metrics: bool = False,
+    cot_token_ids: tuple[int, int] | None = None,
 ) -> AsyncGenerator[NemoGymRolloutResult, None]:
     """Stream complete NeMo-Gym prompt groups in group-completion order.
 
@@ -2278,6 +2371,8 @@ async def run_async_nemo_gym_rollout(
             remote Gym return and restore the exact original payload locally.
         debug_payload_metrics: Emit logical, physical, and serialized media
             payload metrics at the Gym Ray boundary.
+        cot_token_ids: Optional (start, end) thinking-block token ids used for
+            generation-quality metrics.
 
     Yields:
         ``NemoGymRolloutResult`` objects in prompt-group completion order. Rows
@@ -2668,6 +2763,19 @@ def _postprocess_single_nemo_gym_group(
             # )
             # / batch_size,
         }
+        metrics, ngram_rate = _compute_generation_quality_metrics(
+            [
+                [
+                    m["token_ids"]
+                    for m in r["message_log"]
+                    if m["role"] == "assistant"
+                ]
+                for r in results
+            ],
+            [m["hit_max_tokens"] for m in all_sample_metrics],
+            cot_token_ids,
+        )
+        rollout_metrics.update(metrics)
 
     # Per-agent misc metrics
     with timer.time(f"{timer_prefix}/per_agent_misc_metrics"):
@@ -2741,6 +2849,7 @@ def _postprocess_single_nemo_gym_group(
             "truncated": torch.tensor(
                 [m["hit_max_tokens"] for m in all_sample_metrics], dtype=torch.bool
             ),
+            "ngram_repetition_rate": ngram_rate,
         }
     )
     # Env/agent mask flag: flagged samples are dropped from the loss but still
