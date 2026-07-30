@@ -26,6 +26,8 @@ class VllmSpecificArgs(TypedDict):
     # Additional arguments for vLLM inserted by nemo rl based on the context of when vllm is used
     skip_tokenizer_init: bool
     async_engine: bool
+    # vLLM sleep level when offloading between generation phases: 1 backs weights up to host RAM, 2 discards them (lower host memory, correct when weights are refit every step).
+    sleep_level: NotRequired[int]
     load_format: NotRequired[str]
     precision: NotRequired[str]
     kv_cache_dtype: Literal["auto", "fp8", "fp8_e4m3"]
