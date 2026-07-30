@@ -1658,9 +1658,8 @@ def run_async_multi_turn_rollout(
         deduplicate_multimodal_data: Send only native media through the vLLM
             generation boundary while retaining compact policy media for
             logprob and training.
-        cot_token_ids: accepted for call-site parity; generation-quality metrics are
-            not computed on this async path (see run_multi_turn_rollout /
-            run_async_nemo_gym_rollout)
+        cot_token_ids: Optional (start, end) thinking-block token ids used for
+            generation-quality metrics.
 
     Returns:
         A tuple containing the completed rollout batch and metrics aggregated over
@@ -1681,7 +1680,18 @@ def run_async_multi_turn_rollout(
             deduplicate_multimodal_data=deduplicate_multimodal_data,
         )
     )
-    return final_batch, _aggregate_multi_turn_rollout_metrics(sample_metrics)
+    rollout_metrics = _aggregate_multi_turn_rollout_metrics(sample_metrics)
+    quality_metrics, ngram_rate = _compute_generation_quality_metrics(
+        [
+            [message["token_ids"] for message in log if message["role"] == "assistant"]
+            for log in final_batch["message_log"]
+        ],
+        [metrics["truncated"] for metrics in sample_metrics],
+        cot_token_ids,
+    )
+    rollout_metrics.update(quality_metrics)
+    final_batch["ngram_repetition_rate"] = ngram_rate
+    return final_batch, rollout_metrics
 
 
 async def run_async_multi_turn_rollout_groups(
