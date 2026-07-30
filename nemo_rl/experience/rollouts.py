@@ -1209,9 +1209,8 @@ def run_async_multi_turn_rollout(
         max_seq_len: Maximum sequence length allowed
         max_rollout_turns: Maximum number of agent-environment interaction turns
         greedy: Whether to use greedy decoding
-        cot_token_ids: accepted for call-site parity; generation-quality metrics are
-            not computed on this async path (see run_multi_turn_rollout /
-            run_async_nemo_gym_rollout)
+        cot_token_ids: optional (start, end) thinking-block token ids; when set, also
+            emits CoT length + the unclosed-think breakdown.
 
     Returns:
         Tuple containing:
@@ -1378,6 +1377,17 @@ def run_async_multi_turn_rollout(
         rollout_metrics["histogram/total_tokens_length"] = [
             t for m in all_sample_metrics for t in m["turn_total_tokens"]
         ]
+
+        metrics, ngram_rate = _compute_generation_quality_metrics(
+            [
+                [msg["token_ids"] for msg in ml if msg["role"] == "assistant"]
+                for ml in final_batch["message_log"]
+            ],
+            [m["truncated"] for m in all_sample_metrics],
+            cot_token_ids,
+        )
+        rollout_metrics.update(metrics)
+        final_batch["ngram_repetition_rate"] = ngram_rate
 
         return final_batch, rollout_metrics
 

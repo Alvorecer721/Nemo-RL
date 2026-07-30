@@ -27,6 +27,7 @@ from nemo_rl.environments.interfaces import EnvironmentInterface
 from nemo_rl.experience.interfaces import Completion, PromptGroupRecord
 from nemo_rl.experience.rollouts import (
     _calculate_single_metric,
+    _compute_generation_quality_metrics,
     _tensorize_by_key,
     calculate_rewards,
 )
@@ -55,6 +56,7 @@ class AsyncRolloutImpl:
         max_seq_len: int,
         policy_generation: GenerationInterface,
         max_rollout_turns: int = 999999,
+        cot_token_ids: Optional[tuple[int, int]] = None,
         **kwargs: Any,
     ) -> None:
         self._tokenizer = tokenizer
@@ -63,6 +65,7 @@ class AsyncRolloutImpl:
         self._max_seq_len = max_seq_len
         self._max_rollout_turns = max_rollout_turns
         self._policy_generation = policy_generation
+        self._cot_token_ids = cot_token_ids
 
     async def run_rollout(self, input_sample: DatumSpec) -> PromptGroupRecord:
         """Run num_generations_per_prompt rollouts for one prompt.
@@ -370,6 +373,16 @@ class AsyncRolloutImpl:
             t for m in all_sample_metrics for t in m["turn_total_tokens"]
         ]
 
+        quality_metrics, _ = _compute_generation_quality_metrics(
+            [
+                [m["token_ids"] for m in c.message_log if m["role"] == "assistant"]
+                for c in completions
+            ],
+            truncated,
+            self._cot_token_ids,
+        )
+        rollout_metrics.update(quality_metrics)
+
         # Necessary for downstream nemo rl logging/printing.
         rollout_metrics["mean_gen_tokens_per_sample"] = rollout_metrics[
             "gen_tokens_per_sample/mean"
@@ -392,6 +405,7 @@ class AsyncNemoGymRolloutImpl:
         max_seq_len: int,
         generation_config: GenerationConfig,
         max_rollout_turns: Optional[int] = None,
+        cot_token_ids: Optional[tuple[int, int]] = None,
         **kwargs: Any,
     ) -> None:
         self._tokenizer = tokenizer
@@ -400,6 +414,7 @@ class AsyncNemoGymRolloutImpl:
         self._max_seq_len = max_seq_len
         self._max_rollout_turns = max_rollout_turns
         self._generation_config = generation_config
+        self._cot_token_ids = cot_token_ids
 
         self._validate_init_params()
 
@@ -556,6 +571,16 @@ class AsyncNemoGymRolloutImpl:
             "truncation_rate": sum(truncated) / n,
         }
 
+        quality_metrics, _ = _compute_generation_quality_metrics(
+            [
+                [m["token_ids"] for m in c.message_log if m["role"] == "assistant"]
+                for c in completions
+            ],
+            truncated,
+            self._cot_token_ids,
+        )
+        rollout_metrics.update(quality_metrics)
+
         # Agent-level metrics.
         agent_extras = [c.env_extras for c in completions]
         for key in agent_extras[0].keys():
@@ -593,6 +618,7 @@ class RolloutManager:
         policy_generation: Optional[GenerationInterface] = None,
         generation_config: Optional[GenerationConfig] = None,
         use_nemo_gym: bool = False,
+        cot_token_ids: Optional[tuple[int, int]] = None,
     ) -> None:
         assert num_generations_per_prompt >= 1, (
             "num_generations_per_prompt must be >= 1"
@@ -619,6 +645,7 @@ class RolloutManager:
             max_rollout_turns=max_rollout_turns,  # type: ignore
             policy_generation=policy_generation,  # type: ignore
             generation_config=generation_config,
+            cot_token_ids=cot_token_ids,
         )
 
     async def run_rollout(self, input_sample: DatumSpec) -> PromptGroupRecord:
