@@ -28,7 +28,7 @@ RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nemo_rl_dpo_apertus_${SLURM_JOB_ID}}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.0-cp313}
 APERTUS_CKPT=${APERTUS_CKPT:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200}
-APERTUS_TOKENIZER=${APERTUS_TOKENIZER:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed_tools_fixed}
+APERTUS_TOKENIZER=${APERTUS_TOKENIZER:-swiss-ai/Apertus-v1.5-8B}
 
 mkdir -p "$RUN_DIR"
 echo "batch_host=$(hostname) run_dir=$RUN_DIR"
