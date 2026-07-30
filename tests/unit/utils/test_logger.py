@@ -2076,3 +2076,253 @@ def test_print_message_log_samples(capsys):
     assert "What is 2+2?" in captured.out
     assert "2+2 = 4" in captured.out
     assert "Sample 1 | Reward: 1.0000" in captured.out
+
+
+class TestLoggerMetricDenylist:
+    """Test the metric_denylist filtering at the Logger funnel."""
+
+    @pytest.fixture
+    def temp_dir(self):
+        """Create a temporary directory for logs."""
+        temp_dir = tempfile.mkdtemp()
+        yield temp_dir
+        shutil.rmtree(temp_dir)
+
+    def _make_cfg(self, temp_dir, denylist=None):
+        cfg = {
+            "wandb_enabled": True,
+            "tensorboard_enabled": True,
+            "mlflow_enabled": False,
+            "swanlab_enabled": False,
+            "monitor_gpus": False,
+            "wandb": {"project": "test-project"},
+            "tensorboard": {"log_dir": "test_logs"},
+            "log_dir": temp_dir,
+        }
+        if denylist is not None:
+            cfg["metric_denylist"] = denylist
+        return cfg
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_is_denied_exact(self, mock_tb_logger, mock_wandb_logger, temp_dir):
+        """An exact entry denies that metric; a non-listed metric passes."""
+        logger = Logger(self._make_cfg(temp_dir, ["train/total_reward/mean"]))
+
+        assert logger._is_denied("train/total_reward/mean") is True
+        assert logger._is_denied("train/total_reward/min") is False
+        assert logger._is_denied("train/reward") is False
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_is_denied_glob_subtree(self, mock_tb_logger, mock_wandb_logger, temp_dir):
+        """'train/total_reward/*' denies a child but not a sibling prefix."""
+        logger = Logger(self._make_cfg(temp_dir, ["train/total_reward/*"]))
+
+        assert logger._is_denied("train/total_reward/min") is True
+        assert logger._is_denied("train/reward") is False
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_is_denied_glob_anchored_suffix(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir
+    ):
+        """'performance/*_per_sec' is anchored: it must not match a longer suffix."""
+        logger = Logger(self._make_cfg(temp_dir, ["performance/*_per_sec"]))
+
+        assert logger._is_denied("performance/tokens_per_sec") is True
+        assert logger._is_denied("performance/tokens_per_sec_per_gpu") is False
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_log_metrics_drops_denied_keys_no_prefix(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir
+    ):
+        """log_metrics removes denied keys before dispatching to backends."""
+        logger = Logger(
+            self._make_cfg(temp_dir, ["train/total_reward/*", "performance/*_per_sec"])
+        )
+        mock_wandb_instance = mock_wandb_logger.return_value
+        mock_tb_instance = mock_tb_logger.return_value
+
+        metrics = {
+            "train/total_reward/min": 1.0,
+            "train/reward": 2.0,
+            "performance/tokens_per_sec": 3.0,
+            "performance/tokens_per_sec_per_gpu": 4.0,
+        }
+        logger.log_metrics(metrics, step=5)
+
+        expected = {
+            "train/reward": 2.0,
+            "performance/tokens_per_sec_per_gpu": 4.0,
+        }
+        mock_wandb_instance.log_metrics.assert_called_once_with(
+            expected, 5, "", None, False
+        )
+        mock_tb_instance.log_metrics.assert_called_once_with(
+            expected, 5, "", None, False
+        )
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_log_metrics_honors_prefix(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir
+    ):
+        """Denylist is matched against the fully-qualified 'prefix/key' name."""
+        logger = Logger(self._make_cfg(temp_dir, ["train/total_reward/*"]))
+        mock_wandb_instance = mock_wandb_logger.return_value
+        mock_tb_instance = mock_tb_logger.return_value
+
+        metrics = {"total_reward/min": 1.0, "reward": 2.0}
+        logger.log_metrics(metrics, step=7, prefix="train")
+
+        expected = {"reward": 2.0}
+        mock_wandb_instance.log_metrics.assert_called_once_with(
+            expected, 7, "train", None, False
+        )
+        mock_tb_instance.log_metrics.assert_called_once_with(
+            expected, 7, "train", None, False
+        )
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_log_metrics_step_metric_not_prefixed(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir
+    ):
+        """The step_metric key is checked unprefixed, matching how backends log it.
+
+        Mirrors RayGpuMonitorLogger.flush, which adds the already-qualified
+        step_metric key and passes the same name as prefix + step_metric.
+        """
+        logger = Logger(self._make_cfg(temp_dir, ["ray/ray_step"]))
+        mock_wandb_instance = mock_wandb_logger.return_value
+
+        metrics = {"ray/ray_step": 7, "ray/gpu_0/mem": 0.5}
+        logger.log_metrics(metrics, step=7, prefix="ray", step_metric="ray/ray_step")
+
+        sent = mock_wandb_instance.log_metrics.call_args[0][0]
+        assert sent == {"ray/gpu_0/mem": 0.5}
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_log_histogram_suppressed_when_denied(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir
+    ):
+        """log_histogram is suppressed when the (already-prefixed) name is denied."""
+        logger = Logger(self._make_cfg(temp_dir, ["train/total_reward/*"]))
+        mock_wandb_instance = mock_wandb_logger.return_value
+        mock_tb_instance = mock_tb_logger.return_value
+
+        logger.log_histogram([1, 2, 3], step=1, name="train/total_reward/hist")
+        mock_wandb_instance.log_histogram.assert_not_called()
+        mock_tb_instance.log_histogram.assert_not_called()
+
+        logger.log_histogram([1, 2, 3], step=1, name="train/reward")
+        mock_wandb_instance.log_histogram.assert_called_once_with(
+            [1, 2, 3], 1, "train/reward"
+        )
+        mock_tb_instance.log_histogram.assert_called_once_with(
+            [1, 2, 3], 1, "train/reward"
+        )
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_log_plot_suppressed_when_denied(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir
+    ):
+        """log_plot is suppressed when the (already-prefixed) name is denied."""
+        logger = Logger(self._make_cfg(temp_dir, ["performance/*_per_sec"]))
+        mock_wandb_instance = mock_wandb_logger.return_value
+        mock_tb_instance = mock_tb_logger.return_value
+
+        figure = object()
+        logger.log_plot(figure, step=1, name="performance/tokens_per_sec")
+        mock_wandb_instance.log_plot.assert_not_called()
+        mock_tb_instance.log_plot.assert_not_called()
+
+        logger.log_plot(figure, step=1, name="performance/tokens_per_sec_per_gpu")
+        mock_wandb_instance.log_plot.assert_called_once_with(
+            figure, 1, "performance/tokens_per_sec_per_gpu"
+        )
+        mock_tb_instance.log_plot.assert_called_once_with(
+            figure, 1, "performance/tokens_per_sec_per_gpu"
+        )
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_empty_denylist_is_noop(self, mock_tb_logger, mock_wandb_logger, temp_dir):
+        """An empty denylist passes every metric/histogram/plot through unchanged."""
+        logger = Logger(self._make_cfg(temp_dir, []))
+        mock_wandb_instance = mock_wandb_logger.return_value
+        mock_tb_instance = mock_tb_logger.return_value
+
+        metrics = {"train/total_reward/min": 1.0, "performance/tokens_per_sec": 2.0}
+        logger.log_metrics(metrics, step=3)
+        mock_wandb_instance.log_metrics.assert_called_once_with(
+            metrics, 3, "", None, False
+        )
+        mock_tb_instance.log_metrics.assert_called_once_with(
+            metrics, 3, "", None, False
+        )
+
+        logger.log_histogram([1, 2], step=3, name="train/total_reward/hist")
+        mock_wandb_instance.log_histogram.assert_called_once_with(
+            [1, 2], 3, "train/total_reward/hist"
+        )
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_absent_denylist_is_noop(self, mock_tb_logger, mock_wandb_logger, temp_dir):
+        """An absent metric_denylist key behaves like an empty denylist."""
+        logger = Logger(self._make_cfg(temp_dir, denylist=None))
+        mock_wandb_instance = mock_wandb_logger.return_value
+        mock_tb_instance = mock_tb_logger.return_value
+
+        metrics = {"train/total_reward/min": 1.0}
+        logger.log_metrics(metrics, step=1)
+        mock_wandb_instance.log_metrics.assert_called_once_with(
+            metrics, 1, "", None, False
+        )
+        mock_tb_instance.log_metrics.assert_called_once_with(
+            metrics, 1, "", None, False
+        )
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_unmatched_denylist_warns_once(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir, caplog
+    ):
+        """A pattern that matches nothing warns exactly once, after the first validation log."""
+        import logging
+
+        logger = Logger(
+            self._make_cfg(temp_dir, ["train/total_reward/*", "train/ghost/*"])
+        )
+        logger.log_metrics({"total_reward/min": 1.0}, step=1, prefix="train")
+        with caplog.at_level(logging.WARNING, logger="nemo_rl.utils.logger"):
+            logger.log_metrics({"accuracy": 0.5}, step=1, prefix="validation")
+            logger.log_metrics({"accuracy": 0.6}, step=2, prefix="validation")
+        warns = [
+            r for r in caplog.records if "matched no logged metric" in r.getMessage()
+        ]
+        assert len(warns) == 1
+        assert "train/ghost/*" in warns[0].getMessage()
+        assert "train/total_reward/*" not in warns[0].getMessage()
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    def test_fully_matched_denylist_no_warning(
+        self, mock_tb_logger, mock_wandb_logger, temp_dir, caplog
+    ):
+        """When every denylist pattern matches a metric, no stale-pattern warning is emitted."""
+        import logging
+
+        logger = Logger(self._make_cfg(temp_dir, ["train/total_reward/*"]))
+        logger.log_metrics({"total_reward/min": 1.0}, step=1, prefix="train")
+        with caplog.at_level(logging.WARNING, logger="nemo_rl.utils.logger"):
+            logger.log_metrics({"accuracy": 0.5}, step=1, prefix="validation")
+        warns = [
+            r for r in caplog.records if "matched no logged metric" in r.getMessage()
+        ]
+        assert len(warns) == 0

@@ -207,3 +207,30 @@ def test_all_config_no_tp_size_accuracy_issues(config_file):
             f"Config file {config_file} has TP size >= 4 accuracy issues. "
             "Please set policy.train_micro_batch_size and policy.logprob_batch_size to be the same value."
         )
+
+
+@pytest.mark.parametrize("config_file", config_files)
+def test_metric_denylist_patterns_are_valid_globs(config_file):
+    """Every logger.metric_denylist entry is a clean fnmatch glob, not a typo that silently no-ops."""
+    config = load_config_with_inheritance(config_file)
+    config_dict = OmegaConf.to_container(config, resolve=True)
+    if not isinstance(config_dict, dict):
+        return
+    denylist = (config_dict.get("logger") or {}).get("metric_denylist")
+    if not denylist:
+        return
+    seen: set[str] = set()
+    for pat in denylist:
+        assert isinstance(pat, str) and pat, (
+            f"{config_file}: empty/non-string metric_denylist entry {pat!r}"
+        )
+        assert pat == pat.strip(), (
+            f"{config_file}: metric_denylist entry has surrounding whitespace: {pat!r}"
+        )
+        assert not any(c in pat for c in "()"), (
+            f"{config_file}: metric_denylist entry looks like a regex, not an fnmatch glob: {pat!r}"
+        )
+        assert pat not in seen, (
+            f"{config_file}: duplicate metric_denylist entry: {pat!r}"
+        )
+        seen.add(pat)
