@@ -1,0 +1,41 @@
+# Reasoning-ON variant of the gym GRPO recipe — for a meaningful learning signal on
+# OpenMathReasoning (reasoning-off gives a flat reward; the SFT model needs CoT to solve).
+# enable_thinking=true prompts CoT; uses_reasoning_parser stays false (Apertus has no vLLM
+# reasoning parser, and math_with_judge's math-verify extracts \boxed{} from the full text).
+# Longer sequence length to fit the chain-of-thought.
+defaults: probe-grpo-apertus1p5-8b-1n4g-megatron-gym.yaml
+
+policy:
+  max_total_sequence_length: 8192
+  generation:
+    max_new_tokens: 7680
+    vllm_cfg:
+      max_model_len: 8192
+
+env:
+  nemo_gym:
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          extra_body:
+            chat_template_kwargs:
+              enable_thinking: true
+
+logger:
+  metric_denylist:    # drop dead/duplicate plots (filtered in logger.py _is_denied; fnmatch '*' spans '/', globs are end-anchored)
+    - "*/total_reward/*"
+    - "*/math_with_judge_simple_agent/reward/*"
+    - "*/math_with_judge_simple_agent/library_reward/*"
+    - "*/math_with_judge_simple_agent/full_result"
+    - "*/natural_termination_rate"
+    - "*/mean_gen_tokens_per_sample"
+    - "*/num_valid_samples"
+    - "*/turns_per_sample/*"
+    - "*_per_sec"
+    - "*_per_sec_per_gpu"
+    - train/kl_penalty
+    - "train/vllm/spec_*"
+    - train/num_masked_seqs_by_logprob_error
+    - train/masked_correct_pct
+    - "train/probs_ratio_clamped*"
+    - train/wd

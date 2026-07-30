@@ -1,0 +1,9 @@
+# 8k reasoning recipe + DAPO soft overlong reward shaping — penalize rambling past a soft threshold.
+defaults: probe-grpo-apertus1p5-8b-1n4g-megatron-gym-reasoning.yaml
+
+grpo:
+  reward_shaping:
+    enabled: true
+    max_response_length: 7680
+    overlong_buffer_length: 2048    # no penalty below 5632; linear 5632→7680
+    overlong_buffer_penalty: 1.0
