@@ -52,6 +52,7 @@ from nemo_rl.experience.rollout_manager import (
 )
 from nemo_rl.experience.rollouts import (
     _add_multimodal_generation_payload,
+    _compute_generation_quality_metrics,
     _reattach_original_multimodal_payloads,
     async_generate_response_for_sample_turn,
     generate_responses_async,
@@ -2457,3 +2458,78 @@ def test_run_async_nemo_gym_rollout(
     1. In nemo_rl/experience/rollouts.py::run_async_nemo_gym_rollout, the sampling params are passed appropriately
     2. In nemo_rl/models/generation/vllm/vllm_worker_async.py::VllmAsyncGenerationWorker::_setup_vllm_server::create_chat_completion, the sampling params (like top_k) are set as appropriate
     """
+
+
+class TestComputeGenerationQualityMetrics:
+    """Unit tests for the shared TTR + CoT-length metric helper."""
+
+    def test_think_cases_and_truncation_split(self):
+        # ids: <think>=32, </think>=33
+        parts = [
+            [torch.tensor([5, 32, 10, 11, 12, 33, 40, 41])],
+            [torch.tensor([5, 32, 10, 11, 12, 13, 14])],
+            [torch.tensor([5, 32, 10, 11])],
+            [torch.tensor([5, 6, 7, 8])],
+        ]
+        truncated = [False, True, False, False]
+        metrics, _ = _compute_generation_quality_metrics(
+            parts, truncated, cot_token_ids=(32, 33)
+        )
+        assert metrics["mean_cot_tokens_per_sample"] == pytest.approx(
+            (3 + 5 + 2 + 0) / 4
+        )
+        assert metrics["max_cot_tokens_per_sample"] == pytest.approx(5.0)
+        assert metrics["unclosed_think_rate"] == pytest.approx(2 / 4)
+        assert metrics["max_tokens_while_thinking_rate"] == pytest.approx(1 / 4)
+        assert metrics["eos_while_thinking_rate"] == pytest.approx(1 / 4)
+
+    def test_truncated_accepts_tensor_or_list(self):
+        parts = [[torch.tensor([32, 1, 2, 3])]]
+        tensor_metrics, _ = _compute_generation_quality_metrics(
+            parts, torch.tensor([True]), (32, 33)
+        )
+        list_metrics, _ = _compute_generation_quality_metrics(
+            parts, [True], (32, 33)
+        )
+        assert tensor_metrics["max_tokens_while_thinking_rate"] == pytest.approx(1.0)
+        assert list_metrics["max_tokens_while_thinking_rate"] == pytest.approx(1.0)
+
+    def test_ttr_and_cot_disabled(self):
+        parts = [[torch.tensor([7, 7, 7, 7])], [torch.tensor([1, 2, 3, 4])]]
+        metrics, _ = _compute_generation_quality_metrics(
+            parts, [False, False], cot_token_ids=None
+        )
+        assert metrics["mean_type_token_ratio"] == pytest.approx((0.25 + 1.0) / 2)
+        assert "mean_cot_tokens_per_sample" not in metrics
+
+    def test_empty_and_multi_part_sample(self):
+        parts = [[], [torch.tensor([1, 2]), torch.tensor([2, 3])]]
+        metrics, _ = _compute_generation_quality_metrics(
+            parts, [False, False], (32, 33)
+        )
+        assert metrics["mean_type_token_ratio"] == pytest.approx((0.0 + 3 / 4) / 2)
+        assert metrics["unclosed_think_rate"] == pytest.approx(0.0)
+
+    def test_ngram_repetition_rate(self):
+        metrics, repetition_rate = _compute_generation_quality_metrics(
+            [[torch.tensor([1, 2, 3, 1, 2, 3])]],
+            [False],
+            cot_token_ids=None,
+            ngram_size=3,
+        )
+        assert repetition_rate[0] == pytest.approx(0.25)
+        assert "mean_ngram_repetition_rate" in metrics
+
+        _, rate_n4 = _compute_generation_quality_metrics(
+            [[torch.tensor([1, 2, 3, 4, 1, 2, 3, 4])]],
+            [False],
+            cot_token_ids=None,
+        )
+        assert rate_n4[0] == pytest.approx(0.2)
+
+        _, distinct_rate = _compute_generation_quality_metrics(
+            [[torch.tensor([1, 2, 3, 4, 5, 6])]],
+            [False],
+            cot_token_ids=None,
+        )
+        assert distinct_rate[0] == pytest.approx(0.0)
