@@ -306,6 +306,8 @@ class GRPOConfig(BaseModel, extra="allow"):
     deduplicate_multimodal_data: bool = False
     # Emit exact-boundary and logical-vs-physical payload metrics.
     debug_payload_metrics: bool = False
+    # (start, end) token ids of the thinking span, for chain-of-thought length logging
+    cot_think_token_ids: list[int] | None = None
 
 
 @dataclass
@@ -723,6 +725,19 @@ def setup(
     # ==========================
     print("\n▶ Setting up compute cluster...", flush=True)
     colocated_inference = generation_config["colocated"]["enabled"]
+
+    # sleep_level>=2 discards vLLM weights on sleep, so val_at_start (which consumes the pre-loop refit) would leave the first training step generating on discarded weights.
+    if (
+        colocated_inference
+        and generation_config.get("vllm_cfg", {}).get("sleep_level", 1) >= 2
+        and grpo_config["val_at_start"]
+    ):
+        raise ValueError(
+            "policy.generation.vllm_cfg.sleep_level>=2 is incompatible with grpo.val_at_start=true in "
+            "colocated mode: the pre-loop validation refit is consumed before the training loop, so the "
+            "first step generates on weights that level-2 sleep discarded. Set grpo.val_at_start=false or "
+            "policy.generation.vllm_cfg.sleep_level=1."
+        )
 
     env_name_list = extract_necessary_env_names(data_config)
     rm_env_enabled = "reward_model" in env_name_list
@@ -3045,6 +3060,11 @@ def grpo_train(
                             debug_payload_metrics=(
                                 master_config.grpo.debug_payload_metrics
                             ),
+                            cot_token_ids=(
+                                tuple(master_config.grpo.cot_think_token_ids)
+                                if master_config.grpo.cot_think_token_ids
+                                else None
+                            ),
                         )
                         input_ids = nemo_gym_rollout_result.input_ids
                         repeated_batch = nemo_gym_rollout_result.final_batch
@@ -3069,6 +3089,11 @@ def grpo_train(
                             deduplicate_multimodal_data=(
                                 master_config.grpo.deduplicate_multimodal_data
                             ),
+                            cot_token_ids=(
+                                tuple(master_config.grpo.cot_think_token_ids)
+                                if master_config.grpo.cot_think_token_ids
+                                else None
+                            ),
                         )
                     else:
                         repeated_batch, rollout_metrics = run_multi_turn_rollout(
@@ -3083,6 +3108,11 @@ def grpo_train(
                             greedy=False,
                             deduplicate_multimodal_data=(
                                 master_config.grpo.deduplicate_multimodal_data
+                            ),
+                            cot_token_ids=(
+                                tuple(master_config.grpo.cot_think_token_ids)
+                                if master_config.grpo.cot_think_token_ids
+                                else None
                             ),
                         )
                     policy_generation.finish_generation()
@@ -3103,8 +3133,17 @@ def grpo_train(
                 )
                 # Process rewards with custom reward function
                 if master_config.grpo.reward_shaping.enabled:
+                    reward_shaping_cfg = master_config.grpo.reward_shaping
+                    pass_rate = None
+                    if reward_shaping_cfg.alp_coef is not None:
+                        pass_rate, _ = calculate_baseline_and_std_per_prompt(
+                            input_ids,
+                            repeated_batch["total_reward"],
+                            torch.ones_like(repeated_batch["total_reward"]),
+                            leave_one_out_baseline=False,
+                        )
                     repeated_batch = apply_reward_shaping(
-                        repeated_batch, master_config.grpo.reward_shaping
+                        repeated_batch, reward_shaping_cfg, pass_rate=pass_rate
                     )
 
                 # Calculate rewards & advantages
@@ -3970,6 +4009,11 @@ def validate(
                         master_config.grpo.deduplicate_multimodal_data
                     ),
                     debug_payload_metrics=master_config.grpo.debug_payload_metrics,
+                    cot_token_ids=(
+                        tuple(master_config.grpo.cot_think_token_ids)
+                        if master_config.grpo.cot_think_token_ids
+                        else None
+                    ),
                 )
                 val_batch = nemo_gym_rollout_result.final_batch
                 gen_metrics = nemo_gym_rollout_result.rollout_metrics
