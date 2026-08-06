@@ -40,6 +40,10 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     export PYTHONUNBUFFERED=1
     export HF_HOME=\${HF_HOME:-/iopsstor/scratch/cscs/\${USER}/.cache/huggingface}
     export PYTHONPATH=$REPO_DIR:$BRIDGE_ROOT/src${XIELU_SITE:+:$XIELU_SITE}
+    # Persist the project + worker venvs on capstor: the image defaults both to
+    # container-overlay paths that die with the job, forcing a rebuild every run.
+    export UV_PROJECT_ENVIRONMENT=$REPO_DIR/.venv
+    export NEMO_RL_VENV_DIR=$REPO_DIR/venvs
     cd $REPO_DIR
     # Apertus runtime guard: fail loud if nemo_rl is the stock /opt copy rather than this checkout (online GRPO otherwise silently regresses to gen-KL ~0.79).
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'

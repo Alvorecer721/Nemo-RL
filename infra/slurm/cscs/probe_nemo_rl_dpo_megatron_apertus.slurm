@@ -53,6 +53,10 @@ srun \
     # our nemo_rl checkout first (Apertus deltas), then bridge fork src, then optional CUDA xielu.
     # megatron-core comes from the worker venvs.
     export PYTHONPATH="$REPO_DIR:$BRIDGE_ROOT/src${XIELU_SITE:+:$XIELU_SITE}"
+    # Persist the project + worker venvs on capstor: the image defaults both to
+    # container-overlay paths that die with the job, forcing a rebuild every run.
+    export UV_PROJECT_ENVIRONMENT="$REPO_DIR/.venv"
+    export NEMO_RL_VENV_DIR="$REPO_DIR/venvs"
     export RUN_DIR='"$RUN_DIR"'
     export LOG_DIR="$RUN_DIR/tb"
     export JSON_METRICS="$RUN_DIR/metrics.json"
