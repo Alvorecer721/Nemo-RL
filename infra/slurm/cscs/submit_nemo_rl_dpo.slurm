@@ -52,6 +52,13 @@ srun \
     export PYTHONUNBUFFERED=1
     export HF_HOME=/iopsstor/scratch/cscs/${USER}/.cache/huggingface
     export PYTHONPATH="'"$REPO_DIR"':'"$BRIDGE_ROOT"'/src:'"$XIELU_SITE"'"
+    # Persist the project + worker venvs on capstor (skip for the image tree,
+    # whose /opt venvs are prebaked): the image defaults both to container-overlay
+    # paths that die with the job, forcing a rebuild every run.
+    if [ "'"$RUNTIME_DIR"'" != /opt/nemo-rl ]; then
+      export UV_PROJECT_ENVIRONMENT="'"$RUNTIME_DIR"'/.venv"
+      export NEMO_RL_VENV_DIR="'"$RUNTIME_DIR"'/venvs"
+    fi
     cd "'"$RUNTIME_DIR"'"
 
     # Prologue: full-set parquet (all 245,898 pairs, reference data parity).
