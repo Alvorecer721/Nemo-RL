@@ -1,9 +1,8 @@
-# Phase-0 probe: STOCK v0.6.0 GRPO on Apertus 1.5 8B — zero new algorithm code.
+# Phase-0 probe: STOCK v0.7.0 GRPO on Apertus 1.5 8B — zero new algorithm code.
 # Purpose: validate the online-loop legs never exercised by DPO:
-#   (1) vLLM 0.17.1 loading Apertus inside NeMo-RL's generation workers
+#   (1) vLLM loading Apertus inside NeMo-RL's generation workers
 #   (2) per-step Megatron->vLLM weight refit for our arch (xIELU/QK-norm/266k)
 #   (3) generation-vs-training logprob agreement (lp_error gate)
-# Chain to the repo-local v0.6.0 base config (has converter_type, which v0.6.0's refit requires).
 defaults: ../../grpo_math_8B_megatron.yaml
 
 grpo:
@@ -32,7 +31,6 @@ policy:
   max_total_sequence_length: 2048
 
   megatron_cfg:
-    converter_type: "ApertusForCausalLM"
     force_reconvert_from_hf: false   # load the cached Megatron ckpt directly (skip HF reconvert)
     tensor_model_parallel_size: 2
     pipeline_model_parallel_size: 1
