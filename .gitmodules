@@ -1,7 +1,7 @@
 [submodule "3rdparty/Megatron-Bridge"]
 	path = 3rdparty/Megatron-Bridge-workspace/Megatron-Bridge
-	url = https://github.com/yuki-97/Megatron-Bridge.git
-	branch = yukih/nemorl-0.7
+	url = https://github.com/Alvorecer721/Megatron-Bridge.git
+	branch = yxu/apertus-v070
 	shallow = true
 [submodule "3rdparty/Automodel-workspace/Automodel"]
 	path = 3rdparty/Automodel-workspace/Automodel
