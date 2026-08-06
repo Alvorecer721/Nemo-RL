@@ -1,0 +1,8 @@
+{
+  "exit_status": 0,
+  "git_commit": "7eab01cb4c53279481d14d6ad5d4458d7cff21cf",
+  "start_time": "2026-07-30 19:18:06",
+  "metrics": {},
+  "gpu_types": [],
+  "coverage": "[n/a] run with --cov=nemo_rl"
+}
