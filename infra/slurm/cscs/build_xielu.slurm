@@ -15,7 +15,7 @@ set -euo pipefail
 # The .so links libtorch's unstable C++ ABI and a specific libcudart SONAME, so one
 # build serves exactly one (python, torch, cuda) triple — hence the ABI-tagged output.
 REPO_DIR=${REPO_DIR:-$SLURM_SUBMIT_DIR}
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_v070.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 SRC=${SRC:-$REPO_DIR/3rdparty/kernels/xielu}
 OUTROOT=${OUTROOT:-/capstor/store/cscs/swissai/infra01/users/xyixuan/xielu-builds}
 ARCHES=${ARCHES:-9.0}
@@ -25,7 +25,7 @@ export LD_LIBRARY_PATH=/capstor/store/cscs/swissai/infra01/MLLM/sbatchlibs${LD_L
 for v in "${!SLURM_SPANK_@}"; do unset "$v"; done
 
 mkdir -p "$OUTROOT"
-[[ -f "$SRC/setup.py" ]] || { echo "xielu source not found at $SRC (git submodule update --init 3rdparty/kernels)"; exit 1; }
+[[ -f "$SRC/setup.py" ]] || { echo "xielu source not found at $SRC"; exit 1; }
 
 srun --environment="$CONTAINER_ENV" --nodes=1 --ntasks=1 bash -lc '
 set -euo pipefail
