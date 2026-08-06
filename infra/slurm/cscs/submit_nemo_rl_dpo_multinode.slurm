@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --job-name=ap1p5-train
-#SBATCH --output=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo_maxmin_mn_%j.out
-#SBATCH --error=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo_maxmin_mn_%j.err
+#SBATCH --output=/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0/logs/dpo_maxmin_mn_%j.out
+#SBATCH --error=/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0/logs/dpo_maxmin_mn_%j.err
 #SBATCH --time=08:00:00
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
@@ -25,15 +25,15 @@ echo "START TIME: $(date)"
 # N nodes execute identical training math (DP width changes, updates do not),
 # and the run auto-resumes from the latest checkpoint.
 ###############################################################################
-REPO_DIR=${REPO_DIR:-/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL}
+REPO_DIR=${REPO_DIR:-/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/iopsstor/scratch/cscs/xyixuan/apertus/xielu-kernel/site-v060}
-RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
-# Raw Megatron base/reference loading (requires the mlm-restore worktree as
-# RUNTIME_DIR — the pretrained_checkpoint backport lives there): set
-# PRETRAINED_CKPT_PATH to an iter_XXXXXXX dir to skip the HF conversion cache.
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.0-cp313-torch2.11.0-cu130}
+RUNTIME_DIR=${RUNTIME_DIR:-$REPO_DIR}
+# Raw Megatron base/reference loading (pretrained_checkpoint is native in
+# v0.7.0): set PRETRAINED_CKPT_PATH to an iter_XXXXXXX dir to skip the HF
+# conversion cache.
 PRETRAINED_CKPT_PATH=${PRETRAINED_CKPT_PATH:-}
 PRETRAINED_CKPT_FORMAT=${PRETRAINED_CKPT_FORMAT:-megatron_lm}
 EXTRA_OVERRIDES=""
@@ -51,7 +51,7 @@ fi
 EXPECTED_UNITS=$((NUM_NODES * GPUS_PER_NODE))
 echo "head: $head_node ($HEAD_IP), nodes: $NUM_NODES, expected worker_units: $EXPECTED_UNITS"
 
-export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES
+export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE REPO_DIR BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES
 # sbatch --export=<list> propagates to srun via SLURM_EXPORT_ENV and would
 # strip the exports above from the tasks; force full propagation.
 export SLURM_EXPORT_ENV=ALL
@@ -67,7 +67,7 @@ srun \
     set -euo pipefail
     export PYTHONUNBUFFERED=1
     export HF_HOME=/iopsstor/scratch/cscs/${USER}/.cache/huggingface
-    export PYTHONPATH="${BRIDGE_ROOT}/src:${XIELU_SITE}"
+    export PYTHONPATH="${REPO_DIR}:${BRIDGE_ROOT}/src:${XIELU_SITE}"
     RAY_RES="{\"worker_units\": ${GPUS_PER_NODE}, \"slurm_managed_ray_cluster\": 1}"
     RAY_PORT=6379
 

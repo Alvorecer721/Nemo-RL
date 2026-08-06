@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --job-name=ap1p5-train
-#SBATCH --output=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo_maxmin_%j.out
-#SBATCH --error=/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo_maxmin_%j.err
+#SBATCH --output=/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0/logs/dpo_maxmin_%j.out
+#SBATCH --error=/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0/logs/dpo_maxmin_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -28,14 +28,14 @@ fi
 # owns the cluster only. gbs is config-level: 1 node executes the identical
 # training math as N nodes (DP width changes, updates do not).
 ###############################################################################
-REPO_DIR=${REPO_DIR:-/iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL}
-# NeMo-RL runtime: image default, or a filesystem worktree (validated branch
-# checkout) to run changed core/lock without rebuilding the image.
-RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
+REPO_DIR=${REPO_DIR:-/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0}
+# NeMo-RL runtime: this checkout by default (Apertus deltas + bridge pin);
+# set /opt/nemo-rl to run the image's stock tree instead.
+RUNTIME_DIR=${RUNTIME_DIR:-$REPO_DIR}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/iopsstor/scratch/cscs/xyixuan/apertus/xielu-kernel/site-v060}
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.0-cp313-torch2.11.0-cu130}
 
 FULL_SET=/capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-FD-nemo-rl-binpref-full/train.parquet
 SRC_SET=/capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-Filtered-Decontaminated
@@ -51,7 +51,7 @@ srun \
     set -euo pipefail
     export PYTHONUNBUFFERED=1
     export HF_HOME=/iopsstor/scratch/cscs/${USER}/.cache/huggingface
-    export PYTHONPATH="'"$BRIDGE_ROOT"'/src:'"$XIELU_SITE"'"
+    export PYTHONPATH="'"$REPO_DIR"':'"$BRIDGE_ROOT"'/src:'"$XIELU_SITE"'"
     cd "'"$RUNTIME_DIR"'"
 
     # Prologue: full-set parquet (all 245,898 pairs, reference data parity).
