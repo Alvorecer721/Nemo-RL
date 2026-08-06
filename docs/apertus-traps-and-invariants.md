@@ -12,7 +12,7 @@ NeMo-RL forces `load_format="dummy"` for training-mode vLLM engines (`nemo_rl/mo
 Refit streams **trainable parameters only** (`bridge.export_hf_weights`).
 Any architecture whose checkpoint carries forward-load-bearing **buffers** is silently corrupted: for Apertus, the 64 xIELU `act_fn.{beta,eps}` buffers (32 layers × 2) stayed at noise → Generation KL Error 0.7935 ≈ a genuinely off-policy generator.
 
-- **Fix (shipped)**: `is_apertus_model()` added to `ModelFlag.VLLM_LOAD_FORMAT_AUTO` (the Gemma precedent) — every Apertus engine disk-loads at init, unconditionally (keys on `model_type == "apertus"`). Verified: 0/516 tensors change across a step-0 refit; gen KL 0.7935 → **0.0003**.
+- **Fix (shipped)**: the bridge emits the xIELU `beta`/`eps` buffers into the HF refit stream (`apertus_bridge.maybe_modify_converted_hf_weight`, in the pinned Apertus bridge fork), so vLLM may dummy-load and the step-0 refit still delivers correct constants. Verified originally via disk-load parity: gen KL 0.7935 → **0.0003**.
 - **Posture**: prefer `load_format=auto` for any new architecture until its buffer inventory is audited (`state_dict` keys vs `named_parameters`).
 - **Upstream asks**: (a) NeMo-RL: auto-refuse dummy when the checkpoint carries buffers absent from the refit stream; (b) vLLM: `XIELU`'s Python path should read the init-captured scalars like its CUDA path does — makes the class unconstructible.
 - **Masking hazard**: the vLLM CUDA xielu path hides this bug (scalars captured at `__init__`). An environment with the kernel installed shows nothing; one without it shows 0.79. Never debug this class by comparing environments with different kernel availability.
@@ -61,8 +61,8 @@ Short resume tests: keep the config byte-identical and kill externally.
 #    → expect 0 tensors changed
 # 2. GRPO probe (probe-grpo-apertus1p5-8b-1n4g-megatron.yaml, vllm util 0.40)
 #    → expect Generation KL Error < 0.002
-# 3. online-DPO smoke (smoke-online-dpo-apertus1p5-8b-1n4g-megatron.yaml)
+# 3. online-DPO smoke (infra/slurm/cscs/probe_nemo_rl_dpo_megatron_apertus.slurm)
 #    → expect step-1 preference_loss ≈ 0.6931
 ```
 
-Probe harnesses live in `nemo-rl-worktrees/v060-online-dpo/debug/` (self-diff analyzer, Megatron-vs-HF forward parity, vLLM disk parity).
+Historical (v0.6.0-era) probe harnesses live in `nemo-rl-worktrees/v060-online-dpo/debug/` (self-diff analyzer, Megatron-vs-HF forward parity, vLLM disk parity).

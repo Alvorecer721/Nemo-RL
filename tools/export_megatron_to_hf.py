@@ -6,7 +6,7 @@ The export direction of the bridge was certified bit-exact (387/387 tensors,
 TP1 and TP2) on 2026-06-13; this CLI is the production wrapper around the same
 code path. Single GPU, any source parallel geometry (torch-dist re-shards).
 
-Usage (from a NeMo-RL runtime dir, e.g. the mlm-restore worktree):
+Usage (from the NeMo-RL repo root):
   uv run --locked python tools/export_megatron_to_hf.py \
       --hf-base /capstor/.../hf_checkpoints/<base model>  \
       --megatron-ckpt /path/to/step_1921/policy/weights   \

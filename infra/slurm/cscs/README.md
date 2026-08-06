@@ -1,6 +1,6 @@
 # CSCS Slurm Probes
 
-This directory contains the Clariden/GH200 Slurm wrappers used to validate the NeMo-RL `nvcr.io/nvidia/nemo-rl:v0.6.0` container on Slingshot.
+This directory contains the Clariden/GH200 Slurm wrappers used to build, probe, and train with the NeMo-RL `nvcr.io/nvidia/nemo-rl:v0.7.0` container on Slingshot.
 
 The default container environment is `docker/nemo_rl.toml` in this checkout. The wrappers set `CUDA_CACHE_PATH` and Hugging Face cache paths in shell code because TOML values are not shell-expanded by Pyxis/EDF.
 
@@ -14,16 +14,17 @@ Run from the repository root after creating the log directory:
 
 ```bash
 mkdir -p logs
-sbatch infra/slurm/cscs/probe_nemo_rl_env.slurm
-sbatch infra/slurm/cscs/probe_nemo_rl_nccl_2n_4r.slurm
-sbatch infra/slurm/cscs/probe_nemo_rl_dpo_megatron_2n.slurm
+sbatch infra/slurm/cscs/build_xielu.slurm                       # one-time CUDA xIELU kernel build
+sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm                # 3-step online GRPO smoke
+sbatch infra/slurm/cscs/probe_nemo_rl_dpo_megatron_apertus.slurm  # DPO probe + provider gate
+sbatch infra/slurm/cscs/submit_nemo_rl_dpo.slurm                # full MaxMin DPO run
 ```
 
 Useful overrides:
 
 ```bash
-CONTAINER_ENV=/users/xyixuan/.edf/nemo_rl.toml sbatch infra/slurm/cscs/probe_nemo_rl_env.slurm
-GPUS_PER_NODE=4 TRAIN_GLOBAL_BATCH_SIZE=16 sbatch infra/slurm/cscs/probe_nemo_rl_dpo_megatron_2n.slurm
+CONTAINER_ENV=/users/xyixuan/.edf/nemo_rl.toml sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm
+RECIPE=examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml sbatch infra/slurm/cscs/submit_nemo_rl_dpo.slurm
 ```
 
 ## Submit from inside a compute node (coding agents)
