@@ -24,6 +24,9 @@ CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}  # CUDA xielu kernel built against the v0.7.0 container; unset for eager fallback
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron.yaml}
+# NeMo-Gym recipes must run the dedicated runner (it binds task_to_env to the
+# gym actor); everything else uses the stock GRPO entry point.
+RUN_SCRIPT=${RUN_SCRIPT:-examples/run_grpo.py}
 # Call the uv shipped in the image: uv cache buckets are version-specific, so a personal uv
 # earlier on PATH misses the seeded cache and rebuilds from source. Expanded by this shell
 # into the srun command (the body below is double-quoted), so it must be set out here.
@@ -59,7 +62,7 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     cd $REPO_DIR
     # Apertus runtime guard: fail loud if nemo_rl is the stock /opt copy rather than this checkout (online GRPO otherwise silently regresses to gen-KL ~0.79).
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'
-    "$UV" run --locked --extra mcore python examples/run_grpo.py --config $RECIPE \
+    "$UV" run --locked --extra mcore python $RUN_SCRIPT --config $RECIPE \
       grpo.max_num_steps=3 \
       policy.generation.vllm_cfg.gpu_memory_utilization=0.40 \
       +policy.generation.vllm_cfg.env_vars.PYTHONPATH=$XIELU_SITE
