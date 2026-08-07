@@ -215,6 +215,9 @@ class SequencePackingConfig(TypedDict):
     # Not required because some algorithms like SFT don't calculate log probs
     logprob_mb_tokens: NotRequired[int]
     algorithm: str
+    # Fused packed loss (SequencePackingFusionLossWrapper) instead of the
+    # per-sequence unpacking wrapper; read in megatron/train.py.
+    fuse_loss: NotRequired[bool]
 
 
 class RewardModelConfig(TypedDict):
