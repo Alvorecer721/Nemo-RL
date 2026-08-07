@@ -140,7 +140,9 @@ def _env_builder(
 
     # A claim older than the build timeout is from a killed build (walltime,
     # OOM): its finally-cleanup never ran. Expire it so this run can rebuild
-    # instead of waiting forever.
+    # instead of waiting forever. Expiry is rename-based so exactly one of two
+    # concurrent expirers wins — stat-then-unlink could delete the claim a
+    # faster process just re-created.
     try:
         if (
             started_file.exists()
@@ -150,7 +152,9 @@ def _env_builder(
                 f"Node {node_idx}: expiring stale build claim on {venv_name} "
                 f"(older than {build_timeout}s; a previous build was killed)"
             )
-            started_file.unlink(missing_ok=True)
+            expired = started_file.with_name(started_file.name + ".expired")
+            os.rename(started_file, expired)
+            expired.unlink(missing_ok=True)
     except FileNotFoundError:
         pass
 
@@ -171,6 +175,12 @@ def _env_builder(
             if ready_marker.exists() and python_path.exists():
                 return str(python_path)
             if not started_file.exists():
+                # The builder touches the marker and then unlinks the claim;
+                # observing the unlink first is a benign race, so give the
+                # marker one more poll before declaring the build dead.
+                time.sleep(1)
+                if ready_marker.exists() and python_path.exists():
+                    return str(python_path)
                 raise RuntimeError(
                     f"The builder of venv {venv_path} exited without completing "
                     f"(no {VENV_READY_MARKER}); see its logs for the build error."
@@ -184,9 +194,12 @@ def _env_builder(
 
     try:
         if force_rebuild and venv_path.exists():
-            # Rebuild from scratch while holding the claim: clear everything
-            # except the claim file so waiters keep their signal.
+            # Rebuild from scratch while holding the claim: drop readiness
+            # first (iterdir order is arbitrary and a reader must never see a
+            # marked venv mid-wipe), then clear everything except the claim
+            # file so waiters keep their signal.
             logger.info(f"Force rebuilding venv at {venv_path}")
+            ready_marker.unlink(missing_ok=True)
             for child in venv_path.iterdir():
                 if child == started_file:
                     continue

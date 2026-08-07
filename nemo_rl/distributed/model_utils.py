@@ -2176,7 +2176,8 @@ class ChunkedDistributedHiddenStatesToLogprobs(torch.autograd.Function):
         ctx: Any, *grad_outputs: torch.Tensor
     ) -> tuple[torch.Tensor, None, torch.Tensor, None, None, None, None, None, None]:
         grad_output = grad_outputs[0]
-        # the tensor_parallel_hidden_states is already all gathered in the forward pass
+        # Saved pre-gather: re-gathered below when the input was the
+        # sequence-parallel shard.
         (
             tensor_parallel_hidden_states,
             target_mask,

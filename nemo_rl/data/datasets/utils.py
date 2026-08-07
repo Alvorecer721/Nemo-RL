@@ -113,6 +113,9 @@ def load_dataset_from_path(
         os.path.exists(os.path.join(data_path, "dataset_dict.json"))
         or os.path.exists(os.path.join(data_path, "state.json"))
     ):
+        assert data_subset is None, (
+            "data_subset is only supported for huggingface datasets"
+        )
         raw_dataset = load_from_disk(data_path)
     else:
         try:
