@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 from wandb import Table
 
+from nemo_rl.algorithms.reward_functions import ngram_rate
 from nemo_rl.algorithms.utils import get_gdpo_reward_component_keys
 from nemo_rl.data.interfaces import (
     DatumSpec,
@@ -836,11 +837,7 @@ def _compute_generation_quality_metrics(
         if num_gen == 0:
             continue
         type_token_ratio[idx] = torch.unique(gen_ids).numel() / num_gen
-        if num_gen >= ngram_size:
-            windows = gen_ids.unfold(0, ngram_size, 1)
-            ngram_repetition_rate[idx] = (
-                1.0 - torch.unique(windows, dim=0).shape[0] / windows.shape[0]
-            )
+        ngram_repetition_rate[idx] = ngram_rate(gen_ids, ngram_size)
         if cot_token_ids is not None:
             starts = (gen_ids == cot_token_ids[0]).nonzero(as_tuple=True)[0]
             if starts.numel() > 0:

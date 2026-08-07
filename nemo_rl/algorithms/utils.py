@@ -101,6 +101,28 @@ def calculate_kl(
     return kl
 
 
+def alp_pass_rate(
+    prompt_ids: torch.Tensor,
+    rewards: torch.Tensor,
+    reward_shaping_cfg,
+) -> Optional[torch.Tensor]:
+    """Per-prompt pass rate for the adaptive length penalty, or None when ALP is off.
+
+    Must be computed from the raw pre-scaling rewards: reward scaling can map
+    into ranges (e.g. [-1, 1]) where the per-prompt mean is no longer a pass
+    probability and would invert the penalty into a length bonus.
+    """
+    if getattr(reward_shaping_cfg, "alp_coef", None) is None:
+        return None
+    pass_rate, _ = calculate_baseline_and_std_per_prompt(
+        prompt_ids,
+        rewards,
+        torch.ones_like(rewards),
+        leave_one_out_baseline=False,
+    )
+    return pass_rate
+
+
 def calculate_baseline_and_std_per_prompt(
     prompts: torch.Tensor,
     rewards: torch.Tensor,

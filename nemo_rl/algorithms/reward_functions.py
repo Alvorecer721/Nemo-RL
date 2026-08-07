@@ -60,12 +60,60 @@ class RewardShapingConfig(BaseModel, extra="allow"):
     ngram_penalty_threshold: float = 0.0
 
 
-def _assistant_response_length(message_log) -> int:
-    """Number of tokens in the assistant response of a single sample's message log."""
-    for message in message_log:
-        if message["role"] == "assistant":
-            return message["token_ids"].shape[0]
-    raise AssertionError("Assistant response not found during reward shaping")
+def assistant_token_parts(message_log) -> list[torch.Tensor]:
+    """All assistant-turn token tensors of one sample's message log."""
+    return [m["token_ids"] for m in message_log if m["role"] == "assistant"]
+
+
+def ngram_rate(gen_ids: torch.Tensor, ngram_size: int) -> float:
+    """Distinct-n-gram repetition rate of one sample's generated tokens."""
+    if gen_ids.numel() < ngram_size:
+        return 0.0
+    windows = gen_ids.unfold(0, ngram_size, 1)
+    return 1.0 - torch.unique(windows, dim=0).shape[0] / windows.shape[0]
+
+
+def ngram_repetition_rates(
+    per_sample_token_parts: list[list[torch.Tensor]],
+    ngram_size: int = 4,
+) -> torch.Tensor:
+    """Per-sample distinct-n-gram repetition rate of the generated tokens.
+
+    Single source of truth for the rate definition — used by the rollout
+    quality metrics and as the reward-shaping fallback when a batch carries
+    message_log but no precomputed ngram_repetition_rate tensor.
+    """
+    rates = torch.zeros(len(per_sample_token_parts))
+    for idx, parts in enumerate(per_sample_token_parts):
+        if not parts:
+            continue
+        gen_ids = torch.cat([torch.as_tensor(p).flatten() for p in parts])
+        rates[idx] = ngram_rate(gen_ids, ngram_size)
+    return rates
+
+
+def _response_lengths(batch: BatchedDataDict) -> list[int]:
+    """Per-sample assistant response lengths.
+
+    Prefer the slim per-sample tensor (data-plane path: message_log lives in
+    TQ, slice carries response_token_lengths). Fall back to scanning
+    message_log for the legacy non-data-plane caller.
+    """
+    response_token_lengths = batch.get("response_token_lengths")
+    if response_token_lengths is not None:
+        if isinstance(response_token_lengths, torch.Tensor):
+            return response_token_lengths.tolist()
+        return list(response_token_lengths)
+    response_lengths = []
+    for message_log in batch["message_log"]:
+        length = None
+        for message in message_log:
+            if message["role"] == "assistant":
+                length = message["token_ids"].shape[0]
+                break
+        assert length is not None, "Assistant response not found during reward shaping"
+        response_lengths.append(length)
+    return response_lengths
 
 
 def apply_reward_shaping(
@@ -89,14 +137,22 @@ def apply_reward_shaping(
     # length penalty (ALP / stop-properly / DAPO) returns early below.
     ngram_penalty_coef = cfg.ngram_penalty_coef
     if ngram_penalty_coef is not None:
-        ngram_rate = batch.get("ngram_repetition_rate")
-        if ngram_rate is not None:
-            threshold = cfg.ngram_penalty_threshold
-            excess = (
-                ngram_rate.to(device=rewards.device, dtype=rewards.dtype) - threshold
-            ).clamp(min=0.0)
-            rewards = rewards - ngram_penalty_coef * excess
-            batch["total_reward"] = rewards
+        ngram_rates = batch.get("ngram_repetition_rate")
+        if ngram_rates is None and "message_log" in batch:
+            ngram_rates = ngram_repetition_rates(
+                [assistant_token_parts(ml) for ml in batch["message_log"]]
+            )
+        if ngram_rates is None:
+            raise ValueError(
+                "reward_shaping.ngram_penalty_coef is set but the batch carries "
+                "neither ngram_repetition_rate nor message_log to derive it from"
+            )
+        threshold = cfg.ngram_penalty_threshold
+        excess = (
+            ngram_rates.to(device=rewards.device, dtype=rewards.dtype) - threshold
+        ).clamp(min=0.0)
+        rewards = rewards - ngram_penalty_coef * excess
+        batch["total_reward"] = rewards
 
     # Adaptive Length Penalty (Xiang et al. 2025): difficulty-aware length penalty.
     alp_coef = cfg.alp_coef
@@ -123,7 +179,7 @@ def apply_reward_shaping(
             )
         ell_max = cfg.max_response_length
         resp_lengths = torch.tensor(
-            [_assistant_response_length(ml) for ml in batch["message_log"]],
+            _response_lengths(batch),
             dtype=rewards.dtype,
             device=rewards.device,
         )
@@ -187,11 +243,18 @@ def apply_reward_shaping(
     overlong_buffer_length = cfg.overlong_buffer_length
     overlong_buffer_penalty = cfg.overlong_buffer_penalty
     max_response_length = cfg.max_response_length
-    if (
-        overlong_buffer_length is None
-        or overlong_buffer_penalty is None
-        or max_response_length is None
-    ):
+    dapo_fields = (
+        overlong_buffer_length,
+        overlong_buffer_penalty,
+        max_response_length,
+    )
+    if any(field is None for field in dapo_fields):
+        # A repetition-only config (ngram penalty, no length penalty at all) is
+        # valid and already applied above; a partial DAPO trio stays an error.
+        if ngram_penalty_coef is not None and all(
+            field is None for field in dapo_fields
+        ):
+            return batch
         raise ValueError(
             "Reward function is enabled but only DAPO reward shaping is currently supported. Please ensure overlong_buffer_length, overlong_buffer_penalty, and max_response_length are properly configured."
         )
@@ -200,27 +263,7 @@ def apply_reward_shaping(
     # Calculate the expected response length
     expected_response_length = max_response_length - overlong_buffer_length
 
-    # Prefer slim per-sample tensor (data-plane path: message_log lives in
-    # TQ, slice carries response_token_lengths). Fall back to scanning
-    # message_log for the legacy non-data-plane caller.
-    response_token_lengths = batch.get("response_token_lengths")
-    if response_token_lengths is not None:
-        if isinstance(response_token_lengths, torch.Tensor):
-            response_lengths = response_token_lengths.tolist()
-        else:
-            response_lengths = list(response_token_lengths)
-    else:
-        response_lengths = []
-        for message_log in batch["message_log"]:
-            length = None
-            for message in message_log:
-                if message["role"] == "assistant":
-                    length = message["token_ids"].shape[0]
-                    break
-            assert length is not None, (
-                "Assistant response not found during reward shaping"
-            )
-            response_lengths.append(length)
+    response_lengths = _response_lengths(batch)
 
     assert len(response_lengths) == len(rewards), (
         "The number of messages in the batch must match the number of rewards"
