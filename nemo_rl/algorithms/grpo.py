@@ -726,19 +726,6 @@ def setup(
     print("\n▶ Setting up compute cluster...", flush=True)
     colocated_inference = generation_config["colocated"]["enabled"]
 
-    # sleep_level>=2 discards vLLM weights on sleep, so val_at_start (which consumes the pre-loop refit) would leave the first training step generating on discarded weights.
-    if (
-        colocated_inference
-        and generation_config.get("vllm_cfg", {}).get("sleep_level", 1) >= 2
-        and grpo_config["val_at_start"]
-    ):
-        raise ValueError(
-            "policy.generation.vllm_cfg.sleep_level>=2 is incompatible with grpo.val_at_start=true in "
-            "colocated mode: the pre-loop validation refit is consumed before the training loop, so the "
-            "first step generates on weights that level-2 sleep discarded. Set grpo.val_at_start=false or "
-            "policy.generation.vllm_cfg.sleep_level=1."
-        )
-
     env_name_list = extract_necessary_env_names(data_config)
     rm_env_enabled = "reward_model" in env_name_list
 
@@ -2863,6 +2850,10 @@ def grpo_train(
             processor=processor,
         )
         policy_generation.finish_generation()
+        # finish_generation may discard weights on sleep (vllm sleep_level>=2), so
+        # the pre-loop refit is consumed: mark generation stale to refit before step 1.
+        if NEED_REFIT:
+            POLICY_GENERATION_STALE = True
         logger.log_metrics(val_metrics, current_step, prefix="validation")
         logger.log_metrics(validation_timings, current_step, prefix="timing/validation")
         if master_config.grpo.debug_payload_metrics:
