@@ -51,14 +51,22 @@ See <https://docs.cscs.ch/software/container-engine/run/>.
 
 ## Troubleshooting first launches
 
+To skip first-launch building entirely, pre-provision the checkout once with
+`sbatch --chdir=<repo> infra/slurm/cscs/prepare_env.slurm` — it builds `.venv` plus the worker
+venvs behind an flock (safe to rerun; concurrent submissions queue instead of deadlocking), and
+every later training job starts hot.
+
 - **Two cold-cache jobs deadlock on a source build** (`Failed to acquire lock on the distribution
-  cache`, 300 s timeout): run the first launch alone; every later job reuses the built wheels.
+  cache`, 300 s timeout): run the first launch alone (or use `prepare_env.slurm` above); every
+  later job reuses the built wheels.
 - **`Pretrained run config not found ... iter_0000000/run_config.yaml` on rank>0**: a stale,
   half-written conversion cache. Delete the `$HF_HOME/nemo_rl/model__*` directory for that
   checkpoint and rerun — rank 0 reconverts cleanly.
 - **Worker import errors like `module 'torch' has no attribute 'Tensor'` right after venv
-  creation**: a crashed builder left a partial worker venv (and a stale `STARTED_ENV_BUILDER`
-  marker that makes retries wait forever). `rm -rf <repo>/venvs/<worker-name>` and resubmit.
+  creation**: a crashed builder left a partial worker venv. Since the readiness-marker fix a
+  venv without `NEMO_RL_VENV_READY` is repaired in place on the next run and a stale
+  `STARTED_ENV_BUILDER` claim expires after `NRL_VENV_BUILD_TIMEOUT_SECS` (default 3600 s), so
+  plain resubmission heals it; `rm -rf <repo>/venvs/<worker-name>` remains the manual override.
 - **A personal `uv` in your dotfiles shadows the image's** (`/root/.local/bin/uv`) and its cache
   keys may miss the image-seeded wheel cache, causing one-time source rebuilds. Harmless but slow;
   remove the personal uv from PATH inside jobs (or accept the one-time builds into your own cache).
