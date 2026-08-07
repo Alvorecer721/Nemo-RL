@@ -16,7 +16,7 @@ For the architecture gotchas behind the gates here, see [apertus-traps-and-invar
 ```bash
 git clone https://github.com/Alvorecer721/Nemo-RL.git
 cd Nemo-RL
-git submodule update --init --recursive   # Megatron-Bridge (Apertus fork), Automodel, Gym
+git submodule update --init --recursive   # Megatron-Bridge (Apertus fork), Automodel, Gym, kernels (xIELU source)
 ```
 
 The submodules are required: the checkpoint converter and per-step refit run on the Megatron-Bridge fork (which also vendors `megatron.core`).
