@@ -48,3 +48,18 @@ env -u SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_environment \
 
 This path is **only** for agents/automation that must submit from a compute node; humans should submit from a login node (above), where none of this is needed.
 See <https://docs.cscs.ch/software/container-engine/run/>.
+
+## Troubleshooting first launches
+
+- **Two cold-cache jobs deadlock on a source build** (`Failed to acquire lock on the distribution
+  cache`, 300 s timeout): run the first launch alone; every later job reuses the built wheels.
+- **`Pretrained run config not found ... iter_0000000/run_config.yaml` on rank>0**: a stale,
+  half-written conversion cache. Delete the `$HF_HOME/nemo_rl/model__*` directory for that
+  checkpoint and rerun — rank 0 reconverts cleanly.
+- **Worker import errors like `module 'torch' has no attribute 'Tensor'` right after venv
+  creation**: a crashed builder left a partial worker venv (and a stale `STARTED_ENV_BUILDER`
+  marker that makes retries wait forever). `rm -rf <repo>/venvs/<worker-name>` and resubmit.
+- **Never submit with `sbatch --export=ALL`**: it leaks the interactive session's environment
+  (including a different `uv`) into the job and breaks dependency resolution. The launchers use
+  `--export=NONE`; pass parameters the way `probe_grpo_async.slurm` does (a wrapper that exports
+  them in the job body).

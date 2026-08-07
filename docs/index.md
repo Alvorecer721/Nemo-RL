@@ -258,6 +258,8 @@ guides/nemotron-3-nano.md
 guides/nemotron-3-nano-omni.md
 guides/nemotron-3-super.md
 adding-new-models.md
+apertus-quickstart.md
+apertus-traps-and-invariants.md
 guides/sft.md
 guides/dpo.md
 guides/dapo.md
@@ -321,6 +323,8 @@ design-docs/training-backends.md
 design-docs/sequence-packing-and-dynamic-batching.md
 design-docs/env-vars.md
 design-docs/nemo-gym-integration.md
+design-docs/apertus-mm-onpolicy-dpo-data.md
+design-docs/apertus-omni-grpo-rl.md
 ```
 
 ```{toctree}
