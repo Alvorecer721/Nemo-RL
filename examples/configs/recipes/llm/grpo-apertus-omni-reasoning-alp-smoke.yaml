@@ -21,4 +21,4 @@ cluster:
 
 logger:
   wandb_enabled: false
-  log_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/grpo-apertus-omni-smoke
+  log_dir: logs/grpo-apertus-omni-smoke

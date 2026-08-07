@@ -53,7 +53,7 @@ policy:
 logger:
   wandb_enabled: false
   tensorboard_enabled: false
-  log_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/grpo-apertus-probe
+  log_dir: logs/grpo-apertus-probe
 
 cluster:
   gpus_per_node: 4

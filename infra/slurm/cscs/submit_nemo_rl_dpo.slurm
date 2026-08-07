@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --job-name=ap1p5-train
-#SBATCH --output=/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0/logs/dpo_maxmin_%j.out
-#SBATCH --error=/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0/logs/dpo_maxmin_%j.err
+#SBATCH --output=logs/dpo_maxmin_%j.out
+#SBATCH --error=logs/dpo_maxmin_%j.err
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -28,7 +28,9 @@ fi
 # owns the cluster only. gbs is config-level: 1 node executes the identical
 # training math as N nodes (DP width changes, updates do not).
 ###############################################################################
-REPO_DIR=${REPO_DIR:-/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0}
+# Run from the repo root (`cd <repo> && sbatch <this>`) or anywhere with `sbatch --chdir=<repo> <this>`;
+# the relative #SBATCH logs/ paths land in the same workdir.
+REPO_DIR=${REPO_DIR:-$PWD}
 # NeMo-RL runtime: this checkout by default (Apertus deltas + bridge pin);
 # set /opt/nemo-rl to run the image's stock tree instead.
 RUNTIME_DIR=${RUNTIME_DIR:-$REPO_DIR}

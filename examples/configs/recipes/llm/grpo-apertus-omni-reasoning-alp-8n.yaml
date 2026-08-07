@@ -67,14 +67,14 @@ cluster:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/results/grpo-apertus-omni-reasoning-alp-8n
+  checkpoint_dir: results/grpo-apertus-omni-reasoning-alp-8n
   save_period: 50
   keep_top_k: 5
 
 logger:
   wandb_enabled: true
   tensorboard_enabled: false
-  log_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/grpo-apertus-omni-reasoning-alp-8n
+  log_dir: logs/grpo-apertus-omni-reasoning-alp-8n
   wandb:
     project: grpo-apertus
     name: omni-reasoning-alp-8n

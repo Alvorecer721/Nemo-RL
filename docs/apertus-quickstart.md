@@ -28,6 +28,12 @@ mkdir -p logs
 sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm
 ```
 
+> **First launch on a fresh account:** run one probe to completion before submitting anything else.
+> The first `uv run --locked` populates your uv cache and the checkout-local venvs; two cold-cache
+> jobs racing the same source build deadlock on uv's per-package lock (300 s timeout).
+> Subsequent submissions start in minutes and may run concurrently.
+> The async variant is `sbatch infra/slurm/cscs/probe_grpo_async.slurm` (same KL gate, 2+2 GPU split).
+
 This runs 3 steps of colocated online GRPO on one node (4 GPUs, TP2/PP1) against `examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron.yaml`.
 
 **Expected:** every step prints `Generation KL Error: 0.0003` — the train↔generate logprob-agreement gate — and the run completes all 3 steps with no OOM.
