@@ -38,9 +38,11 @@ RUNTIME_DIR=${RUNTIME_DIR:-$REPO_DIR}
 # conversion cache.
 PRETRAINED_CKPT_PATH=${PRETRAINED_CKPT_PATH:-}
 PRETRAINED_CKPT_FORMAT=${PRETRAINED_CKPT_FORMAT:-megatron_lm}
-EXTRA_OVERRIDES=""
+# Extra hydra overrides, inheritable at submission (`sbatch --export=NONE,EXTRA_OVERRIDES=...`)
+# for short drills / one-offs without editing the recipe.
+EXTRA_OVERRIDES=${EXTRA_OVERRIDES:-}
 if [ -n "$PRETRAINED_CKPT_PATH" ]; then
-    EXTRA_OVERRIDES="+checkpointing.pretrained_checkpoint.path=$PRETRAINED_CKPT_PATH +checkpointing.pretrained_checkpoint.format=$PRETRAINED_CKPT_FORMAT"
+    EXTRA_OVERRIDES="$EXTRA_OVERRIDES +checkpointing.pretrained_checkpoint.path=$PRETRAINED_CKPT_PATH +checkpointing.pretrained_checkpoint.format=$PRETRAINED_CKPT_FORMAT"
 fi
 GPUS_PER_NODE=4
 
