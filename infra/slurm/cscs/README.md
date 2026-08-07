@@ -4,6 +4,8 @@ This directory contains the Clariden/GH200 Slurm wrappers used to build, probe, 
 
 The default container environment is `docker/nemo_rl.toml` in this checkout. The wrappers set `CUDA_CACHE_PATH` and Hugging Face cache paths in shell code because TOML values are not shell-expanded by Pyxis/EDF.
 
+The EDF references the NGC registry, so your first-ever job pulls the image once (~5-10 min) into your own imagestore on iopsstor — the fast tier your later jobs page libraries from; keep this default. A pre-pulled copy also sits at `/capstor/store/cscs/swissai/infra01/MLLM/containers/nvcr.io#nvidia+nemo-rl+v0.7.0.aarch64.sqsh` for instant first runs or registry outages — point a personal EDF's `image =` at that path if needed, accepting slower cold page-ins (capstor is HDD-backed and every job pays it, where the pull is paid once).
+
 ## Submit from a login node (humans)
 
 Submit these from a **login node** (e.g. `clariden-ln001`).
