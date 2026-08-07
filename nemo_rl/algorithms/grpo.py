@@ -3231,6 +3231,11 @@ def validate(
                     max_seq_len=master_config.policy["max_total_sequence_length"],
                     max_rollout_turns=master_config.grpo["max_rollout_turns"],
                     greedy=False,
+                    cot_token_ids=(
+                        tuple(master_config.grpo["cot_think_token_ids"])
+                        if master_config.grpo.get("cot_think_token_ids")
+                        else None
+                    ),
                 )
             else:
                 val_batch, gen_metrics = run_multi_turn_rollout(
@@ -3241,6 +3246,11 @@ def validate(
                     max_seq_len=master_config.policy["max_total_sequence_length"],
                     max_rollout_turns=master_config.grpo["max_rollout_turns"],
                     greedy=False,
+                    cot_token_ids=(
+                        tuple(master_config.grpo["cot_think_token_ids"])
+                        if master_config.grpo.get("cot_think_token_ids")
+                        else None
+                    ),
                 )
 
             total_rewards.extend(val_batch["total_reward"].tolist())
@@ -3591,7 +3601,9 @@ def async_grpo_train(
             import traceback
 
             traceback.print_exc()
-            return
+            # A failed refit means the generator never received real weights;
+            # returning here would end the run with zero steps and exit code 0.
+            raise
     else:
         print("🔄 Preparing policy generation for inference...")
         try:
@@ -3602,7 +3614,7 @@ def async_grpo_train(
             import traceback
 
             traceback.print_exc()
-            return
+            raise
 
     print("✅ Policy generation setup complete, proceeding to validation...")
 
