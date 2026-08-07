@@ -59,13 +59,9 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     cd $REPO_DIR
     # Apertus runtime guard: fail loud if nemo_rl is the stock /opt copy rather than this checkout (online GRPO otherwise silently regresses to gen-KL ~0.79).
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'
-    # AOT pin travels with the kernel injection: vLLM's AOT fullgraph compile (default on
-    # torch>=2.10) dies on the logger call in XIELU's compile fallback once the CUDA kernel
-    # is importable; piecewise dynamo tolerates the break and runs the kernel eagerly.
     "$UV" run --locked --extra mcore python examples/run_grpo.py --config $RECIPE \
       grpo.max_num_steps=3 \
       policy.generation.vllm_cfg.gpu_memory_utilization=0.40 \
-      +policy.generation.vllm_cfg.env_vars.PYTHONPATH=$XIELU_SITE \
-      +policy.generation.vllm_cfg.env_vars.VLLM_USE_AOT_COMPILE=0
+      +policy.generation.vllm_cfg.env_vars.PYTHONPATH=$XIELU_SITE
   "
 echo "END TIME: $(date)"
