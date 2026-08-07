@@ -56,6 +56,12 @@ policy:
     # logits (the largest activation at this vocab; ~0.5 MB/token in bf16).
     use_linear_ce_fusion_loss: true
     linear_ce_fusion_chunk_size: 256
+    # Upstream #2833 (f2ab62c20): the fused forward reads output_layer.weight
+    # without calling output_layer.forward(), which leaves a stale
+    # param_gather_handle in the distributed-optimizer prefetch chain and can
+    # assert on a later iteration; disable the overlap while fusion is on.
+    distributed_data_parallel_config:
+      overlap_param_gather: false
     enabled: true
     tensor_model_parallel_size: 2
     sequence_parallel: false
