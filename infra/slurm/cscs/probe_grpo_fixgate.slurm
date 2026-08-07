@@ -24,6 +24,10 @@ CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.0-cp313-torch2.11.0-cu130}  # CUDA xielu kernel built against the v0.7.0 container; unset for eager fallback
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron.yaml}
+# Call the uv shipped in the image: uv cache buckets are version-specific, so a personal uv
+# earlier on PATH misses the seeded cache and rebuilds from source. Expanded by this shell
+# into the srun command (the body below is double-quoted), so it must be set out here.
+UV=${UV:-/root/.local/bin/uv}
 
 # Fail fast if submodules are not initialized — the driver imports megatron.core and the refit uses the bridge, so an empty submodule dir otherwise surfaces as a cryptic ModuleNotFoundError mid-run.
 for sm in 3rdparty/Megatron-Bridge-workspace/Megatron-Bridge 3rdparty/Gym-workspace/Gym 3rdparty/Automodel-workspace/Automodel; do
@@ -46,9 +50,6 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     # (user-readable under CE); using it skips source builds and downloads on
     # fresh checkouts. Additions land in the ephemeral overlay, so override
     # UV_CACHE_DIR with a persistent path if the lock ever diverges from the image.
-    # Call the image's uv explicitly: uv cache buckets are version-specific, so a
-    # personal uv earlier on PATH misses the seeded cache and rebuilds from source.
-    UV=${UV:-/root/.local/bin/uv}
     export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
     export UV_PROJECT_ENVIRONMENT=$REPO_DIR/.venv
     export NEMO_RL_VENV_DIR=$REPO_DIR/venvs
