@@ -32,7 +32,9 @@ RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin
 # The Ray-cluster assembly is algorithm-agnostic; point RUN_SCRIPT at another
 # entry point (e.g. examples/run_grpo.py, with UV_EXTRA=mcore) to reuse it.
 RUN_SCRIPT=${RUN_SCRIPT:-examples/run_dpo.py}
-UV_EXTRA=${UV_EXTRA:-}
+# mcore by default so every launcher syncs .venv to the same shape — mixed
+# extra/no-extra launchers otherwise resync the extras in and out each run.
+UV_EXTRA=${UV_EXTRA:-mcore}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}

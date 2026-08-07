@@ -101,6 +101,7 @@ srun \
       policy.megatron_cfg.sequence_parallel=false \
       policy.megatron_cfg.use_linear_ce_fusion_loss=true \
       policy.megatron_cfg.linear_ce_fusion_chunk_size=256 \
+      policy.megatron_cfg.distributed_data_parallel_config.overlap_param_gather=false \
       logger.tensorboard_enabled=true \
       logger.log_dir="$LOG_DIR" \
       logger.wandb_enabled=false \

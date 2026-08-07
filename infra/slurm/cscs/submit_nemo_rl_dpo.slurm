@@ -89,6 +89,6 @@ PYEOF
     fi
 
     echo "=== DPO training: $(basename "'"$RECIPE"'") ==="
-    "$UV" run --locked examples/run_dpo.py --config "'"$RECIPE"'"
+    "$UV" run --locked --extra mcore examples/run_dpo.py --config "'"$RECIPE"'"
   '
 echo "END TIME: $(date)"
