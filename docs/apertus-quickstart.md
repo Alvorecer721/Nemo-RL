@@ -47,9 +47,11 @@ Submitting from *inside* a compute-node container (e.g. a coding agent that can'
   under `<repo>/venvs/` — both persistent across jobs (the launchers export
   `UV_PROJECT_ENVIRONMENT`/`NEMO_RL_VENV_DIR`; the image defaults are container-overlay paths that
   die with the job). Delete those two directories to force a clean rebuild.
-- Package downloads and source builds resolve through the image-seeded uv cache
-  (`UV_CACHE_DIR=/root/.cache/uv`, readable under CE), so a fresh checkout should not recompile
-  TransformerEngine. Steady-state job setup is single-digit minutes.
+- Package downloads and source builds resolve through the team uv cache on capstor
+  (`UV_CACHE_DIR=/capstor/store/cscs/swissai/infra01/MLLM/uv-cache`, seeded from the image), so a
+  fresh checkout recompiles nothing — a full cold start measured 0 downloads, 0 source builds.
+  Clone on capstor: uv then hardlinks from the cache instead of copying, so venv creation is fast
+  and near-free on disk. Steady-state job setup is single-digit minutes.
 - vLLM torch.compile caches persist under `~/.cache/vllm*`; the HF→Megatron checkpoint conversion is
   cached under `$HF_HOME/nemo_rl/` and reused across runs and algorithms.
 

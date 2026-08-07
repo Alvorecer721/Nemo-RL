@@ -55,11 +55,11 @@ srun \
     export PYTHONPATH="$REPO_DIR:$BRIDGE_ROOT/src${XIELU_SITE:+:$XIELU_SITE}"
     # Persist the project + worker venvs on capstor: the image defaults both to
     # container-overlay paths that die with the job, forcing a rebuild every run.
-    # Image-seeded uv cache (complete for the release lock; see fixgate launcher).
+    # Team uv cache on capstor (complete for the release lock; see fixgate launcher).
     # Call the uv shipped in the image: uv cache buckets are version-specific, so a
     # personal uv earlier on PATH misses the seeded cache and rebuilds from source.
     UV=${UV:-/root/.local/bin/uv}
-    export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
+    export UV_CACHE_DIR=${UV_CACHE_DIR:-/capstor/store/cscs/swissai/infra01/MLLM/uv-cache}
     # uv progress rendering has SIGPIPEd (exit 141) against the Slurm output stream
     # right after large first-time installs; plain log lines are enough here.
     export UV_NO_PROGRESS=1
