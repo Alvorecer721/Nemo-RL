@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --job-name=ap1p5-train
-#SBATCH --output=/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0/logs/dpo_maxmin_mn_%j.out
-#SBATCH --error=/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0/logs/dpo_maxmin_mn_%j.err
+#SBATCH --output=logs/dpo_maxmin_mn_%j.out
+#SBATCH --error=logs/dpo_maxmin_mn_%j.err
 #SBATCH --time=08:00:00
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
@@ -25,7 +25,9 @@ echo "START TIME: $(date)"
 # N nodes execute identical training math (DP width changes, updates do not),
 # and the run auto-resumes from the latest checkpoint.
 ###############################################################################
-REPO_DIR=${REPO_DIR:-/capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0}
+# Run from the repo root (`cd <repo> && sbatch <this>`) or anywhere with `sbatch --chdir=<repo> <this>`;
+# the relative #SBATCH logs/ paths land in the same workdir.
+REPO_DIR=${REPO_DIR:-$PWD}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}

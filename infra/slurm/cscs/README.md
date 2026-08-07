@@ -15,7 +15,8 @@ Run from the repository root after creating the log directory:
 ```bash
 mkdir -p logs
 sbatch infra/slurm/cscs/build_xielu.slurm                       # one-time CUDA xIELU kernel build
-sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm                # 3-step online GRPO smoke
+sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm                # 3-step online GRPO smoke (sync, colocated)
+sbatch infra/slurm/cscs/probe_grpo_async.slurm                  # same gate on the async non-colocated path
 sbatch infra/slurm/cscs/probe_nemo_rl_dpo_megatron_apertus.slurm  # DPO probe + provider gate
 sbatch infra/slurm/cscs/submit_nemo_rl_dpo.slurm                # full MaxMin DPO run
 ```
@@ -23,7 +24,7 @@ sbatch infra/slurm/cscs/submit_nemo_rl_dpo.slurm                # full MaxMin DP
 Useful overrides:
 
 ```bash
-CONTAINER_ENV=/users/xyixuan/.edf/nemo_rl.toml sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm
+CONTAINER_ENV=$HOME/.edf/nemo_rl.toml sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm
 RECIPE=examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml sbatch infra/slurm/cscs/submit_nemo_rl_dpo.slurm
 ```
 

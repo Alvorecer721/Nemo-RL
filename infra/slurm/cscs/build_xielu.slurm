@@ -17,7 +17,7 @@ set -euo pipefail
 REPO_DIR=${REPO_DIR:-$SLURM_SUBMIT_DIR}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 SRC=${SRC:-$REPO_DIR/3rdparty/kernels/xielu}
-OUTROOT=${OUTROOT:-/capstor/store/cscs/swissai/infra01/users/xyixuan/xielu-builds}
+OUTROOT=${OUTROOT:-$REPO_DIR/xielu-builds}   # copy the ABI-tagged site dir to the team wheelhouse to share it
 ARCHES=${ARCHES:-9.0}
 
 unset LD_PRELOAD

@@ -66,4 +66,4 @@ env:
               enable_thinking: false
 
 logger:
-  log_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/grpo-apertus-gym
+  log_dir: logs/grpo-apertus-gym

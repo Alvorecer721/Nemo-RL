@@ -22,7 +22,7 @@ dpo:
   preference_average_log_probs: true
 checkpointing:
   enabled: true
-  checkpoint_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/results/dpo-apertus1p5-8b-maxmin
+  checkpoint_dir: results/dpo-apertus1p5-8b-maxmin
   save_period: 150
   keep_top_k: 5
 data:
@@ -66,7 +66,7 @@ policy:
 logger:
   wandb_enabled: true
   tensorboard_enabled: true
-  log_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/dpo-apertus1p5-8b-maxmin
+  log_dir: logs/dpo-apertus1p5-8b-maxmin
   wandb:
     project: apertus-nemo-rl
     name: dpo-apertus1p5-8b-maxmin-beta25-lr1e-6
