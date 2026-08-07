@@ -9,12 +9,12 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=64
 #SBATCH --partition=normal
-#SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --export=NONE
 
 set -euo pipefail
 
 # Run from the repo root (`cd <repo> && sbatch ...`) or anywhere with `sbatch --chdir=<repo> ...`.
+# Add `--reservation=<name>` on the sbatch line if your project has one active.
 # REPO_DIR defaults to the job working dir ($PWD), which is also where the relative #SBATCH logs/ land.
 # (sbatch copies this script to /var/spool/slurmd, so BASH_SOURCE doesn't resolve here.)
 REPO_DIR=${REPO_DIR:-$PWD}
