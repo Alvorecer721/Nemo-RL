@@ -51,6 +51,9 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     # fresh checkouts. Additions land in the ephemeral overlay, so override
     # UV_CACHE_DIR with a persistent path if the lock ever diverges from the image.
     export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
+    # uv progress rendering has SIGPIPEd (exit 141) against the Slurm output stream
+    # right after large first-time installs; plain log lines are enough here.
+    export UV_NO_PROGRESS=1
     export UV_PROJECT_ENVIRONMENT=$REPO_DIR/.venv
     export NEMO_RL_VENV_DIR=$REPO_DIR/venvs
     cd $REPO_DIR

@@ -62,6 +62,9 @@ srun \
     if [ "'"$RUNTIME_DIR"'" != /opt/nemo-rl ]; then
       # Image-seeded uv cache (complete for the release lock; see fixgate launcher).
       export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
+      # uv progress rendering has SIGPIPEd (exit 141) against the Slurm output stream
+      # right after large first-time installs; plain log lines are enough here.
+      export UV_NO_PROGRESS=1
       export UV_PROJECT_ENVIRONMENT="'"$RUNTIME_DIR"'/.venv"
       export NEMO_RL_VENV_DIR="'"$RUNTIME_DIR"'/venvs"
     fi
