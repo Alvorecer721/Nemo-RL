@@ -99,6 +99,8 @@ srun \
       policy.max_total_sequence_length=2048 \
       policy.megatron_cfg.tensor_model_parallel_size=2 \
       policy.megatron_cfg.sequence_parallel=false \
+      policy.megatron_cfg.use_linear_ce_fusion_loss=true \
+      policy.megatron_cfg.linear_ce_fusion_chunk_size=256 \
       logger.tensorboard_enabled=true \
       logger.log_dir="$LOG_DIR" \
       logger.wandb_enabled=false \
