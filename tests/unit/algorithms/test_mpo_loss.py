@@ -13,123 +13,21 @@
 # limitations under the License.
 """MPOLossFn unit tests (pure-tensor, CPU, no torch.distributed).
 
-Import strategy: the locked runtime's import chain pulls ``decord`` (absent in
-the CPU test env), so we first try the real imports (CI path) and otherwise
-exec the *real source files* — stock ``loss_functions.py`` and our
-``mpo_loss.py`` — with only the unreachable leaf imports stubbed
-(``BatchedDataDict`` as a dict alias, loss-interface enums) and the real
-``masked_mean`` ast-extracted from ``nemo_rl/algorithms/utils.py``. Either way
-the class objects under test are built from the genuine implementations.
+Exercises the real classes from this checkout: the stock
+``nemo_rl.algorithms.loss.loss_functions`` and ``nemo_rl_apertus.mpo_loss``.
+Plain-dict configs are used throughout; ``MPOLossFn`` normalizes them through
+:class:`~nemo_rl_apertus.mpo_loss.MPOConfig`, and the one direct ``DPOLossFn``
+construction wraps in the stock ``DPOLossConfig``.
 """
 
-import ast
 import math
-import types
-from pathlib import Path
-from typing import Optional
 
 import pytest
 import torch
 import torch.nn.functional as F
 
-LOCKED_NEMO_RL_REPO = Path("/opt/nemo-rl")
-STOCK_LOSS_SRC = LOCKED_NEMO_RL_REPO / "nemo_rl/algorithms/loss/loss_functions.py"
-STOCK_UTILS_SRC = LOCKED_NEMO_RL_REPO / "nemo_rl/algorithms/utils.py"
-MPO_SRC = Path(__file__).resolve().parents[1] / "mpo_loss.py"
-
-
-# ---------------------------------------------------------------------------
-# real-source loading harness
-# ---------------------------------------------------------------------------
-def _extract_function(path: Path, name: str, namespace: dict):
-    """Exec a single top-level function def from a real source file."""
-    tree = ast.parse(path.read_text())
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            mod = ast.Module(body=[node], type_ignores=[])
-            exec(compile(mod, str(path), "exec"), namespace)
-            return namespace[name]
-    raise AssertionError(f"{name} not found in {path}")
-
-
-def _exec_module_without_nemo_imports(path: Path, name: str, injected: dict):
-    """Exec a real module source with its `from nemo_rl...` imports replaced."""
-    tree = ast.parse(path.read_text())
-    tree.body = [
-        node
-        for node in tree.body
-        if not (
-            isinstance(node, ast.ImportFrom)
-            and node.module
-            and node.module.startswith("nemo_rl")
-        )
-    ]
-    module = types.ModuleType(name)
-    module.__dict__.update(injected)
-    module.__file__ = str(path)
-    exec(compile(tree, str(path), "exec"), module.__dict__)
-    return module
-
-
-def _load_via_harness():
-    import enum
-
-    class BatchedDataDict(dict):
-        def __class_getitem__(cls, item):
-            return cls
-
-    class LossType(enum.Enum):
-        TOKEN_LEVEL = "token_level"
-        SEQUENCE_LEVEL = "sequence_level"
-
-    class LossInputType(enum.Enum):
-        LOGIT = "logit"
-        LOGPROB = "logprob"
-        DISTILLATION = "distillation"
-        DRAFT = "draft"
-
-    class LossFunction:  # Protocol stand-in; DPO classes only subclass it
-        pass
-
-    masked_mean = _extract_function(
-        STOCK_UTILS_SRC, "masked_mean", {"torch": torch, "Optional": Optional}
-    )
-
-    stock = _exec_module_without_nemo_imports(
-        STOCK_LOSS_SRC,
-        "stock_loss_functions_under_test",
-        {
-            "LossFunction": LossFunction,
-            "LossType": LossType,
-            "LossInputType": LossInputType,
-            "masked_mean": masked_mean,
-            "calculate_kl": None,  # PG-loss only; unused on the DPO path
-            "BatchedDataDict": BatchedDataDict,
-            "DistributedCrossEntropy": None,  # logit-input losses only
-        },
-    )
-    mpo = _exec_module_without_nemo_imports(
-        MPO_SRC,
-        "mpo_loss_under_test",
-        {
-            "DPOLossFn": stock.DPOLossFn,
-            "DPOLossConfig": stock.DPOLossConfig,
-            "DPOLossDataDict": stock.DPOLossDataDict,
-            "masked_mean": masked_mean,
-            "BatchedDataDict": BatchedDataDict,
-        },
-    )
-    return stock, mpo
-
-
-try:  # CI path: full runtime available
-    import nemo_rl.algorithms.loss.loss_functions as stock_mod
-    from nemo_rl_apertus import mpo_loss as mpo_mod
-
-    RUNTIME = "real"
-except ModuleNotFoundError:  # CPU env: decord missing in the import chain
-    stock_mod, mpo_mod = _load_via_harness()
-    RUNTIME = "harness"
+import nemo_rl.algorithms.loss.loss_functions as stock_mod
+from nemo_rl_apertus import mpo_loss as mpo_mod
 
 DPOLossFn = stock_mod.DPOLossFn
 MPOLossFn = mpo_mod.MPOLossFn
@@ -214,7 +112,9 @@ def test_weight_zero_bitwise_equivalence(sft_weight, avg_logprobs):
     lp_s, data, gvs, gvt = make_fixture(seed=7)
     lp_m = lp_s.detach().clone().requires_grad_(True)
 
-    stock_loss, stock_metrics = DPOLossFn(cfg)(lp_s, data, gvs, gvt)
+    stock_loss, stock_metrics = DPOLossFn(stock_mod.DPOLossConfig(**cfg))(
+        lp_s, data, gvs, gvt
+    )
     mpo_loss, mpo_metrics = MPOLossFn(dict(cfg, quality_loss_weight=0.0))(
         lp_m, data, gvs, gvt
     )

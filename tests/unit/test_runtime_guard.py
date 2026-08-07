@@ -15,7 +15,7 @@
 """Tests for the Apertus runtime guard (nemo_rl_apertus/runtime_guard.py).
 
 The guard keys off ``is_apertus_model`` in ``nemo_rl.models.huggingface.common`` (present only in our nemo_rl).
-conftest pins nemo_rl to the locked stock ``/opt/nemo-rl``, so both cases drive the marker explicitly via monkeypatch rather than depending on which nemo_rl is loaded.
+Both cases drive the marker explicitly via monkeypatch rather than depending on which nemo_rl is loaded.
 """
 
 import pytest

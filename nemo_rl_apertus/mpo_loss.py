@@ -90,8 +90,8 @@ At policy == reference, log-ratios vanish, so every implicit reward r == 0:
   2 ln 2 ~= 1.3863
 * total = w_pref * 0.6931 + w_q * 1.3863 + w_sft * (chosen NLL)
 
-Config keys (read from the same ``dpo`` cfg dict the stock loss receives)
--------------------------------------------------------------------------
+Config keys (:class:`MPOConfig` fields, an extension of the stock ``DPOLossConfig``)
+------------------------------------------------------------------------------------
 * ``quality_loss_weight``       (float, default 0.0) — w_q
 * ``quality_delta_init``        (float, default 0.0) — delta seed at (re)start
 * ``quality_delta_resume_count`` (float, default 0)  — count seed at (re)start
@@ -111,6 +111,7 @@ import os
 from typing import Any, Optional
 
 import torch
+from pydantic import BaseModel
 from torch import Tensor
 
 from nemo_rl.algorithms.loss.loss_functions import (
@@ -125,6 +126,20 @@ DELTA_SIDECAR_NAME = "mpo_delta.json"
 
 # TRL RunningMoments epsilon: a fresh state adopts the first batch mean exactly.
 _COUNT_EPS = 1e-24
+
+
+class MPOConfig(DPOLossConfig):
+    """The stock DPO loss fields plus the MPO quality-term keys (module docstring).
+
+    ``extra="allow"`` is inherited, so the full ``dpo`` config section validates
+    directly: ``MPOConfig.model_validate(master_config.dpo.model_dump())``.
+    """
+
+    quality_loss_weight: float = 0.0
+    quality_delta_init: float = 0.0
+    quality_delta_resume_count: float = 0.0
+    quality_delta_state_path: Optional[str] = None
+    quality_delta_state_id: str = "default"
 
 
 class RunningMeanState:
@@ -228,17 +243,17 @@ class MPOLossFn(DPOLossFn):
     delta (running reward anchor) lifecycle, and the STEP-1 invariant.
     """
 
-    def __init__(self, cfg: DPOLossConfig, use_linear_ce_fusion: bool = False):
+    def __init__(self, cfg: MPOConfig, use_linear_ce_fusion: bool = False):
+        if not isinstance(cfg, MPOConfig):
+            cfg = MPOConfig.model_validate(
+                cfg.model_dump() if isinstance(cfg, BaseModel) else dict(cfg)
+            )
         super().__init__(cfg, use_linear_ce_fusion=use_linear_ce_fusion)
-        self.quality_loss_weight = float(cfg.get("quality_loss_weight", 0.0))
-        self.quality_delta_init = float(cfg.get("quality_delta_init", 0.0))
-        self.quality_delta_resume_count = float(
-            cfg.get("quality_delta_resume_count", 0)
-        )
-        self.quality_delta_state_path: Optional[str] = cfg.get(
-            "quality_delta_state_path"
-        )
-        self.quality_delta_state_id = str(cfg.get("quality_delta_state_id", "default"))
+        self.quality_loss_weight = cfg.quality_loss_weight
+        self.quality_delta_init = cfg.quality_delta_init
+        self.quality_delta_resume_count = cfg.quality_delta_resume_count
+        self.quality_delta_state_path = cfg.quality_delta_state_path
+        self.quality_delta_state_id = cfg.quality_delta_state_id
 
     def _delta_state(self) -> RunningMeanState:
         """Acquire the worker-resident running state (contracts 4 and 7)."""
@@ -267,8 +282,8 @@ class MPOLossFn(DPOLossFn):
         """Per-sample implicit reward r = beta * (log pi_theta - log pi_0).
 
         Mirrors the reward computation in ``DPOLossFn._dpo_loss`` exactly
-        (loss_functions.py:865-880 in the pinned v0.6.0 runtime), then applies
-        beta — TRL bco_loss's ``chosen/rejected_rewards`` (contract 2).
+        (``nemo_rl/algorithms/loss/loss_functions.py`` in this checkout), then
+        applies beta — TRL bco_loss's ``chosen/rejected_rewards`` (contract 2).
         """
         token_mask = data["token_mask"][:, 1:]
         ref_logprobs = data["reference_policy_logprobs"][:, :-1]
