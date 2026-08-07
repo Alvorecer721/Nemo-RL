@@ -55,6 +55,8 @@ srun \
     export PYTHONPATH="$REPO_DIR:$BRIDGE_ROOT/src${XIELU_SITE:+:$XIELU_SITE}"
     # Persist the project + worker venvs on capstor: the image defaults both to
     # container-overlay paths that die with the job, forcing a rebuild every run.
+    # Image-seeded uv cache (complete for the release lock; see fixgate launcher).
+    export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
     export UV_PROJECT_ENVIRONMENT="$REPO_DIR/.venv"
     export NEMO_RL_VENV_DIR="$REPO_DIR/venvs"
     export RUN_DIR='"$RUN_DIR"'

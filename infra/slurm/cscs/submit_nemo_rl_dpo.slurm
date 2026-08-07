@@ -56,6 +56,8 @@ srun \
     # whose /opt venvs are prebaked): the image defaults both to container-overlay
     # paths that die with the job, forcing a rebuild every run.
     if [ "'"$RUNTIME_DIR"'" != /opt/nemo-rl ]; then
+      # Image-seeded uv cache (complete for the release lock; see fixgate launcher).
+      export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
       export UV_PROJECT_ENVIRONMENT="'"$RUNTIME_DIR"'/.venv"
       export NEMO_RL_VENV_DIR="'"$RUNTIME_DIR"'/venvs"
     fi
