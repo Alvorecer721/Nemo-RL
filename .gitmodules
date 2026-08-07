@@ -3,6 +3,7 @@
 	url = https://github.com/Alvorecer721/Megatron-Bridge.git
 	branch = yxu/apertus-v070
 	shallow = true
+	ignore = untracked
 [submodule "3rdparty/Automodel-workspace/Automodel"]
 	path = 3rdparty/Automodel-workspace/Automodel
 	url = https://github.com/NVIDIA-NeMo/Automodel.git
