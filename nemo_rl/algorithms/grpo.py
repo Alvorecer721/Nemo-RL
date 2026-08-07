@@ -4019,6 +4019,11 @@ def validate(
                     deduplicate_multimodal_data=(
                         master_config.grpo.deduplicate_multimodal_data
                     ),
+                    cot_token_ids=(
+                        tuple(master_config.grpo.cot_think_token_ids)
+                        if master_config.grpo.cot_think_token_ids
+                        else None
+                    ),
                 )
             else:
                 val_batch, gen_metrics = run_multi_turn_rollout(
@@ -4031,6 +4036,11 @@ def validate(
                     greedy=False,
                     deduplicate_multimodal_data=(
                         master_config.grpo.deduplicate_multimodal_data
+                    ),
+                    cot_token_ids=(
+                        tuple(master_config.grpo.cot_think_token_ids)
+                        if master_config.grpo.cot_think_token_ids
+                        else None
                     ),
                 )
 
@@ -4431,7 +4441,9 @@ def async_grpo_train(
             import traceback
 
             traceback.print_exc()
-            return
+            # A failed refit means the generator never received real weights;
+            # returning here would end the run with zero steps and exit code 0.
+            raise
     else:
         print("🔄 Preparing policy generation for inference...")
         try:
@@ -4442,7 +4454,7 @@ def async_grpo_train(
             import traceback
 
             traceback.print_exc()
-            return
+            raise
 
     # Generation must hold the policy's real weights before any backend starts
     # collecting. In particular, vLLM and Dynamo start with dummy weights when
