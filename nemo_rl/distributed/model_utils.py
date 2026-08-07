@@ -2114,8 +2114,15 @@ def from_parallel_hidden_states_to_logprobs(
     inference_only: bool = False,
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
     chunk_size: Optional[int] = None,
+    sequence_parallel: bool = True,
 ) -> torch.Tensor:
-    """Get log probabilities from TP sharded hidden states."""
+    """Get log probabilities from TP sharded hidden states.
+
+    With sequence_parallel=True the hidden states are the [S/TP, B, H] shard and
+    are all-gathered along the sequence; with sequence_parallel=False they are
+    the full replicated [S, B, H] and no gather happens (gathering anyway would
+    double the sequence and corrupt the backward).
+    """
     target = target.roll(shifts=-1, dims=-1)
     assert cp_group is None or torch.distributed.get_world_size(cp_group) == 1, (
         "Context parallelism is not supported for linear CE fusion loss"
@@ -2129,6 +2136,7 @@ def from_parallel_hidden_states_to_logprobs(
         chunk_size,
         tp_group,
         inference_only,
+        sequence_parallel,
     ).contiguous()
 
     return logprobs[:, :-1]
@@ -2148,12 +2156,13 @@ class ChunkedDistributedHiddenStatesToLogprobs(torch.autograd.Function):
         chunk_size: int,
         tp_group: torch.distributed.ProcessGroup,
         inference_only: bool = False,
+        sequence_parallel: bool = True,
     ) -> torch.Tensor:
         target_mask = (target < vocab_start_index) | (target >= vocab_end_index)
         masked_target = target - vocab_start_index
         masked_target[target_mask] = 0
         tp_group_size = torch.distributed.get_world_size(tp_group)
-        if tp_group_size > 1:
+        if tp_group_size > 1 and sequence_parallel:
             original_tensor_parallel_hidden_states = (
                 tensor_parallel_hidden_states.clone()
             )
@@ -2211,13 +2220,14 @@ class ChunkedDistributedHiddenStatesToLogprobs(torch.autograd.Function):
             )
             ctx.chunk_size = chunk_size
             ctx.tp_group = tp_group
+            ctx.sequence_parallel = sequence_parallel
 
         return log_probs
 
     @staticmethod
     def backward(
         ctx: Any, *grad_outputs: torch.Tensor
-    ) -> tuple[torch.Tensor, None, torch.Tensor, None, None, None, None, None]:
+    ) -> tuple[torch.Tensor, None, torch.Tensor, None, None, None, None, None, None]:
         grad_output = grad_outputs[0]
         # the tensor_parallel_hidden_states is already all gathered in the forward pass
         (
@@ -2228,7 +2238,7 @@ class ChunkedDistributedHiddenStatesToLogprobs(torch.autograd.Function):
         ) = ctx.saved_tensors
         tp_group = ctx.tp_group
         tp_group_size = torch.distributed.get_world_size(tp_group)
-        if tp_group_size > 1:
+        if tp_group_size > 1 and ctx.sequence_parallel:
             all_hidden_states = [
                 torch.zeros_like(tensor_parallel_hidden_states)
                 for _ in range(tp_group_size)
@@ -2289,6 +2299,28 @@ class ChunkedDistributedHiddenStatesToLogprobs(torch.autograd.Function):
             torch.cat(all_grad_input_hidden_states, dim=1).transpose(0, 1).contiguous()
         )
         weight_grad = grad_input_output_layer
+
+        if tp_group_size > 1 and not ctx.sequence_parallel:
+            # Non-SP: every rank holds the full replicated sequence and computed
+            # its vocab partition's contribution; sum them (the ColumnParallelLinear
+            # grad_input reduction) and return the full-length grad.
+            torch.distributed.all_reduce(
+                grad_input_hidden_states,
+                op=torch.distributed.ReduceOp.SUM,
+                group=tp_group,
+            )
+            return (
+                grad_input_hidden_states,
+                None,
+                weight_grad,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
         local_seq_size = seq_size // tp_group_size
 
         sharded_grad_hidden_states = torch.empty_like(
@@ -2308,6 +2340,7 @@ class ChunkedDistributedHiddenStatesToLogprobs(torch.autograd.Function):
             sharded_grad_hidden_states,
             None,
             weight_grad,
+            None,
             None,
             None,
             None,
@@ -2458,6 +2491,7 @@ def _gpt_forward_with_linear_ce_fusion(
         tp_group=get_tensor_model_parallel_group(),
         cp_group=self.cp_group,
         chunk_size=self._linear_ce_fusion_chunk_size,
+        sequence_parallel=self.config.sequence_parallel,
     )
     return logprobs
 
