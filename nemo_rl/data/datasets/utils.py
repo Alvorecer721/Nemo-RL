@@ -121,6 +121,15 @@ def load_dataset_from_path(
             "data_subset is only supported for huggingface datasets"
         )
         raw_dataset = load_dataset(dataset_type, data_files=data_path)
+    # save_to_disk format, detected by its marker files. Must be checked before
+    # load_dataset: that call globs the loose .arrow files inside (including
+    # stale cache-*.arrow with unrelated schemas) instead of raising, so the
+    # load_from_disk fallback below never triggers for these directories.
+    elif os.path.isdir(data_path) and (
+        os.path.exists(os.path.join(data_path, "dataset_dict.json"))
+        or os.path.exists(os.path.join(data_path, "state.json"))
+    ):
+        raw_dataset = load_from_disk(data_path)
     else:
         try:
             # load from huggingface
