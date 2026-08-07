@@ -32,6 +32,9 @@ policy:
 
   megatron_cfg:
     force_reconvert_from_hf: false   # load the cached Megatron ckpt directly (skip HF reconvert)
+    # No use_linear_ce_fusion_loss here: it is incompatible with sequence
+    # packing (enabled in the GRPO base), which has its own fused-loss knob
+    # (sequence_packing.fuse_loss). Linear-CE fusion is a DPO-side win.
     tensor_model_parallel_size: 2
     pipeline_model_parallel_size: 1
     sequence_parallel: false
