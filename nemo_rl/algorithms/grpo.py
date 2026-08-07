@@ -47,6 +47,7 @@ from nemo_rl.algorithms.reward_functions import (
     apply_reward_shaping,
 )
 from nemo_rl.algorithms.utils import (
+    alp_pass_rate,
     calculate_baseline_and_std_per_prompt,
     get_gdpo_reward_component_keys,
     log_generation_metrics_to_wandb,
@@ -2431,20 +2432,17 @@ def grpo_train(
                     )
                     logger.log_metrics(rollout_metrics, total_steps + 1, prefix="train")
 
+                reward_shaping_cfg = master_config.grpo["reward_shaping"]
+                pass_rate = None
+                if reward_shaping_cfg["enabled"]:
+                    pass_rate = alp_pass_rate(
+                        input_ids, repeated_batch["total_reward"], reward_shaping_cfg
+                    )
                 repeated_batch = scale_rewards(
                     repeated_batch, master_config.grpo["reward_scaling"]
                 )
                 # Process rewards with custom reward function
-                if master_config.grpo["reward_shaping"]["enabled"]:
-                    reward_shaping_cfg = master_config.grpo["reward_shaping"]
-                    pass_rate = None
-                    if reward_shaping_cfg.get("alp_coef") is not None:
-                        pass_rate, _ = calculate_baseline_and_std_per_prompt(
-                            input_ids,
-                            repeated_batch["total_reward"],
-                            torch.ones_like(repeated_batch["total_reward"]),
-                            leave_one_out_baseline=False,
-                        )
+                if reward_shaping_cfg["enabled"]:
                     repeated_batch = apply_reward_shaping(
                         repeated_batch, reward_shaping_cfg, pass_rate=pass_rate
                     )

@@ -222,6 +222,14 @@ def setup(
     loss_config: ClippedPGLossConfig = master_config.loss_fn
     ppo_config = master_config.ppo
     data_config = master_config.data
+
+    reward_shaping_config = ppo_config["reward_shaping"]
+    if reward_shaping_config["enabled"] and reward_shaping_config.get("alp_coef"):
+        raise ValueError(
+            "reward_shaping.alp_coef is not supported for PPO: the adaptive length "
+            "penalty scales by per-prompt pass_rate, which requires grouped rollouts "
+            "(num_generations_per_prompt); PPO/GAE samples one trajectory per prompt."
+        )
     logger_config = master_config.logger
     cluster_config = master_config.cluster
 

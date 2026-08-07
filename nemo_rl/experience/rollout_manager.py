@@ -21,6 +21,7 @@ import torch
 from transformers import PreTrainedTokenizerBase
 from wandb import Table
 
+from nemo_rl.algorithms.reward_functions import assistant_token_parts
 from nemo_rl.data.interfaces import DatumSpec
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.environments.interfaces import EnvironmentInterface
@@ -374,10 +375,7 @@ class AsyncRolloutImpl:
         ]
 
         quality_metrics, _ = _compute_generation_quality_metrics(
-            [
-                [m["token_ids"] for m in c.message_log if m["role"] == "assistant"]
-                for c in completions
-            ],
+            [assistant_token_parts(c.message_log) for c in completions],
             truncated,
             self._cot_token_ids,
         )
@@ -572,10 +570,7 @@ class AsyncNemoGymRolloutImpl:
         }
 
         quality_metrics, _ = _compute_generation_quality_metrics(
-            [
-                [m["token_ids"] for m in c.message_log if m["role"] == "assistant"]
-                for c in completions
-            ],
+            [assistant_token_parts(c.message_log) for c in completions],
             truncated,
             self._cot_token_ids,
         )

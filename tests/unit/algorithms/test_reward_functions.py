@@ -452,3 +452,64 @@ def test_reward_shaping_alp_missing_max_response_length():
 
     with pytest.raises(AssertionError, match="max_response_length is not configured"):
         apply_reward_shaping(batch, config, pass_rate=pass_rate)
+
+
+def test_reward_shaping_alp_data_plane_lengths():
+    """ALP reads response_token_lengths when the slice carries no message_log (data-plane path)."""
+    batch = create_mock_batch_with_responses(
+        num_samples=3,
+        response_lengths=[100, 200, 400],
+        initial_rewards=[1.0, 1.0, 0.0],
+    )
+    del batch["message_log"]
+    batch["response_token_lengths"] = torch.tensor([100, 200, 400])
+
+    config = RewardShapingConfig(enabled=True, alp_coef=1.0, max_response_length=1000)
+    pass_rate = torch.tensor([0.5, 0.5, 0.25])
+
+    result_batch = apply_reward_shaping(batch, config, pass_rate=pass_rate)
+
+    expected = torch.tensor([0.95, 0.90, -0.10])
+    assert torch.allclose(result_batch["total_reward"], expected)
+
+
+def test_reward_shaping_ngram_fallback_from_message_log():
+    """Without a precomputed ngram_repetition_rate, the penalty derives the rate from message_log."""
+    batch = create_mock_batch_with_responses(
+        num_samples=2, response_lengths=[16, 16], initial_rewards=[1.0, 1.0]
+    )
+    # Sample 0: period-4 sequence -> 13 windows, 4 distinct -> rate 9/13.
+    batch["message_log"][0][1]["token_ids"] = torch.tensor([1, 2, 3, 4] * 4)
+
+    config = RewardShapingConfig(enabled=True, ngram_penalty_coef=1.0)
+    result_batch = apply_reward_shaping(batch, config)
+
+    expected = torch.tensor([1.0 - 9.0 / 13.0, 1.0])
+    assert torch.allclose(result_batch["total_reward"], expected)
+
+
+def test_reward_shaping_ngram_missing_rate_and_message_log():
+    """ngram penalty with neither ngram_repetition_rate nor message_log fails loudly."""
+    batch = create_mock_batch_with_responses(
+        num_samples=2, response_lengths=[10, 20], initial_rewards=[1.0, 0.0]
+    )
+    del batch["message_log"]
+
+    config = RewardShapingConfig(enabled=True, ngram_penalty_coef=1.0)
+    with pytest.raises(ValueError, match="ngram_penalty_coef is set but the batch"):
+        apply_reward_shaping(batch, config)
+
+
+def test_reward_shaping_ngram_with_partial_dapo_config_raises():
+    """ngram penalty does not excuse a partially-configured DAPO trio."""
+    batch = create_mock_batch_with_responses(
+        num_samples=2, response_lengths=[10, 20], initial_rewards=[1.0, 0.0]
+    )
+    config = RewardShapingConfig(
+        enabled=True,
+        ngram_penalty_coef=1.0,
+        overlong_buffer_length=128,
+        overlong_buffer_penalty=1.0,
+    )
+    with pytest.raises(ValueError, match="only DAPO reward shaping"):
+        apply_reward_shaping(batch, config)
