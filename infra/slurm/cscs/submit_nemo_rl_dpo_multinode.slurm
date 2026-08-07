@@ -73,6 +73,8 @@ srun \
     # Persist the project + worker venvs on capstor (skip for the image tree,
     # whose /opt venvs are prebaked): the image defaults both to container-overlay
     # paths that die with the job, forcing a rebuild every run.
+    # Call the uv shipped in the image (uv cache buckets are version-specific).
+    UV=${UV:-/root/.local/bin/uv}
     if [ "${RUNTIME_DIR}" != /opt/nemo-rl ]; then
       # Image-seeded uv cache (complete for the release lock; see fixgate launcher).
       export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
@@ -101,7 +103,7 @@ srun \
         echo "=== ray cluster complete: ${units}/$EXPECTED_UNITS units; starting driver ==="
         cd "$RUNTIME_DIR"
         # shellcheck disable=SC2086  # EXTRA_OVERRIDES is intentionally word-split
-        uv run --locked examples/run_dpo.py --config "$RECIPE" cluster.num_nodes="$NUM_NODES" $EXTRA_OVERRIDES
+        "$UV" run --locked examples/run_dpo.py --config "$RECIPE" cluster.num_nodes="$NUM_NODES" $EXTRA_OVERRIDES
         ray stop
     else
         # Workers: wait for the head port, join, then live exactly as long as

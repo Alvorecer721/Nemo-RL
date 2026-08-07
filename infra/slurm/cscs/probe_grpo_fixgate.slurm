@@ -46,13 +46,16 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     # (user-readable under CE); using it skips source builds and downloads on
     # fresh checkouts. Additions land in the ephemeral overlay, so override
     # UV_CACHE_DIR with a persistent path if the lock ever diverges from the image.
+    # Call the image's uv explicitly: uv cache buckets are version-specific, so a
+    # personal uv earlier on PATH misses the seeded cache and rebuilds from source.
+    UV=${UV:-/root/.local/bin/uv}
     export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
     export UV_PROJECT_ENVIRONMENT=$REPO_DIR/.venv
     export NEMO_RL_VENV_DIR=$REPO_DIR/venvs
     cd $REPO_DIR
     # Apertus runtime guard: fail loud if nemo_rl is the stock /opt copy rather than this checkout (online GRPO otherwise silently regresses to gen-KL ~0.79).
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'
-    uv run --locked --extra mcore python examples/run_grpo.py --config $RECIPE \
+    "$UV" run --locked --extra mcore python examples/run_grpo.py --config $RECIPE \
       grpo.max_num_steps=3 \
       policy.generation.vllm_cfg.gpu_memory_utilization=0.40
   "

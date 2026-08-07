@@ -56,6 +56,9 @@ srun \
     # Persist the project + worker venvs on capstor: the image defaults both to
     # container-overlay paths that die with the job, forcing a rebuild every run.
     # Image-seeded uv cache (complete for the release lock; see fixgate launcher).
+    # Call the uv shipped in the image: uv cache buckets are version-specific, so a
+    # personal uv earlier on PATH misses the seeded cache and rebuilds from source.
+    UV=${UV:-/root/.local/bin/uv}
     export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
     export UV_PROJECT_ENVIRONMENT="$REPO_DIR/.venv"
     export NEMO_RL_VENV_DIR="$REPO_DIR/venvs"
@@ -78,11 +81,11 @@ srun \
     # mcore extra env = the one Megatron workers run under (the base
     # /opt/nemo_rl_venv has no TE/modelopt in the public image); the tokenizer
     # argument additionally asserts the chat template loads
-    uv run --locked --extra mcore python \
+    "$UV" run --locked --extra mcore python \
       "$BRIDGE_ROOT/src/megatron/bridge/models/apertus/test_apertus_provider.py" "$APERTUS_TOKENIZER"
 
     echo "=== DPO probe: 3 steps, TP2, seq 2048 ==="
-    uv run examples/run_dpo.py \
+    "$UV" run examples/run_dpo.py \
       --config examples/configs/recipes/llm/dpo-llama3.1-8b-instruct-4n8g-megatron.v2.yaml \
       policy.model_name="$APERTUS_CKPT" \
       policy.tokenizer.name="$APERTUS_TOKENIZER" \
@@ -102,6 +105,6 @@ srun \
       cluster.num_nodes=1 \
       2>&1 | tee "$RUN_LOG"
 
-    uv run tests/json_dump_tb_logs.py "$LOG_DIR" --output_path "$JSON_METRICS"
-    uv run tests/check_metrics.py "$JSON_METRICS" '"'"'data["train/loss"]["3"] < 6'"'"'
+    "$UV" run tests/json_dump_tb_logs.py "$LOG_DIR" --output_path "$JSON_METRICS"
+    "$UV" run tests/check_metrics.py "$JSON_METRICS" '"'"'data["train/loss"]["3"] < 6'"'"'
   '

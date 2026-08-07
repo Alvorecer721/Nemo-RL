@@ -57,6 +57,8 @@ srun \
     # Persist the project + worker venvs on capstor (skip for the image tree,
     # whose /opt venvs are prebaked): the image defaults both to container-overlay
     # paths that die with the job, forcing a rebuild every run.
+    # Call the uv shipped in the image (uv cache buckets are version-specific).
+    UV=${UV:-/root/.local/bin/uv}
     if [ "'"$RUNTIME_DIR"'" != /opt/nemo-rl ]; then
       # Image-seeded uv cache (complete for the release lock; see fixgate launcher).
       export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
@@ -68,7 +70,7 @@ srun \
     # Prologue: full-set parquet (all 245,898 pairs, reference data parity).
     if [ ! -f "'"$FULL_SET"'" ]; then
       echo "=== building full-set train parquet ==="
-      uv run --locked python - <<PYEOF
+      "$UV" run --locked python - <<PYEOF
 from datasets import load_from_disk
 from pathlib import Path
 ds = load_from_disk("'"$SRC_SET"'")["train_split"]
@@ -84,6 +86,6 @@ PYEOF
     fi
 
     echo "=== DPO training: $(basename "'"$RECIPE"'") ==="
-    uv run --locked examples/run_dpo.py --config "'"$RECIPE"'"
+    "$UV" run --locked examples/run_dpo.py --config "'"$RECIPE"'"
   '
 echo "END TIME: $(date)"
