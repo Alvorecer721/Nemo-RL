@@ -41,6 +41,18 @@ A KL above ~0.002 means the generation path regressed; start from the traps page
 
 Submitting from *inside* a compute-node container (e.g. a coding agent that can't reach a login node) needs an extra incantation — see the "Submit from inside a compute node" section of `infra/slurm/cscs/README.md`.
 
+## Environment model (what gets built where)
+
+- The first `uv run --locked` materializes the project venv at `<repo>/.venv` and per-worker venvs
+  under `<repo>/venvs/` — both persistent across jobs (the launchers export
+  `UV_PROJECT_ENVIRONMENT`/`NEMO_RL_VENV_DIR`; the image defaults are container-overlay paths that
+  die with the job). Delete those two directories to force a clean rebuild.
+- Package downloads and source builds resolve through the image-seeded uv cache
+  (`UV_CACHE_DIR=/root/.cache/uv`, readable under CE), so a fresh checkout should not recompile
+  TransformerEngine. Steady-state job setup is single-digit minutes.
+- vLLM torch.compile caches persist under `~/.cache/vllm*`; the HF→Megatron checkpoint conversion is
+  cached under `$HF_HOME/nemo_rl/` and reused across runs and algorithms.
+
 ## 3. What the recipe sets, and the knobs that matter
 
 - `policy.model_name` / `policy.tokenizer.name` — the Apertus SFT checkpoint and the Apertus instruct tokenizer.
