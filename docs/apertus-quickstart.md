@@ -7,8 +7,8 @@ For the architecture gotchas behind the gates here, see [apertus-traps-and-invar
 ## Prerequisites
 
 - A CSCS GH200 allocation (e.g. Clariden), account `infra01`.
-- The stock image `nvcr.io/nvidia/nemo-rl:v0.7.0` — referenced by `docker/nemo_rl.toml`, no build needed.
-- The shared wheelhouse `/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/` — provides the prebuilt CUDA xIELU kernel (`aarch64/xielu-site-0.1.0-cp313-torch2.11.0-cu130`) and the `libjson-c.so.5` used for compute-node submission.
+- The stock image `nvcr.io/nvidia/nemo-rl:v0.7.0` — `docker/nemo_rl.toml` serves it from the shared pre-pulled copy in `MLLM/containers/` (no pull, no build; see the Slurm README for the registry alternative).
+- The shared wheelhouse `/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/` — provides the prebuilt CUDA xIELU kernel (`aarch64/xielu-site-current`, a symlink the launchers follow so kernel bumps need no launcher edits) and the `libjson-c.so.5` used for compute-node submission.
 - The Apertus SFT checkpoint and tokenizer referenced in the recipe (already staged under `/capstor/store/cscs/swissai/infra01/`).
 
 ## 1. Get the code
