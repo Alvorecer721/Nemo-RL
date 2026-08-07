@@ -60,6 +60,9 @@ srun \
     # personal uv earlier on PATH misses the seeded cache and rebuilds from source.
     UV=${UV:-/root/.local/bin/uv}
     export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
+    # uv progress rendering has SIGPIPEd (exit 141) against the Slurm output stream
+    # right after large first-time installs; plain log lines are enough here.
+    export UV_NO_PROGRESS=1
     export UV_PROJECT_ENVIRONMENT="$REPO_DIR/.venv"
     export NEMO_RL_VENV_DIR="$REPO_DIR/venvs"
     export RUN_DIR='"$RUN_DIR"'
