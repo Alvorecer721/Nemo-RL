@@ -42,6 +42,11 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     export PYTHONPATH=$REPO_DIR:$BRIDGE_ROOT/src${XIELU_SITE:+:$XIELU_SITE}
     # Persist the project + worker venvs on capstor: the image defaults both to
     # container-overlay paths that die with the job, forcing a rebuild every run.
+    # The image seeds a complete uv cache for the release lock at /root/.cache/uv
+    # (user-readable under CE); using it skips source builds and downloads on
+    # fresh checkouts. Additions land in the ephemeral overlay, so override
+    # UV_CACHE_DIR with a persistent path if the lock ever diverges from the image.
+    export UV_CACHE_DIR=${UV_CACHE_DIR:-/root/.cache/uv}
     export UV_PROJECT_ENVIRONMENT=$REPO_DIR/.venv
     export NEMO_RL_VENV_DIR=$REPO_DIR/venvs
     cd $REPO_DIR
