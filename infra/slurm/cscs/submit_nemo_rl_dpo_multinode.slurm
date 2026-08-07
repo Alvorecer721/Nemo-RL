@@ -29,6 +29,10 @@ echo "START TIME: $(date)"
 # the relative #SBATCH logs/ paths land in the same workdir.
 REPO_DIR=${REPO_DIR:-$PWD}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
+# The Ray-cluster assembly is algorithm-agnostic; point RUN_SCRIPT at another
+# entry point (e.g. examples/run_grpo.py, with UV_EXTRA=mcore) to reuse it.
+RUN_SCRIPT=${RUN_SCRIPT:-examples/run_dpo.py}
+UV_EXTRA=${UV_EXTRA:-}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}
@@ -55,7 +59,7 @@ fi
 EXPECTED_UNITS=$((NUM_NODES * GPUS_PER_NODE))
 echo "head: $head_node ($HEAD_IP), nodes: $NUM_NODES, expected worker_units: $EXPECTED_UNITS"
 
-export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE REPO_DIR BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES
+export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE REPO_DIR BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES RUN_SCRIPT UV_EXTRA
 # sbatch --export=<list> propagates to srun via SLURM_EXPORT_ENV and would
 # strip the exports above from the tasks; force full propagation.
 export SLURM_EXPORT_ENV=ALL
@@ -108,7 +112,7 @@ srun \
         echo "=== ray cluster complete: ${units}/$EXPECTED_UNITS units; starting driver ==="
         cd "$RUNTIME_DIR"
         # shellcheck disable=SC2086  # EXTRA_OVERRIDES is intentionally word-split
-        "$UV" run --locked examples/run_dpo.py --config "$RECIPE" cluster.num_nodes="$NUM_NODES" $EXTRA_OVERRIDES
+        "$UV" run --locked ${UV_EXTRA:+--extra $UV_EXTRA} "$RUN_SCRIPT" --config "$RECIPE" cluster.num_nodes="$NUM_NODES" $EXTRA_OVERRIDES
         ray stop
     else
         # Workers: wait for the head port, join, then live exactly as long as

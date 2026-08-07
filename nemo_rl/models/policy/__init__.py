@@ -218,6 +218,9 @@ class SequencePackingConfig(TypedDict):
     # Preserve the packer's order (or omit for backward compatibility), or
     # execute each DP rank's assigned bins largest-first for allocator reuse.
     microbatch_order: NotRequired[Literal["packer", "largest_first"]]
+    # Fused packed loss (SequencePackingFusionLossWrapper) instead of the
+    # per-sequence unpacking wrapper; read in megatron/train.py.
+    fuse_loss: NotRequired[bool]
 
 
 class RewardModelConfig(TypedDict):
