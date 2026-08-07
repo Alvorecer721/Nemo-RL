@@ -59,6 +59,9 @@ See <https://docs.cscs.ch/software/container-engine/run/>.
 - **Worker import errors like `module 'torch' has no attribute 'Tensor'` right after venv
   creation**: a crashed builder left a partial worker venv (and a stale `STARTED_ENV_BUILDER`
   marker that makes retries wait forever). `rm -rf <repo>/venvs/<worker-name>` and resubmit.
+- **A personal `uv` in your dotfiles shadows the image's** (`/root/.local/bin/uv`) and its cache
+  keys may miss the image-seeded wheel cache, causing one-time source rebuilds. Harmless but slow;
+  remove the personal uv from PATH inside jobs (or accept the one-time builds into your own cache).
 - **Never submit with `sbatch --export=ALL`**: it leaks the interactive session's environment
   (including a different `uv`) into the job and breaks dependency resolution. The launchers use
   `--export=NONE`; pass parameters the way `probe_grpo_async.slurm` does (a wrapper that exports
