@@ -25,7 +25,7 @@ export LD_LIBRARY_PATH=/capstor/store/cscs/swissai/infra01/MLLM/sbatchlibs${LD_L
 for v in "${!SLURM_SPANK_@}"; do unset "$v"; done
 
 mkdir -p "$OUTROOT"
-[[ -f "$SRC/setup.py" ]] || { echo "xielu source not found at $SRC"; exit 1; }
+[[ -f "$SRC/setup.py" ]] || { echo "xielu source not found at $SRC (git submodule update --init 3rdparty/kernels)"; exit 1; }
 
 srun --environment="$CONTAINER_ENV" --nodes=1 --ntasks=1 bash -lc '
 set -euo pipefail
