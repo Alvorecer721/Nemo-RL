@@ -22,7 +22,7 @@ set -euo pipefail
 REPO_DIR=${REPO_DIR:-$PWD}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.0-cp313-torch2.11.0-cu130}  # CUDA xielu kernel built against the v0.7.0 container; unset for eager fallback
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}  # CUDA xielu kernel built against the v0.7.0 container; unset for eager fallback
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron.yaml}
 # Call the uv shipped in the image: uv cache buckets are version-specific, so a personal uv
 # earlier on PATH misses the seeded cache and rebuilds from source. Expanded by this shell
@@ -61,6 +61,7 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'
     "$UV" run --locked --extra mcore python examples/run_grpo.py --config $RECIPE \
       grpo.max_num_steps=3 \
-      policy.generation.vllm_cfg.gpu_memory_utilization=0.40
+      policy.generation.vllm_cfg.gpu_memory_utilization=0.40 \
+      +policy.generation.vllm_cfg.env_vars.PYTHONPATH=$XIELU_SITE
   "
 echo "END TIME: $(date)"
