@@ -104,12 +104,6 @@ dependencies = [
   "mooncake-transfer-engine-cuda13==0.3.11.post1 ; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
 ]
 
-# vLLM loads general plugins in every process it spawns, including the
-# EngineCore process that builds the model — the only hook that reaches it.
-# The plugin is a no-op unless the CUDA xIELU kernel is importable.
-[project.entry-points."vllm.general_plugins"]
-nemo_rl_xielu_compile_safety = "nemo_rl.models.generation.vllm.xielu_patch:apply"
-
 [project.optional-dependencies]
 fsdp = [
   # +cu13 wheels from GitHub match torch cu130; PyPI often resolves to +cu12 (libcudart.so.12).

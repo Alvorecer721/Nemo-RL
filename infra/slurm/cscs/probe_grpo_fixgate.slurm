@@ -22,7 +22,7 @@ set -euo pipefail
 REPO_DIR=${REPO_DIR:-$PWD}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}  # CUDA xielu kernel built against the v0.7.0 container; unset for eager fallback
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}  # CUDA xielu kernel for the TRAINING side (Megatron workers); vLLM generation deliberately runs its fused-Python xIELU (measured tie, see docs/apertus-xielu.md)
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron.yaml}
 # NeMo-Gym recipes must run the dedicated runner (it binds task_to_env to the
 # gym actor); everything else uses the stock GRPO entry point.
@@ -65,7 +65,6 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'
     "$UV" run --locked --extra mcore python $RUN_SCRIPT --config $RECIPE \
       grpo.max_num_steps=$MAX_STEPS \
-      policy.generation.vllm_cfg.gpu_memory_utilization=0.40 \
-      +policy.generation.vllm_cfg.env_vars.PYTHONPATH=$XIELU_SITE
+      policy.generation.vllm_cfg.gpu_memory_utilization=0.40
   "
 echo "END TIME: $(date)"
