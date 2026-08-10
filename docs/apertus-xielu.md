@@ -81,8 +81,10 @@ than eager Python. Both facts coexist with the end-to-end tie because inside the
 compiled engine the activation is fused into neighboring kernels (≈ zero marginal
 cost) and CUDA graphs erase the launch overheads the kernel exists to avoid — while
 the kernel, as an opaque custom op, cannot participate in either. Its superiority is
-an *eager-regime* property. Regimes where it would matter again: `enforce_eager=True`
-serving (~10–15% end-to-end, estimated), HF-transformers eager inference, debugging.
+an *eager-regime* property — which is exactly why training keeps it. Other eager
+regimes (`enforce_eager=True` serving, HF-transformers inference, debugging) would
+benefit in the same direction; no end-to-end figure is claimed for them because none
+was measured and nothing we run is eager on the inference side.
 
 **The retracted "+27% generation throughput"** (168→224 tok/s): both runs behind that
 claim generated at the same true speed (0.247 vs 0.259 ms/token). The quoted numbers
