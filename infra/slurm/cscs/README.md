@@ -4,7 +4,7 @@ This directory contains the Clariden/GH200 Slurm wrappers used to build, probe, 
 
 The default container environment is `docker/nemo_rl.toml` in this checkout. The wrappers set `CUDA_CACHE_PATH` and Hugging Face cache paths in shell code because TOML values are not shell-expanded by Pyxis/EDF.
 
-The EDF points at the shared pre-pulled image in `MLLM/containers/`, so no user ever waits on an NGC pull. Measured cost of serving it from capstor instead of a per-user iopsstor imagestore (fresh nodes, same sqsh): sequential read 2.2 vs 7.7 GB/s, container mount 11.8 vs 7.6 s, cold `import torch` 2.6 vs 2.2 s — about five seconds per job start, which the zero-pull onboarding more than repays. Point `image =` back at `nvcr.io#nvidia/nemo-rl:v0.7.0` if you prefer paging from your own imagestore.
+The EDF points at the shared pre-pulled image in `MLLM/containers/`, so no user ever waits on an NGC pull. Measured cost of serving it from capstor instead of a per-user iopsstor imagestore (fresh nodes, same sqsh): sequential read 2.2 vs 7.7 GB/s, container mount 11.8 vs 7.6 s, cold `import torch` 2.6 vs 2.2 s — about five seconds per job start, which the zero-pull onboarding more than repays. A paired same-node A/B additionally measured ~1.5–2% slower steady-state generation on the capstor-served image (~0.5% of end-to-end step time) — noted for honesty, not action. Point `image =` back at `nvcr.io#nvidia/nemo-rl:v0.7.0` if you prefer paging from your own imagestore.
 
 ## Submit from a login node (humans)
 
