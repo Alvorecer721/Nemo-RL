@@ -12,14 +12,17 @@
 #SBATCH --export=NONE
 #SBATCH --no-requeue
 
-# Stall-step diagnosis: both paired A/Bs showed sporadic generation bursts at
-# ~2x per-token cost with normal token counts, normal wake/sleep edges, no
-# preemptions and no recompiles (~4-5% of end-to-end step time). Candidate
-# causes: GPU clock/power transients from the colocated train->generate duty
-# cycle vs workload-linked scheduling effects (steps 2,3,7 stalled in BOTH
-# arms; same seed => same prompts). This run collects host-side GPU telemetry
-# at 2 Hz alongside a 30-step probe so slow bursts can be correlated with
-# clock/power/thermal state on the wall clock.
+# Stall-step probe: 30 GRPO steps with host-side GPU telemetry at 2 Hz so slow
+# generation bursts can be correlated with clock/power/thermal state.
+#
+# VERDICT (job 3045982, nid006290, 2026-08-10): on a healthy node the stalls
+# do not exist — 29/29 post-warmup bursts at full SM clocks (1980 MHz), the
+# one mildly long burst was extra work at full speed (longer decode tail),
+# and warmup settled in one step. The 2x stalls seen in the paired A/Bs were
+# node-associated (every affected arm ran on nid007126; both arms equally, so
+# the A/B conclusion is unaffected). Systemic recoverable time: ~zero. Ops
+# heuristic: a node showing 2x bursts at normal token counts is a node to
+# report — rerun this probe there to confirm with telemetry.
 set -euo pipefail
 echo "START $(date) node=$(hostname)"
 REPO_DIR=${REPO_DIR:-$PWD}
