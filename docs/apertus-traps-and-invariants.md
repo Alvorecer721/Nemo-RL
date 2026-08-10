@@ -102,6 +102,6 @@ submitted this way ran *with* the kernel and reported plausible numbers; only an
 attestation (`grep -c 'Using experimental xIELU CUDA'`) exposed it.
 
 - **Rule**: to force an empty/absent path, point the variable at an existing empty
-  directory (see `logs/imgbench/xielu_ab.slurm`), and have every experiment arm print
+  directory (see `infra/slurm/cscs/bench/xielu_ab.slurm`), and have every experiment arm print
   its own configuration attestation into its log. Intended configuration proves nothing;
   logs attest actual configuration.
