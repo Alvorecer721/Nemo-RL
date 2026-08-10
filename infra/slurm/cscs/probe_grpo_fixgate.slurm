@@ -63,8 +63,13 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     cd $REPO_DIR
     # Apertus runtime guard: fail loud if nemo_rl is the stock /opt copy rather than this checkout (online GRPO otherwise silently regresses to gen-KL ~0.79).
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'
+    # vLLM workers inherit the driver env, and the driver PYTHONPATH carries
+    # XIELU_SITE for the Megatron workers — blank it for generation explicitly,
+    # or the kernel leaks back into vLLM (its stock forward then crashes fresh
+    # compiles; the tie measurement is in docs/apertus-xielu.md).
     "$UV" run --locked --extra mcore python $RUN_SCRIPT --config $RECIPE \
       grpo.max_num_steps=$MAX_STEPS \
-      policy.generation.vllm_cfg.gpu_memory_utilization=0.40
+      policy.generation.vllm_cfg.gpu_memory_utilization=0.40 \
+      +policy.generation.vllm_cfg.env_vars.PYTHONPATH=
   "
 echo "END TIME: $(date)"
