@@ -19,6 +19,8 @@ set -euo pipefail
 REPO_DIR=${REPO_DIR:-$PWD}
 VARIANT=${VARIANT:?set VARIANT=iops|capstor}
 EDF=$REPO_DIR/logs/imgbench/nemo_rl_$VARIANT.toml
+# The variant EDFs are generated, not tracked: copy docker/nemo_rl.toml and swap the
+# image line (see docs/apertus-xielu.md measurements section for the original A/B).
 IMG=$(sed -n 's/^image = "\(.*\)"/\1/p' "$EDF")
 echo "variant=$VARIANT node=$(hostname) img=$IMG"
 

@@ -28,7 +28,7 @@ mkdir -p "$EMPTY_SITE"
 run_arm () {
   local arm=$1 site=$2
   local log=$REPO_DIR/logs/imgbench/arm_${arm}_${SLURM_JOB_ID}.log
-  rm -rf /users/xyixuan/.cache/vllm*/torch_compile_cache
+  rm -rf $HOME/.cache/vllm*/torch_compile_cache
   echo "=== ARM $arm (XIELU_SITE=$site) $(date) ==="
   ( export REPO_DIR XIELU_SITE=$site MAX_STEPS=15
     source "$REPO_DIR/infra/slurm/cscs/probe_grpo_fixgate.slurm" ) > "$log" 2>&1
@@ -40,5 +40,5 @@ run_arm () {
 
 run_arm python "$EMPTY_SITE"
 run_arm kernel /capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current
-rm -rf /users/xyixuan/.cache/vllm*/torch_compile_cache
+rm -rf $HOME/.cache/vllm*/torch_compile_cache
 echo "END $(date)"
