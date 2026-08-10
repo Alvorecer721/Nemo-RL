@@ -33,7 +33,7 @@ nvidia-smi --query-gpu=timestamp,index,clocks.sm,clocks.mem,power.draw,temperatu
 SMI_PID=$!
 trap 'kill $SMI_PID 2>/dev/null || true' EXIT
 
-rm -rf /users/xyixuan/.cache/vllm*/torch_compile_cache
+rm -rf $HOME/.cache/vllm*/torch_compile_cache
 ( export REPO_DIR MAX_STEPS=30
   source "$REPO_DIR/infra/slurm/cscs/probe_grpo_fixgate.slurm" ) \
   > "$REPO_DIR/logs/imgbench/stall_arm_${SLURM_JOB_ID}.log" 2>&1
