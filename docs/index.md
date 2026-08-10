@@ -299,6 +299,7 @@ guides/sft-openmathinstruct2.md
 adding-new-models.md
 apertus-quickstart.md
 apertus-traps-and-invariants.md
+apertus-xielu.md
 guides/sft.md
 guides/dpo.md
 guides/dapo.md
