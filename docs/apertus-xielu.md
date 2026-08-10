@@ -45,8 +45,11 @@ One `.cu` kernel, two entry points, opposite verdicts:
 | Delivery | `XIELU_SITE` on the driver/worker `PYTHONPATH` (all launchers) | — |
 
 The launcher variable `XIELU_SITE` therefore **feeds training only**. Removing the
-generation injection meant deleting one `env_vars` line — not the variable, not the
-wheelhouse, not the fork.
+generation injection took two moves, not one: deleting the injecting `env_vars` line
+AND explicitly blanking the vLLM workers' `PYTHONPATH` — they inherit the driver
+environment, so the training-side site otherwise leaks back in (and did, reproducing
+the original compile crash the moment the safety plugin was gone). The variable, the
+wheelhouse, and the fork all stay.
 
 ## The measurements
 
