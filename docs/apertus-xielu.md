@@ -38,7 +38,7 @@ One `.cu` kernel, two entry points, opposite verdicts:
 
 | | Training (Megatron) | Generation (vLLM) |
 |---|---|---|
-| Import path | `from xielu import xielu` (autograd op) in the bridge's `xielu_activation.py` | none (removed) |
+| Import path | `from xielu import xielu` (autograd op) in the bridge's `xielu_activation.py` | none — workers' inherited `PYTHONPATH` is explicitly blanked (they inherit the driver env, which carries `XIELU_SITE` for training) |
 | Execution regime | **eager** — no compiler in the loop | `torch.compile` + CUDA graphs |
 | Kernel's value there | real: one fused fwd kernel vs ~8 eager launches, hand-written bwd | none: inductor fuses the Python version to the same cost |
 | Fallback if kernel absent | `@jit_fuser` compiled-Python (same math) | vLLM's built-in Python xIELU (same math) |
