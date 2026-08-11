@@ -61,6 +61,10 @@ every later training job starts hot.
 - **Two cold-cache jobs deadlock on a source build** (`Failed to acquire lock on the distribution
   cache`, 300 s timeout): run the first launch alone (or use `prepare_env.slurm` above); every
   later job reuses the built wheels.
+- **After editing `pyproject.toml` or `uv.lock`, settle the shared `.venv` before parallel
+  submissions**: the next `uv run` re-syncs it, and simultaneous jobs racing that re-sync can
+  degrade into source rebuilds and uv lock timeouts (two probes died this way). One solo job —
+  or `prepare_env.slurm` — settles it; steady-state parallel submissions are unaffected.
 - **`Pretrained run config not found ... iter_0000000/run_config.yaml` on rank>0**: a stale,
   half-written conversion cache. Delete the `$HF_HOME/nemo_rl/model__*` directory for that
   checkpoint and rerun — rank 0 reconverts cleanly.
