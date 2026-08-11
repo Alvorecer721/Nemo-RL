@@ -26,6 +26,7 @@
 set -euo pipefail
 echo "START $(date) node=$(hostname)"
 REPO_DIR=${REPO_DIR:-$PWD}
+source "$REPO_DIR/infra/slurm/cscs/bench/arm_lib.sh"
 TEL=$REPO_DIR/logs/imgbench/telemetry_${SLURM_JOB_ID}.csv
 
 nvidia-smi --query-gpu=timestamp,index,clocks.sm,clocks.mem,power.draw,temperature.gpu,utilization.gpu,utilization.memory \
@@ -33,14 +34,8 @@ nvidia-smi --query-gpu=timestamp,index,clocks.sm,clocks.mem,power.draw,temperatu
 SMI_PID=$!
 trap 'kill $SMI_PID 2>/dev/null || true' EXIT
 
-rm -rf $HOME/.cache/vllm*/torch_compile_cache
-( export REPO_DIR MAX_STEPS=30
-  source "$REPO_DIR/infra/slurm/cscs/probe_grpo_fixgate.slurm" ) \
-  > "$REPO_DIR/logs/imgbench/stall_arm_${SLURM_JOB_ID}.log" 2>&1
+run_arm stall "" MAX_STEPS=30
 
 kill $SMI_PID 2>/dev/null || true
 echo "telemetry: $TEL ($(wc -l < "$TEL") samples)"
-echo "--- per-step generation seconds:"
-grep -oE 'generation: [0-9.]+s' "$REPO_DIR/logs/imgbench/stall_arm_${SLURM_JOB_ID}.log" | sed 's/generation: //' | tr '\n' ' '; echo
-echo "--- kernel-detected: $(grep -ic 'using experimental xielu cuda' "$REPO_DIR/logs/imgbench/stall_arm_${SLURM_JOB_ID}.log" || true)"
 echo "END $(date)"

@@ -47,6 +47,12 @@ policy:
   generation:
     max_new_tokens: 512
     vllm_cfg:
+      # Generation is kernel-free by config contract: vLLM workers inherit the
+      # driver env, whose PYTHONPATH carries the training-side xIELU kernel
+      # (XIELU_SITE) — blank it here so the invariant travels with every recipe
+      # in this family on every launcher (measured tie; docs/apertus-xielu.md).
+      env_vars:
+        PYTHONPATH: ""
       tensor_parallel_size: 1
       gpu_memory_utilization: 0.55
       max_model_len: 2048
