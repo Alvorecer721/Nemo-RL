@@ -27,6 +27,13 @@ dir_path = os.path.dirname(os.path.abspath(__file__))
 git_root = os.path.abspath(os.path.join(dir_path, "../.."))
 DEFAULT_VENV_DIR = os.path.join(git_root, "venvs")
 
+# Written into a venv only after `uv sync` + the exec command succeed. bin/python
+# alone is a false readiness signal on shared filesystems: `uv venv` creates it
+# long before packages land, so a crashed build leaves a venv that looks usable.
+# `uv sync` is convergent (it repairs a partial venv), so an unmarked venv is
+# simply rebuilt in place — no deletion needed.
+VENV_READY_MARKER = "NEMO_RL_VENV_READY"
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,6 +83,10 @@ def create_local_venv(
 
     logger.info(f"Creating new venv at {venv_path}")
 
+    # Any build attempt invalidates readiness until it completes.
+    ready_marker = Path(venv_path) / VENV_READY_MARKER
+    ready_marker.unlink(missing_ok=True)
+
     # Create the virtual environment
     uv_venv_cmd = ["uv", "venv", "--allow-existing", venv_path]
     subprocess.run(uv_venv_cmd, check=True)
@@ -97,6 +108,8 @@ def create_local_venv(
     subprocess.run(["uv", "sync", "--directory", git_root], env=env, check=True)
     subprocess.run(exec_cmd, env=env, check=True)
 
+    ready_marker.touch()
+
     # Return the path to the python executable in the virtual environment
     python_path = os.path.join(venv_path, "bin", "python")
     return python_path
@@ -113,39 +126,93 @@ def _env_builder(
     )
     venv_path = Path(NEMO_RL_VENV_DIR) / venv_name
     python_path = venv_path / "bin" / "python"
+    ready_marker = venv_path / VENV_READY_MARKER
     started_file = venv_path / "STARTED_ENV_BUILDER"
+    build_timeout = float(os.environ.get("NRL_VENV_BUILD_TIMEOUT_SECS", "3600"))
 
     # Skip early return if force_rebuild is True
-    if not force_rebuild and python_path.exists():
+    if not force_rebuild and python_path.exists() and ready_marker.exists():
         logger.info(f"Using existing venv at {venv_path}")
         return str(python_path)
 
     # Sleep to stagger node startup
     time.sleep(1 * node_idx)
 
-    if started_file.exists():
-        # Another node is already building, wait for completion
-        logger.info(
-            f"Node {node_idx}: Another node is building {venv_name}, skipping..."
-        )
-        # Wait for the venv to be ready (check for python executable)
-        python_path = venv_path / "bin" / "python"
-        while not python_path.exists():
-            time.sleep(1)
-        return str(python_path)
+    # A claim older than the build timeout is from a killed build (walltime,
+    # OOM): its finally-cleanup never ran. Expire it so this run can rebuild
+    # instead of waiting forever. Expiry is rename-based so exactly one of two
+    # concurrent expirers wins — stat-then-unlink could delete the claim a
+    # faster process just re-created.
+    try:
+        if (
+            started_file.exists()
+            and time.time() - started_file.stat().st_mtime > build_timeout
+        ):
+            logger.warning(
+                f"Node {node_idx}: expiring stale build claim on {venv_name} "
+                f"(older than {build_timeout}s; a previous build was killed)"
+            )
+            expired = started_file.with_name(started_file.name + ".expired")
+            os.rename(started_file, expired)
+            expired.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
 
     # Create the venv directory if needed
     venv_path.mkdir(parents=True, exist_ok=True)
 
-    # Touch the started file to signal we're building
-    started_file.touch()
+    # Atomically claim the build (O_EXCL): exactly one process builds, even
+    # across concurrently-launched jobs sharing NEMO_RL_VENV_DIR.
     try:
-        # Create the virtual environment on this node
-        return create_local_venv(py_executable, venv_name, force_rebuild=force_rebuild)
+        os.close(os.open(started_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        # Another process is building; wait for the readiness marker.
+        logger.info(
+            f"Node {node_idx}: Another node is building {venv_name}, skipping..."
+        )
+        deadline = time.monotonic() + build_timeout
+        while time.monotonic() < deadline:
+            if ready_marker.exists() and python_path.exists():
+                return str(python_path)
+            if not started_file.exists():
+                # The builder touches the marker and then unlinks the claim;
+                # observing the unlink first is a benign race, so give the
+                # marker one more poll before declaring the build dead.
+                time.sleep(1)
+                if ready_marker.exists() and python_path.exists():
+                    return str(python_path)
+                raise RuntimeError(
+                    f"The builder of venv {venv_path} exited without completing "
+                    f"(no {VENV_READY_MARKER}); see its logs for the build error."
+                )
+            time.sleep(1)
+        raise TimeoutError(
+            f"Timed out after {build_timeout}s waiting for venv {venv_path} to "
+            f"become ready. If the building job was killed, remove the stale "
+            f"claim with: rm -rf {venv_path}  (or raise NRL_VENV_BUILD_TIMEOUT_SECS)."
+        )
+
+    try:
+        if force_rebuild and venv_path.exists():
+            # Rebuild from scratch while holding the claim: drop readiness
+            # first (iterdir order is arbitrary and a reader must never see a
+            # marked venv mid-wipe), then clear everything except the claim
+            # file so waiters keep their signal.
+            logger.info(f"Force rebuilding venv at {venv_path}")
+            ready_marker.unlink(missing_ok=True)
+            for child in venv_path.iterdir():
+                if child == started_file:
+                    continue
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        # Create the virtual environment on this node (already cleared above,
+        # so never forward force_rebuild — its rmtree would drop the claim).
+        return create_local_venv(py_executable, venv_name)
     finally:
         # Clean up the started file
-        if started_file.exists():
-            started_file.unlink()
+        started_file.unlink(missing_ok=True)
 
 
 def create_local_venv_on_each_node(py_executable: str, venv_name: str):
@@ -158,8 +225,13 @@ def create_local_venv_on_each_node(py_executable: str, venv_name: str):
     Returns:
         str: Path to the python executable in the created virtual environment
     """
-    # Determine the number of alive Ray nodes
-    nodes = [n for n in ray.nodes() if n.get("Alive", False)]
+    # Skip nodes with 0 CPUs (e.g. unschedulable head nodes) — including them
+    # makes the STRICT_SPREAD placement group infeasible.
+    nodes = [
+        n
+        for n in ray.nodes()
+        if n.get("Alive", False) and n.get("Resources", {}).get("CPU", 0) > 0
+    ]
     num_nodes = len(nodes)
     # Reserve one CPU on each node using a STRICT_SPREAD placement group
     bundles = [{"CPU": 1} for _ in range(num_nodes)]
@@ -186,3 +258,35 @@ def create_local_venv_on_each_node(py_executable: str, venv_name: str):
     ray.util.remove_placement_group(pg)
     # Return mapping from node IP to venv python path
     return paths[0]
+
+
+def make_actor_runtime_env(actor_class_fqn: str) -> dict:
+    """Build a Ray ``runtime_env`` for one of our registered actors.
+
+    Resolves the actor's tier-specific py_executable via the registry,
+    materializes a per-node venv when uv-managed, and packages it with
+    ``VIRTUAL_ENV`` / ``UV_PROJECT_ENVIRONMENT`` env vars so workers see
+    the same interpreter as the driver.
+
+    Used by ReplayBuffer, AsyncTrajectoryCollector, and SyncRolloutActor
+    — three actors that need the VLLM tier's venv on every node. Also
+    used by the SGLang router and SGLang generation engines (SGLANG tier).
+    """
+    # Local import — venvs.py is dep-light; the registry imports
+    # PY_EXECUTABLES which transitively pulls heavier deps.
+    from nemo_rl.distributed.ray_actor_environment_registry import (
+        get_actor_python_env,
+    )
+
+    py_exec = get_actor_python_env(actor_class_fqn)
+    if py_exec.startswith("uv"):
+        py_exec = create_local_venv_on_each_node(py_exec, actor_class_fqn)
+    venv = os.path.dirname(os.path.dirname(py_exec))  # strip bin/python
+    return {
+        "py_executable": py_exec,
+        "env_vars": {
+            **os.environ,
+            "VIRTUAL_ENV": venv,
+            "UV_PROJECT_ENVIRONMENT": venv,
+        },
+    }

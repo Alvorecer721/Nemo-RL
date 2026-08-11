@@ -24,8 +24,12 @@ from pydantic import TypeAdapter, ValidationError
 from nemo_rl.algorithms.distillation import MasterConfig as DistillationMasterConfig
 from nemo_rl.algorithms.dpo import MasterConfig as DPOMasterConfig
 from nemo_rl.algorithms.grpo import MasterConfig as GRPOMasterConfig
+from nemo_rl.algorithms.ppo import MasterConfig as PPOMasterConfig
 from nemo_rl.algorithms.rm import MasterConfig as RMMasterConfig
 from nemo_rl.algorithms.sft import MasterConfig as SFTMasterConfig
+from nemo_rl.algorithms.xtoken_off_policy_distillation import (
+    MasterConfig as XTokenOffPolicyDistillationMasterConfig,
+)
 from nemo_rl.evals.eval import MasterConfig as EvalMasterConfig
 from nemo_rl.utils.config import (
     load_config_with_inheritance,
@@ -112,6 +116,19 @@ def test_all_config_files_have_required_keys(config_file):
     if "/evals/" in config_file:
         master_config_class = EvalMasterConfig
         config_type = "eval"
+    elif "teachers" in config_dict or (
+        "loss_fn" in config_dict and "projection_matrix_path" in config_dict["loss_fn"]
+    ):
+        # Cross-tokenizer off-policy distillation also has a top-level
+        # ``distillation`` block, so it must be matched before the generic
+        # ``distillation`` branch below. The multi-teacher cross-tokenizer config
+        # is identified by its top-level ``teachers`` list (online distillation
+        # uses a singular ``teacher``); the per-(student, teacher) projection path
+        # now lives on each ``teachers[i].projection_matrix_path`` rather than
+        # ``loss_fn``. The legacy ``loss_fn.projection_matrix_path`` check is kept
+        # as a fallback for any single-teacher config that still carries it.
+        master_config_class = XTokenOffPolicyDistillationMasterConfig
+        config_type = "xtoken_off_policy_distillation"
     elif "distillation" in config_dict:
         master_config_class = DistillationMasterConfig
         config_type = "distillation"
@@ -124,6 +141,9 @@ def test_all_config_files_have_required_keys(config_file):
     elif "grpo" in config_dict:
         master_config_class = GRPOMasterConfig
         config_type = "grpo"
+    elif "ppo" in config_dict:
+        master_config_class = PPOMasterConfig
+        config_type = "ppo"
     elif "rm" in config_dict:
         master_config_class = RMMasterConfig
         config_type = "rm"
@@ -187,3 +207,30 @@ def test_all_config_no_tp_size_accuracy_issues(config_file):
             f"Config file {config_file} has TP size >= 4 accuracy issues. "
             "Please set policy.train_micro_batch_size and policy.logprob_batch_size to be the same value."
         )
+
+
+@pytest.mark.parametrize("config_file", config_files)
+def test_metric_denylist_patterns_are_valid_globs(config_file):
+    """Every logger.metric_denylist entry is a clean fnmatch glob, not a typo that silently no-ops."""
+    config = load_config_with_inheritance(config_file)
+    config_dict = OmegaConf.to_container(config, resolve=True)
+    if not isinstance(config_dict, dict):
+        return
+    denylist = (config_dict.get("logger") or {}).get("metric_denylist")
+    if not denylist:
+        return
+    seen: set[str] = set()
+    for pat in denylist:
+        assert isinstance(pat, str) and pat, (
+            f"{config_file}: empty/non-string metric_denylist entry {pat!r}"
+        )
+        assert pat == pat.strip(), (
+            f"{config_file}: metric_denylist entry has surrounding whitespace: {pat!r}"
+        )
+        assert not any(c in pat for c in "()"), (
+            f"{config_file}: metric_denylist entry looks like a regex, not an fnmatch glob: {pat!r}"
+        )
+        assert pat not in seen, (
+            f"{config_file}: duplicate metric_denylist entry: {pat!r}"
+        )
+        seen.add(pat)

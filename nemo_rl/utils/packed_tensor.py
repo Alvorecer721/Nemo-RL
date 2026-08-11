@@ -74,8 +74,18 @@ def packed_broadcast_producer(iterator, group, src, post_iter_func):
                 packing_tensor_sizes[buffer_idx] = 0
                 # Pack the tensors
                 while True:
-                    # Apply backend specific post processing and then convert to linearized uint8 tensor
-                    tensor = post_iter_func(next(iterator)).view(torch.uint8).view(-1)
+                    # Apply backend specific post processing and then convert to linearized uint8 tensor.
+                    # contiguous() is required because the upstream iterator may
+                    # yield non-contiguous tensors that view(...) cannot handle;
+                    # reshape(-1) comes first because a 0-dim tensor (scalar
+                    # buffer, e.g. Apertus xIELU beta/eps) cannot be viewed as
+                    # a different dtype directly.
+                    tensor = (
+                        post_iter_func(next(iterator))
+                        .contiguous()
+                        .reshape(-1)
+                        .view(torch.uint8)
+                    )
                     packing_tensor_list[buffer_idx].append(tensor)
                     packing_tensor_sizes[buffer_idx] += tensor.view(torch.uint8).numel()
                     if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
@@ -130,7 +140,7 @@ def packed_broadcast_consumer(iterator, group, src, post_unpack_func):
         unpacked_list = [
             (
                 meta_data_list[i][0],
-                tensor.view(meta_data_list[i][2]).view(*meta_data_list[i][1]),
+                tensor.view(meta_data_list[i][2]).view(meta_data_list[i][1]),
             )
             for i, tensor in enumerate(unpacked_tensor)
         ]

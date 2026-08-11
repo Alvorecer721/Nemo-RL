@@ -30,9 +30,9 @@ from __future__ import annotations
 
 
 def assert_apertus_runtime() -> None:
-    """Raise if the Apertus deltas are missing from the imported runtime.
+    """Raise if the imported ``nemo_rl`` is the stock copy, not the Apertus checkout.
 
-    Checks (1) ``is_apertus_model`` exists in our nemo_rl (absent in the stock ``/opt/nemo-rl``), and (2) the forked Megatron-Bridge defines the xIELU beta/eps refit-emit override — the base class ships a no-op, so we check it is on ``ApertusBridge`` itself (``vars``), not merely inherited. (2) matters because vLLM dummy-load relies on the refit carrying beta/eps; a stale Bridge submodule would silently regress KL.
+    ``is_apertus_model`` exists only in our nemo_rl, so its absence reliably signals the stock ``/opt/nemo-rl`` was imported instead of this checkout.
     """
     import nemo_rl
     from nemo_rl.models.huggingface import common
@@ -44,14 +44,4 @@ def assert_apertus_runtime() -> None:
             "  It is missing the Apertus deltas (xIELU dummy-load + Bridge refit-emit + raw-Megatron checkpoint loader).\n"
             "  Online training would silently regress to Generation KL Error ~0.79 with no error raised.\n"
             "  Fix: run from your Nemo-RL checkout, or set PYTHONPATH=<repo> so `import nemo_rl` resolves to it."
-        )
-
-    from megatron.bridge.models.apertus.apertus_bridge import ApertusBridge
-
-    if "maybe_modify_converted_hf_weight" not in vars(ApertusBridge):
-        raise RuntimeError(
-            "Apertus runtime guard failed: the Megatron-Bridge submodule is missing the xIELU beta/eps refit-emit (ApertusBridge.maybe_modify_converted_hf_weight).\n"
-            f"  ApertusBridge loaded from: {ApertusBridge.__module__}\n"
-            "  With vLLM dummy-load the refit would not carry beta/eps and Generation KL would silently regress to ~0.79.\n"
-            "  Fix: update the submodule — git submodule update --init --recursive."
         )

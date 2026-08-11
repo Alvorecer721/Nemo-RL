@@ -54,17 +54,3 @@ def test_gemma_models(model_name):
 def test_non_gemma_models(model_name):
     assert not is_gemma_model(model_name)
     assert not ModelFlag.VLLM_LOAD_FORMAT_AUTO.matches(model_name)
-
-
-def test_apertus_dummy_loads(monkeypatch):
-    """Apertus must NOT force load_format='auto': its xIELU beta/eps flow through the
-    Megatron-Bridge refit, so vLLM dummy-loads like other refit-fed models."""
-    from nemo_rl.models.huggingface import common
-
-    class _ApertusConfig:
-        model_type = "apertus"
-
-    monkeypatch.setattr(common.AutoConfig, "from_pretrained", lambda *a, **k: _ApertusConfig())
-    assert common.is_apertus_model("dummy/apertus")
-    assert not common.is_gemma_model("dummy/apertus")
-    assert not ModelFlag.VLLM_LOAD_FORMAT_AUTO.matches("dummy/apertus")

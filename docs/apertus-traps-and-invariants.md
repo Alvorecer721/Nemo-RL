@@ -12,7 +12,7 @@ NeMo-RL forces `load_format="dummy"` for training-mode vLLM engines (`nemo_rl/mo
 Refit streams **trainable parameters only** (`bridge.export_hf_weights`).
 Any architecture whose checkpoint carries forward-load-bearing **buffers** is silently corrupted: for Apertus, the 64 xIELU `act_fn.{beta,eps}` buffers (32 layers × 2) stayed at noise → Generation KL Error 0.7935 ≈ a genuinely off-policy generator.
 
-- **Fix (shipped)**: `is_apertus_model()` added to `ModelFlag.VLLM_LOAD_FORMAT_AUTO` (the Gemma precedent) — every Apertus engine disk-loads at init, unconditionally (keys on `model_type == "apertus"`). Verified: 0/516 tensors change across a step-0 refit; gen KL 0.7935 → **0.0003**.
+- **Fix (shipped)**: the bridge emits the xIELU `beta`/`eps` buffers into the HF refit stream (`apertus_bridge.maybe_modify_converted_hf_weight`, in the pinned Apertus bridge fork), so vLLM may dummy-load and the step-0 refit still delivers correct constants. Verified originally via disk-load parity: gen KL 0.7935 → **0.0003**.
 - **Posture**: prefer `load_format=auto` for any new architecture until its buffer inventory is audited (`state_dict` keys vs `named_parameters`).
 - **Upstream asks**: (a) NeMo-RL: auto-refuse dummy when the checkpoint carries buffers absent from the refit stream; (b) vLLM: `XIELU`'s Python path should read the init-captured scalars like its CUDA path does — makes the class unconstructible.
 - **Masking hazard**: the vLLM CUDA xielu path hides this bug (scalars captured at `__init__`). An environment with the kernel installed shows nothing; one without it shows 0.79. Never debug this class by comparing environments with different kernel availability.
@@ -61,18 +61,44 @@ Short resume tests: keep the config byte-identical and kill externally.
 #    → expect 0 tensors changed
 # 2. GRPO probe (probe-grpo-apertus1p5-8b-1n4g-megatron.yaml, vllm util 0.40)
 #    → expect Generation KL Error < 0.002
-# 3. online-DPO smoke (smoke-online-dpo-apertus1p5-8b-1n4g-megatron.yaml)
+# 3. online-DPO smoke (infra/slurm/cscs/probe_nemo_rl_dpo_megatron_apertus.slurm)
 #    → expect step-1 preference_loss ≈ 0.6931
 ```
 
-Probe harnesses live in `nemo-rl-worktrees/v060-online-dpo/debug/` (self-diff analyzer, Megatron-vs-HF forward parity, vLLM disk parity).
+Historical (v0.6.0-era) probe harnesses live in `nemo-rl-worktrees/v060-online-dpo/debug/` (self-diff analyzer, Megatron-vs-HF forward parity, vLLM disk parity).
 
-## 8. xIELU CUDA op has no Autograd-key registration  ⚠ benign today, deprecated
+## 8. vLLM compile-cache is blind to kernel presence  ⚠ dormant since the generation-side kernel removal
 
-The fused xIELU kernel (`3rdparty/kernels`) registers `torch.ops.xielu.xielu` on the CUDA and Meta dispatch keys but **not** the Autograd key. So every training backward through the activation prints:
+vLLM caches compiled graphs under a key blind to which xIELU implementation was
+importable at trace time; both poisoning directions occurred (full mechanics and the
+"+27%" autopsy: `docs/apertus-xielu.md`).
 
-> `xielu::xielu: an autograd kernel was not registered to the Autograd key(s) but we are trying to backprop through it. This may lead to silently incorrect behavior.`
+- **Rule**: purge `~/.cache/vllm*/torch_compile_cache` at every kernel-presence boundary.
+  Dormant while generation stays kernel-free (homogeneous caches); re-arms instantly if
+  anyone re-injects `XIELU_SITE` into vLLM workers.
+- **Upstream ask (queued with the vLLM compile-safety PR)**: include the resolved
+  activation implementation in the cache key.
 
-- **Verified benign (torch 2.10, 2026-06-15):** a gradient check diffing the kernel's `grad_x`/`grad_alpha_p`/`grad_alpha_n` against the eager reference (`xielu_activation.py:compiled_xielu`, correct by construction) shows they match within bf16 rounding (~2e-3, sometimes closer to fp32 truth than eager-bf16). Gradients **do** flow: the kernel's `xielu()` wrapper calls `XIELUAutograd::apply`, which still records under PyTorch's autograd-not-implemented fallback because the fallback excludes the Autograd dispatch key but leaves `GradMode` on.
-- **Why it's a trap:** the backward is correct only **by coincidence of the current fallback**. The warning says the behavior is "deprecated and will be removed" — a future torch could switch the fallback to silently *drop* the gradient, corrupting training with no error. The `Generation KL Error` gate (forward-only) would not catch it.
-- **Fix (shipped):** `binding.cpp` adds `TORCH_LIBRARY_IMPL(xielu, Autograd, m) { m.impl("xielu", &xielu); }` so the op routes through `XIELUAutograd` explicitly. Verified on GH200 (2026-06-15): the patched kernel compiles, the op-level gradient check passes (warning gone, grads unchanged), and a full GRPO probe trained cleanly with **zero** autograd warnings (vs 2 on the old kernel) and KL 0.0003. Staged to the shared wheelhouse as `xielu-site-0.1.1-cp313` (the pre-fix `xielu-site-0.1.0-cp313` is retained for rollback), and the launchers' `XIELU_SITE` default is now `0.1.1`. For a new torch/python ABI, rebuild from `3rdparty/kernels/xielu` (`setup.py`) and re-stage a new wheel.
+## 9. vLLM throughput snapshots measure duty cycle, not speed  ⚠ permanent metric trap
+
+`Avg generation throughput: N tokens/s` lines average over wall-clock windows that
+span sleep/training time, so they encode duty cycle and print alignment, not burst
+speed; cross-run comparison of them produced the false "+27%" (full autopsy:
+`docs/apertus-xielu.md`).
+
+- **Rule**: never compare snapshot tok/s across runs. Throughput claims come from the
+  per-step `generation:` phase timer normalized by `Mean Generation Length`
+  (ms/token), stall-steps stated separately; A/Bs must be same-node paired runs.
+
+## 10. Slurm drops empty-valued variables from --export  ⚠ permanent launcher trap
+
+`sbatch --export=NONE,VAR=` does **not** deliver `VAR` set-to-empty — the variable
+arrives unset, so `${VAR:-default}` applies the default. An "arm without the kernel"
+submitted this way ran *with* the kernel and reported plausible numbers; only an in-log
+attestation (`grep -c 'Using experimental xIELU CUDA'`) exposed it.
+
+- **Rule**: to force an empty/absent path through sbatch, point the variable at an
+  existing empty directory rather than passing an empty value — and have every
+  experiment arm print its own configuration attestation into its log (the shared
+  runner in `infra/slurm/cscs/bench/arm_lib.sh` does both legs). Intended
+  configuration proves nothing; logs attest actual configuration.

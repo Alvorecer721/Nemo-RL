@@ -58,27 +58,28 @@ def main():
         print(f"Overrides: {overrides}")
         config = parse_hydra_overrides(config, overrides)
 
-    config: MasterConfig = OmegaConf.to_container(config, resolve=True)
+    config = OmegaConf.to_container(config, resolve=True)
+    config = MasterConfig(**config)
     print("Applied CLI overrides")
 
     # Print config
     print("Final config:")
     pprint.pprint(config)
 
-    config["logger"]["log_dir"] = get_next_experiment_dir(config["logger"]["log_dir"])
-    print(f"📊 Using log directory: {config['logger']['log_dir']}")
-    if config["checkpointing"]["enabled"]:
+    config.logger["log_dir"] = get_next_experiment_dir(config.logger["log_dir"])
+    print(f"📊 Using log directory: {config.logger['log_dir']}")
+    if config.checkpointing["enabled"]:
         print(
-            f"📊 Using checkpoint directory: {config['checkpointing']['checkpoint_dir']}"
+            f"📊 Using checkpoint directory: {config.checkpointing['checkpoint_dir']}"
         )
 
     init_ray()
 
     # setup tokenizer
-    tokenizer = get_tokenizer(config["policy"]["tokenizer"])
+    tokenizer = get_tokenizer(config.policy["tokenizer"])
 
     # setup data
-    dataset, val_dataset = setup_preference_data(tokenizer, config["data"])
+    dataset, val_dataset = setup_preference_data(tokenizer, config.data)
 
     (
         policy,
@@ -94,7 +95,7 @@ def main():
 
     # MPO: swap the stock DPO loss for MPOLossFn (DPO preference + BCO quality
     # + SFT generation; InternVL MPO, arXiv:2411.10442). Everything else in
-    # this file is byte-identical to examples/run_dpo.py.
+    # this file is byte-identical to examples/run_dpo.py plus the runtime guard.
     #
     # delta (the BCO running reward anchor) resume threading. The stock
     # dpo_save_state cannot carry it without stock edits: it is driver-side
@@ -117,19 +118,20 @@ def main():
     #   non-latest checkpoint leaves the sidecar delta slightly ahead of that
     #   checkpoint (later batches already folded); delta is a slow-moving
     #   anchor, so the skew is bounded — set the config keys to override.
-    from nemo_rl_apertus.mpo_loss import MPOLossFn, delta_sidecar_path
+    from nemo_rl_apertus.mpo_loss import MPOConfig, MPOLossFn, delta_sidecar_path
 
-    if master_config["checkpointing"]["enabled"]:
-        sidecar = delta_sidecar_path(master_config["checkpointing"]["checkpoint_dir"])
+    mpo_cfg = MPOConfig.model_validate(master_config.dpo.model_dump())
+    if master_config.checkpointing["enabled"]:
+        sidecar = delta_sidecar_path(master_config.checkpointing["checkpoint_dir"])
         if checkpointer.get_latest_checkpoint_path() is None and os.path.exists(
             sidecar
         ):
             os.remove(sidecar)
-        master_config["dpo"]["quality_delta_state_path"] = sidecar
+        mpo_cfg.quality_delta_state_path = sidecar
     loss_fn = MPOLossFn(
-        master_config["dpo"],
-        use_linear_ce_fusion=master_config["policy"]["megatron_cfg"]["enabled"]
-        and master_config["policy"]["megatron_cfg"]["use_linear_ce_fusion_loss"],
+        mpo_cfg,
+        use_linear_ce_fusion=master_config.policy["megatron_cfg"]["enabled"]
+        and master_config.policy["megatron_cfg"]["use_linear_ce_fusion_loss"],
     )
 
     dpo_train(

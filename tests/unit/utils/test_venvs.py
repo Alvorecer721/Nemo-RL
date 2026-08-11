@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, the Apertus project.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,40 +11,171 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Venv provisioning contract: readiness is the marker, claims are exclusive and expire.
+
+bin/python existing is NOT readiness (uv creates it before packages land); a
+venv is usable only once NEMO_RL_VENV_READY exists, written after `uv sync`
+succeeds. Exactly one process builds (O_EXCL claim on STARTED_ENV_BUILDER);
+waiters block on the marker with a timeout, and a claim older than the timeout
+is expired as the residue of a killed build.
+"""
+
 import os
-import subprocess
-from tempfile import TemporaryDirectory
+import threading
+import time
+from pathlib import Path
 from unittest.mock import patch
 
-from nemo_rl.utils.venvs import create_local_venv
-from tests.unit.conftest import TEST_ASSETS_DIR
+import pytest
+
+import nemo_rl.utils.venvs as venvs_module
+from nemo_rl.utils.venvs import VENV_READY_MARKER, create_local_venv
+
+# The protocol under test lives in the task body, not in Ray scheduling.
+_env_builder_fn = venvs_module._env_builder._function
 
 
-def test_create_local_venv():
-    # The temporary directory is created within the project.
-    # For some reason, creating a virtual environment outside of the project
-    # doesn't work reliably.
-    with TemporaryDirectory(dir=TEST_ASSETS_DIR) as tempdir:
-        # Mock os.environ to set NEMO_RL_VENV_DIR for this test
-        with patch.dict(os.environ, {"NEMO_RL_VENV_DIR": tempdir}):
-            venv_python = create_local_venv(
-                py_executable="uv run --group docs", venv_name="test_venv"
-            )
-            assert os.path.exists(venv_python)
-            assert venv_python == f"{tempdir}/test_venv/bin/python"
-            # Check if sphinx package is installed in the created venv
+@pytest.fixture(autouse=True)
+def _isolated_venv_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_RL_VENV_DIR", str(tmp_path))
+    create_local_venv.cache_clear()
+    yield tmp_path
+    create_local_venv.cache_clear()
 
-            # Run a Python command to check if sphinx can be imported
-            result = subprocess.run(
-                [
-                    venv_python,
-                    "-c",
-                    "import sphinx; print('Sphinx package is installed')",
-                ],
-                capture_output=True,
-                text=True,
-            )
 
-            # Verify the command executed successfully (return code 0)
-            assert result.returncode == 0, f"Failed to import sphinx: {result.stderr}"
-            assert "Sphinx package is installed" in result.stdout
+def _fake_uv(venv_dir):
+    """subprocess.run stand-in: `uv venv` materializes bin/python, the rest no-op."""
+
+    def run(cmd, **kwargs):
+        if cmd[:2] == ["uv", "venv"]:
+            bin_dir = Path(cmd[-1]) / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / "python").touch()
+        return None
+
+    return run
+
+
+def test_create_local_venv_marks_ready_only_after_success(tmp_path):
+    with patch.object(venvs_module.subprocess, "run", _fake_uv(tmp_path)):
+        python_path = create_local_venv("uv run --locked", "demo.Worker")
+    venv = tmp_path / "demo.Worker"
+    assert python_path == str(venv / "bin" / "python")
+    assert (venv / VENV_READY_MARKER).exists()
+
+
+def test_create_local_venv_failure_leaves_no_marker(tmp_path):
+    calls = {"n": 0}
+
+    def failing_run(cmd, **kwargs):
+        if cmd[:2] == ["uv", "venv"]:
+            return _fake_uv(tmp_path)(cmd, **kwargs)
+        raise RuntimeError("sync exploded")
+
+    with (
+        patch.object(venvs_module.subprocess, "run", failing_run),
+        pytest.raises(RuntimeError),
+    ):
+        create_local_venv("uv run --locked", "demo.Worker")
+    venv = tmp_path / "demo.Worker"
+    assert (venv / "bin" / "python").exists()
+    assert not (venv / VENV_READY_MARKER).exists()
+
+
+def test_stale_marker_removed_at_build_start(tmp_path):
+    venv = tmp_path / "demo.Worker"
+    venv.mkdir(parents=True)
+    (venv / VENV_READY_MARKER).touch()
+
+    def killed_mid_sync(cmd, **kwargs):
+        if cmd[:2] == ["uv", "venv"]:
+            return _fake_uv(tmp_path)(cmd, **kwargs)
+        raise KeyboardInterrupt
+
+    with (
+        patch.object(venvs_module.subprocess, "run", killed_mid_sync),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        create_local_venv("uv run --locked", "demo.Worker")
+    assert not (venv / VENV_READY_MARKER).exists()
+
+
+def test_env_builder_rebuilds_unmarked_venv(tmp_path):
+    venv = tmp_path / "demo.Worker"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").touch()  # partial: looks usable, is not
+
+    with patch.object(venvs_module, "create_local_venv") as build:
+        build.return_value = str(venv / "bin" / "python")
+        result = _env_builder_fn("uv run --locked", "demo.Worker", node_idx=0)
+    build.assert_called_once()
+    assert result == str(venv / "bin" / "python")
+    assert not (venv / "STARTED_ENV_BUILDER").exists()
+
+
+def test_env_builder_early_returns_marked_venv(tmp_path):
+    venv = tmp_path / "demo.Worker"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").touch()
+    (venv / VENV_READY_MARKER).touch()
+
+    with patch.object(venvs_module, "create_local_venv") as build:
+        result = _env_builder_fn("uv run --locked", "demo.Worker", node_idx=0)
+    build.assert_not_called()
+    assert result == str(venv / "bin" / "python")
+
+
+def test_waiter_times_out_on_held_claim(tmp_path, monkeypatch):
+    monkeypatch.setenv("NRL_VENV_BUILD_TIMEOUT_SECS", "2")
+    venv = tmp_path / "demo.Worker"
+    venv.mkdir(parents=True)
+    (venv / "STARTED_ENV_BUILDER").touch()
+
+    with pytest.raises(TimeoutError, match="rm -rf"):
+        _env_builder_fn("uv run --locked", "demo.Worker", node_idx=0)
+
+
+def test_waiter_raises_when_builder_dies_without_marker(tmp_path, monkeypatch):
+    monkeypatch.setenv("NRL_VENV_BUILD_TIMEOUT_SECS", "30")
+    venv = tmp_path / "demo.Worker"
+    venv.mkdir(parents=True)
+    claim = venv / "STARTED_ENV_BUILDER"
+    claim.touch()
+
+    threading.Timer(1.5, claim.unlink).start()
+    with pytest.raises(RuntimeError, match="without completing"):
+        _env_builder_fn("uv run --locked", "demo.Worker", node_idx=0)
+
+
+def test_waiter_returns_when_marker_appears(tmp_path, monkeypatch):
+    monkeypatch.setenv("NRL_VENV_BUILD_TIMEOUT_SECS", "30")
+    venv = tmp_path / "demo.Worker"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").touch()
+    claim = venv / "STARTED_ENV_BUILDER"
+    claim.touch()
+
+    def finish_build():
+        (venv / VENV_READY_MARKER).touch()
+        claim.unlink()
+
+    threading.Timer(1.5, finish_build).start()
+    result = _env_builder_fn("uv run --locked", "demo.Worker", node_idx=0)
+    assert result == str(venv / "bin" / "python")
+
+
+def test_stale_claim_expired_and_rebuilt(tmp_path, monkeypatch):
+    monkeypatch.setenv("NRL_VENV_BUILD_TIMEOUT_SECS", "60")
+    venv = tmp_path / "demo.Worker"
+    venv.mkdir(parents=True)
+    claim = venv / "STARTED_ENV_BUILDER"
+    claim.touch()
+    stale = time.time() - 3600
+    os.utime(claim, (stale, stale))
+
+    with patch.object(venvs_module, "create_local_venv") as build:
+        build.return_value = str(venv / "bin" / "python")
+        result = _env_builder_fn("uv run --locked", "demo.Worker", node_idx=0)
+    build.assert_called_once()
+    assert result == str(venv / "bin" / "python")
+    assert not claim.exists()

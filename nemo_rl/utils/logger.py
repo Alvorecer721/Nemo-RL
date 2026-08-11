@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import fnmatch
 import glob
 import json
 import logging
@@ -88,6 +89,7 @@ class LoggerConfig(TypedDict):
     monitor_gpus: bool
     gpu_monitoring: GPUMonitoringConfig
     num_val_samples_to_print: NotRequired[int]
+    metric_denylist: NotRequired[list[str]]
 
 
 class LoggerInterface(ABC):
@@ -401,7 +403,12 @@ class WandbLogger(LoggerInterface):
             step: Global step value
             name: Name of the metric
         """
-        self.run.log({name: wandb.Histogram(histogram)}, step=step)
+        try:
+            self.run.log({name: wandb.Histogram(histogram)}, step=step)
+        except ValueError:
+            # When all values are identical, numpy cannot create finite-sized bins.
+            # Log the scalar value instead.
+            self.run.log({name: histogram[0] if len(histogram) > 0 else 0}, step=step)
 
 
 class SwanlabLogger(LoggerInterface):
@@ -763,6 +770,47 @@ class RayGpuMonitorLogger:
             self.metrics_buffer = []
 
 
+def _merge_generation_logger_workers(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Merge per-worker async-vLLM generation-logger lists into one list per metric.
+
+    ``generation_logger_metrics`` is ``{metric: {worker_id: [samples]}}``; merging
+    across workers gives a cluster-level view and avoids one curve per (worker,
+    statistic). Returns a shallow copy; the input dict is not mutated.
+    """
+    glm = metrics.get("generation_logger_metrics")
+    if not isinstance(glm, dict):
+        return metrics
+    merged: dict[str, Any] = {}
+    for metric, per_worker in glm.items():
+        if isinstance(per_worker, dict):
+            combined: list[Any] = []
+            for samples in per_worker.values():
+                combined.extend(samples if isinstance(samples, list) else [samples])
+            merged[metric] = combined
+        else:
+            merged[metric] = per_worker
+    return {**metrics, "generation_logger_metrics": merged}
+
+
+def _summarize_list(values: list[Any]) -> dict[str, float]:
+    """Reduce a list to bounded summary stats for scalar-only backends (MLflow)."""
+    nums = [
+        v
+        for v in values
+        if isinstance(v, (int, float, np.integer, np.floating))
+        and not isinstance(v, bool)
+    ]
+    if not nums:
+        return {}
+    arr = np.asarray(nums, dtype=np.float64)
+    return {
+        "mean": float(arr.mean()),
+        "p50": float(np.percentile(arr, 50)),
+        "p90": float(np.percentile(arr, 90)),
+        "max": float(arr.max()),
+    }
+
+
 class MLflowLogger(LoggerInterface):
     """MLflow logger backend."""
 
@@ -837,14 +885,25 @@ class MLflowLogger(LoggerInterface):
             prefix: Optional prefix for metric names
             step_metric: Optional step metric name (ignored in MLflow)
         """
+        # MLflow is scalar-only: the default flatten expands lists into one key
+        # per index, which explodes the metric-key space for per-event lists
+        # (async vLLM generation metrics, per-sample histograms). Merge the
+        # per-worker generation-logger lists, then summarize each list into a few
+        # bounded stats logged at the real training step. Keys use "/" so the
+        # MLflow UI nests them into collapsible groups instead of a flat wall.
+        metrics = _merge_generation_logger_workers(metrics)
         metrics_to_log = {}
-        flattened_metrics = flatten_dict(metrics)
-        for name, value in flattened_metrics.items():
+        for name, value in flatten_dict(metrics, sep="/", expand_lists=False).items():
             if prefix:
                 name = f"{prefix}/{name}"
-            metrics_to_log[name] = value
+            if isinstance(value, list):
+                for suffix, stat in _summarize_list(value).items():
+                    metrics_to_log[f"{name}/{suffix}"] = stat
+            else:
+                metrics_to_log[name] = value
 
-        mlflow.log_metrics(metrics_to_log, step=step, run_id=self.run_id)
+        if metrics_to_log:
+            mlflow.log_metrics(metrics_to_log, step=step, run_id=self.run_id)
 
     def log_hyperparams(self, params: Mapping[str, Any]) -> None:
         """Log hyperparameters to MLflow.
@@ -884,6 +943,8 @@ class MLflowLogger(LoggerInterface):
 class Logger(LoggerInterface):
     """Main logger class that delegates to multiple backend loggers."""
 
+    _denylist: list[str] = []
+
     def __init__(self, cfg: LoggerConfig):
         """Create and configure enabled logging backends and optionally start GPU monitoring.
 
@@ -898,6 +959,10 @@ class Logger(LoggerInterface):
         self.loggers: list[LoggerInterface] = []
         self.wandb_logger = None
         self.swanlab_logger = None
+
+        self._denylist = cfg.get("metric_denylist") or []
+        self._unmatched_patterns = set(self._denylist)
+        self._denylist_warned = False
 
         self.base_log_dir = cfg["log_dir"]
         os.makedirs(self.base_log_dir, exist_ok=True)
@@ -952,6 +1017,24 @@ class Logger(LoggerInterface):
         if not self.loggers:
             print("No loggers initialized")
 
+    def _is_denied(self, name: str) -> bool:
+        """Whether a fully-qualified metric name matches the configured denylist."""
+        for pat in self._denylist:
+            if fnmatch.fnmatch(name, pat):
+                self._unmatched_patterns.discard(pat)
+                return True
+        return False
+
+    def _warn_unmatched_denylist(self) -> None:
+        """Warn once about denylist patterns that matched no metric this run (likely stale)."""
+        if self._denylist_warned or not self._denylist:
+            return
+        self._denylist_warned = True
+        if self._unmatched_patterns:
+            logging.getLogger(__name__).warning(
+                f"metric_denylist patterns matched no logged metric (stale or wrong surface?): {sorted(self._unmatched_patterns)}"
+            )
+
     def log_metrics(
         self,
         metrics: dict[str, Any],
@@ -969,8 +1052,18 @@ class Logger(LoggerInterface):
             step_metric: Optional name of a field in metrics to use as step instead
                          of the provided step value (currently only needed for wandb)
         """
+        if self._denylist:
+            metrics = {
+                k: v
+                for k, v in metrics.items()
+                if not self._is_denied(
+                    k if k == step_metric else (f"{prefix}/{k}" if prefix else k)
+                )
+            }
         for logger in self.loggers:
             logger.log_metrics(metrics, step, prefix, step_metric, step_finished)
+        if prefix == "validation":
+            self._warn_unmatched_denylist()
 
     def log_hyperparams(self, params: Mapping[str, Any]) -> None:
         """Log hyperparameters to all enabled backends.
@@ -1003,7 +1096,10 @@ class Logger(LoggerInterface):
                 for key, value in sample.items():
                     if isinstance(value, torch.Tensor):
                         sample[key] = value.tolist()
-                f.write(json.dumps({**sample, "idx": i}) + "\n")
+                    elif isinstance(value, np.ndarray):
+                        sample[key] = value.tolist()
+                # default=str is a fallback for non-JSON-serializable types (e.g., datetime, custom objects)
+                f.write(json.dumps({**sample, "idx": i}, default=str) + "\n")
 
         print(f"Logged data to {filepath}")
 
@@ -1112,6 +1208,8 @@ class Logger(LoggerInterface):
             step: Global step value
             name: Name of the metric
         """
+        if self._is_denied(name):
+            return
         for logger in self.loggers:
             logger.log_histogram(histogram, step, name)
 
@@ -1123,6 +1221,8 @@ class Logger(LoggerInterface):
             step: Global step value
             name: Name of the plot
         """
+        if self._is_denied(name):
+            return
         for logger in self.loggers:
             logger.log_plot(figure, step, name)
 
@@ -1231,7 +1331,9 @@ class Logger(LoggerInterface):
             self.gpu_monitor.stop()
 
 
-def flatten_dict(d: Mapping[str, Any], sep: str = ".") -> dict[str, Any]:
+def flatten_dict(
+    d: Mapping[str, Any], sep: str = ".", expand_lists: bool = True
+) -> dict[str, Any]:
     """Flatten a nested dictionary.
 
     Handles nested dictionaries and lists by creating keys with separators.
@@ -1240,6 +1342,8 @@ def flatten_dict(d: Mapping[str, Any], sep: str = ".") -> dict[str, Any]:
     Args:
         d: Dictionary to flatten
         sep: Separator to use between nested keys
+        expand_lists: If True (default), expand list values into one key per
+            index. If False, keep each list intact under its stable key.
 
     Returns:
         Flattened dictionary with compound keys
@@ -1265,7 +1369,7 @@ def flatten_dict(d: Mapping[str, Any], sep: str = ".") -> dict[str, Any]:
 
             if isinstance(value, dict):
                 _flatten(value, new_key)
-            elif isinstance(value, list):
+            elif isinstance(value, list) and expand_lists:
                 for i, item in enumerate(value):
                     list_key = f"{new_key}{sep}{i}"
                     if isinstance(item, dict):

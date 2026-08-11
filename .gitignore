@@ -22,11 +22,12 @@ mlruns/
 # Test
 coverage.json
 .coverage*
-unit_results.json
-unit_results/
 test_assets/
+actual_test_nemo_gym_sanity.json
 .nrl_remote_map.json
 .nrl_remote_state.json
+# Test biproducts
+tests/functional/*/
 
 # Cache
 uv_cache/
@@ -34,12 +35,6 @@ hf_home/
 hf_datasets_cache/
 *logs/
 /datasets/
-docker/*
-!docker/Dockerfile*
-!docker/README*.md
-!docker/*.toml
-!docker/patches/
-!docker/patches/*.patch
 wandb/
 checkpoints/
 results/
@@ -53,7 +48,8 @@ code_snapshots*/
 # Claude Code review memory (local only)
 .claude/review-memory/
 
-# crash-dump stubs from segfault-on-teardown
-core_nid*
-core.*
-outputs/
+# pytest run artifacts (written by tests/unit/conftest.py)
+tests/unit/unit_results.json
+tests/unit/unit_results/
+logs/
+xielu-builds/

@@ -9,12 +9,12 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=64
 #SBATCH --partition=normal
-#SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --export=NONE
 
 set -euo pipefail
 
 # Run from the repo root (`cd <repo> && sbatch ...`) or anywhere with `sbatch --chdir=<repo> ...`.
+# Add `--reservation=<name>` on the sbatch line if your project has one active.
 # REPO_DIR defaults to the job working dir ($PWD), which is also where the relative #SBATCH logs/ land.
 # (sbatch copies this script to /var/spool/slurmd, so BASH_SOURCE doesn't resolve here.)
 REPO_DIR=${REPO_DIR:-$PWD}
@@ -23,14 +23,12 @@ RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nemo_rl_dpo_apertus_${SLURM_JOB_ID}}
 
 # Apertus stack: bridge fork (apertus support) shadows the image's bundled
 # bridge; megatron-core comes from the worker venvs. All overridable.
-# NOTE: XIELU_SITE points at the shared prebuilt CUDA xielu kernel in the wheelhouse (ABI-bound: cp313 / torch 2.10+cu129).
+# NOTE: XIELU_SITE points at the CUDA xielu kernel built against the v0.7.0 container (ABI-bound: cp313 / torch 2.11+cu130).
 # Unset it for the eager fallback (correct, slower, warns).
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.1-cp313}
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}
 APERTUS_CKPT=${APERTUS_CKPT:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200}
-APERTUS_TOKENIZER=${APERTUS_TOKENIZER:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed}
-# Opt-in worker-venv rebuild — pass on EVERY stock-image run: the rebuild lands in /opt/ray_venvs (the container's ephemeral overlay) and does NOT persist, and the checkout's uv.lock diverges from the baked venvs (else the vLLM worker's numpy fails to load libscipy_openblas). Default off; `sbatch --export=ALL,NRL_FORCE_REBUILD_VENVS=true ...`. See infra/slurm/cscs/README.md (incl. NEMO_RL_VENV_DIR for real reuse).
-NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-false}
+APERTUS_TOKENIZER=${APERTUS_TOKENIZER:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official}
 
 mkdir -p "$RUN_DIR"
 echo "batch_host=$(hostname) run_dir=$RUN_DIR"
@@ -52,10 +50,21 @@ srun \
     export REPO_DIR='"$REPO_DIR"'
     export BRIDGE_ROOT='"$BRIDGE_ROOT"'
     export XIELU_SITE='"$XIELU_SITE"'
-    export NRL_FORCE_REBUILD_VENVS='"$NRL_FORCE_REBUILD_VENVS"'
-    # our nemo_rl checkout first (Apertus deltas: xIELU fix + #2329), then bridge fork src, then optional CUDA xielu.
-    # megatron-core comes from the worker venvs — NeMo-RL v0.6.0 needs its own mcore version.
+    # our nemo_rl checkout first (Apertus deltas), then bridge fork src, then optional CUDA xielu.
+    # megatron-core comes from the worker venvs.
     export PYTHONPATH="$REPO_DIR:$BRIDGE_ROOT/src${XIELU_SITE:+:$XIELU_SITE}"
+    # Persist the project + worker venvs on capstor: the image defaults both to
+    # container-overlay paths that die with the job, forcing a rebuild every run.
+    # Team uv cache on capstor (complete for the release lock; see fixgate launcher).
+    # Call the uv shipped in the image: uv cache buckets are version-specific, so a
+    # personal uv earlier on PATH misses the seeded cache and rebuilds from source.
+    UV=${UV:-/root/.local/bin/uv}
+    export UV_CACHE_DIR=${UV_CACHE_DIR:-/capstor/store/cscs/swissai/infra01/MLLM/uv-cache}
+    # uv progress rendering has SIGPIPEd (exit 141) against the Slurm output stream
+    # right after large first-time installs; plain log lines are enough here.
+    export UV_NO_PROGRESS=1
+    export UV_PROJECT_ENVIRONMENT="$REPO_DIR/.venv"
+    export NEMO_RL_VENV_DIR="$REPO_DIR/venvs"
     export RUN_DIR='"$RUN_DIR"'
     export LOG_DIR="$RUN_DIR/tb"
     export JSON_METRICS="$RUN_DIR/metrics.json"
@@ -75,11 +84,11 @@ srun \
     # mcore extra env = the one Megatron workers run under (the base
     # /opt/nemo_rl_venv has no TE/modelopt in the public image); the tokenizer
     # argument additionally asserts the chat template loads
-    uv run --locked --extra mcore python \
+    "$UV" run --locked --extra mcore python \
       "$BRIDGE_ROOT/src/megatron/bridge/models/apertus/test_apertus_provider.py" "$APERTUS_TOKENIZER"
 
     echo "=== DPO probe: 3 steps, TP2, seq 2048 ==="
-    uv run examples/run_dpo.py \
+    "$UV" run examples/run_dpo.py \
       --config examples/configs/recipes/llm/dpo-llama3.1-8b-instruct-4n8g-megatron.v2.yaml \
       policy.model_name="$APERTUS_CKPT" \
       policy.tokenizer.name="$APERTUS_TOKENIZER" \
@@ -90,6 +99,9 @@ srun \
       policy.max_total_sequence_length=2048 \
       policy.megatron_cfg.tensor_model_parallel_size=2 \
       policy.megatron_cfg.sequence_parallel=false \
+      policy.megatron_cfg.use_linear_ce_fusion_loss=true \
+      policy.megatron_cfg.linear_ce_fusion_chunk_size=256 \
+      policy.megatron_cfg.distributed_data_parallel_config.overlap_param_gather=false \
       logger.tensorboard_enabled=true \
       logger.log_dir="$LOG_DIR" \
       logger.wandb_enabled=false \
@@ -99,6 +111,6 @@ srun \
       cluster.num_nodes=1 \
       2>&1 | tee "$RUN_LOG"
 
-    uv run tests/json_dump_tb_logs.py "$LOG_DIR" --output_path "$JSON_METRICS"
-    uv run tests/check_metrics.py "$JSON_METRICS" '"'"'data["train/loss"]["3"] < 6'"'"'
+    "$UV" run tests/json_dump_tb_logs.py "$LOG_DIR" --output_path "$JSON_METRICS"
+    "$UV" run tests/check_metrics.py "$JSON_METRICS" '"'"'data["train/loss"]["3"] < 6'"'"'
   '

@@ -25,30 +25,30 @@ echo "START TIME: $(date)"
 # N nodes execute identical training math (DP width changes, updates do not),
 # and the run auto-resumes from the latest checkpoint.
 ###############################################################################
-# Run from the repo root (`cd <repo> && sbatch <this>`) or use `sbatch --chdir=<repo> <this>`; REPO_DIR defaults to $PWD, where the relative #SBATCH logs/ also land (run `mkdir -p logs` first).
+# Run from the repo root (`cd <repo> && sbatch <this>`) or anywhere with `sbatch --chdir=<repo> <this>`;
+# the relative #SBATCH logs/ paths land in the same workdir.
 REPO_DIR=${REPO_DIR:-$PWD}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
-RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
-# Anchor checkpoints + NeMo-RL logs to the persistent REPO_DIR. The recipe's
-# checkpoint_dir/log_dir are relative, so they resolve against the driver's CWD
-# — which is RUNTIME_DIR (default /opt/nemo-rl, the container's ephemeral
-# overlay; see `cd "$RUNTIME_DIR"` below) and would be discarded at job end,
-# breaking auto-resume. Override via CHECKPOINT_DIR/LOG_DIR.
-CHECKPOINT_DIR=${CHECKPOINT_DIR:-$REPO_DIR/results/dpo-apertus1p5-8b-maxmin}
-LOG_DIR=${LOG_DIR:-$REPO_DIR/logs/dpo-apertus1p5-8b-maxmin}
+# The Ray-cluster assembly is algorithm-agnostic; point RUN_SCRIPT at another
+# entry point (e.g. examples/run_grpo.py, with UV_EXTRA=mcore) to reuse it.
+RUN_SCRIPT=${RUN_SCRIPT:-examples/run_dpo.py}
+# mcore by default so every launcher syncs .venv to the same shape — mixed
+# extra/no-extra launchers otherwise resync the extras in and out each run.
+UV_EXTRA=${UV_EXTRA:-mcore}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.1-cp313}
-# Opt-in worker-venv rebuild — pass on EVERY stock-image run when RUNTIME_DIR's uv.lock diverges from the baked venvs: the rebuild lands in /opt/ray_venvs (the container's ephemeral overlay) and does NOT persist (else the worker's numpy fails to load libscipy_openblas). Default off; `sbatch --export=ALL,NRL_FORCE_REBUILD_VENVS=true ...`. See infra/slurm/cscs/README.md (incl. NEMO_RL_VENV_DIR for real reuse).
-NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-false}
-# Raw Megatron base/reference loading (requires the mlm-restore worktree as
-# RUNTIME_DIR — the pretrained_checkpoint backport lives there): set
-# PRETRAINED_CKPT_PATH to an iter_XXXXXXX dir to skip the HF conversion cache.
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}
+RUNTIME_DIR=${RUNTIME_DIR:-$REPO_DIR}
+# Raw Megatron base/reference loading (pretrained_checkpoint is native in
+# v0.7.0): set PRETRAINED_CKPT_PATH to an iter_XXXXXXX dir to skip the HF
+# conversion cache.
 PRETRAINED_CKPT_PATH=${PRETRAINED_CKPT_PATH:-}
 PRETRAINED_CKPT_FORMAT=${PRETRAINED_CKPT_FORMAT:-megatron_lm}
-EXTRA_OVERRIDES=""
+# Extra hydra overrides, inheritable at submission (`sbatch --export=NONE,EXTRA_OVERRIDES=...`)
+# for short drills / one-offs without editing the recipe.
+EXTRA_OVERRIDES=${EXTRA_OVERRIDES:-}
 if [ -n "$PRETRAINED_CKPT_PATH" ]; then
-    EXTRA_OVERRIDES="+checkpointing.pretrained_checkpoint.path=$PRETRAINED_CKPT_PATH +checkpointing.pretrained_checkpoint.format=$PRETRAINED_CKPT_FORMAT"
+    EXTRA_OVERRIDES="$EXTRA_OVERRIDES +checkpointing.pretrained_checkpoint.path=$PRETRAINED_CKPT_PATH +checkpointing.pretrained_checkpoint.format=$PRETRAINED_CKPT_FORMAT"
 fi
 GPUS_PER_NODE=4
 
@@ -61,7 +61,7 @@ fi
 EXPECTED_UNITS=$((NUM_NODES * GPUS_PER_NODE))
 echo "head: $head_node ($HEAD_IP), nodes: $NUM_NODES, expected worker_units: $EXPECTED_UNITS"
 
-export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES NRL_FORCE_REBUILD_VENVS CHECKPOINT_DIR LOG_DIR
+export HEAD_IP EXPECTED_UNITS NUM_NODES RECIPE REPO_DIR BRIDGE_ROOT XIELU_SITE RUNTIME_DIR GPUS_PER_NODE EXTRA_OVERRIDES RUN_SCRIPT UV_EXTRA
 # sbatch --export=<list> propagates to srun via SLURM_EXPORT_ENV and would
 # strip the exports above from the tasks; force full propagation.
 export SLURM_EXPORT_ENV=ALL
@@ -77,7 +77,21 @@ srun \
     set -euo pipefail
     export PYTHONUNBUFFERED=1
     export HF_HOME=/iopsstor/scratch/cscs/${USER}/.cache/huggingface
-    export PYTHONPATH="${BRIDGE_ROOT}/src:${XIELU_SITE}"
+    export PYTHONPATH="${REPO_DIR}:${BRIDGE_ROOT}/src:${XIELU_SITE}"
+    # Persist the project + worker venvs on capstor (skip for the image tree,
+    # whose /opt venvs are prebaked): the image defaults both to container-overlay
+    # paths that die with the job, forcing a rebuild every run.
+    # Call the uv shipped in the image (uv cache buckets are version-specific).
+    UV=${UV:-/root/.local/bin/uv}
+    if [ "${RUNTIME_DIR}" != /opt/nemo-rl ]; then
+      # Team uv cache on capstor (complete for the release lock; see fixgate launcher).
+      export UV_CACHE_DIR=${UV_CACHE_DIR:-/capstor/store/cscs/swissai/infra01/MLLM/uv-cache}
+      # uv progress rendering has SIGPIPEd (exit 141) against the Slurm output stream
+      # right after large first-time installs; plain log lines are enough here.
+      export UV_NO_PROGRESS=1
+      export UV_PROJECT_ENVIRONMENT="${RUNTIME_DIR}/.venv"
+      export NEMO_RL_VENV_DIR="${RUNTIME_DIR}/venvs"
+    fi
     RAY_RES="{\"worker_units\": ${GPUS_PER_NODE}, \"slurm_managed_ray_cluster\": 1}"
     RAY_PORT=6379
 
@@ -100,7 +114,7 @@ srun \
         echo "=== ray cluster complete: ${units}/$EXPECTED_UNITS units; starting driver ==="
         cd "$RUNTIME_DIR"
         # shellcheck disable=SC2086  # EXTRA_OVERRIDES is intentionally word-split
-        uv run --locked examples/run_dpo.py --config "$RECIPE" cluster.num_nodes="$NUM_NODES" checkpointing.checkpoint_dir="$CHECKPOINT_DIR" logger.log_dir="$LOG_DIR" $EXTRA_OVERRIDES
+        "$UV" run --locked ${UV_EXTRA:+--extra $UV_EXTRA} "$RUN_SCRIPT" --config "$RECIPE" cluster.num_nodes="$NUM_NODES" $EXTRA_OVERRIDES
         ray stop
     else
         # Workers: wait for the head port, join, then live exactly as long as

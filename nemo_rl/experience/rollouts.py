@@ -20,15 +20,19 @@ import copy
 import json
 import math
 import statistics
+import warnings
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import ray
 import torch
+from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 from wandb import Histogram, Table
 
+from nemo_rl.algorithms.reward_functions import ngram_rate
 from nemo_rl.data.interfaces import (
     DatumSpec,
     FlatMessagesType,
@@ -52,6 +56,177 @@ from nemo_rl.models.generation.interfaces import (
 from nemo_rl.utils.timer import Timer
 
 TokenizerType = PreTrainedTokenizerBase
+
+
+def _add_r3_fallback_metrics(
+    gen_metrics: dict[str, float | int],
+    generation_outputs: BatchedDataDict,
+) -> None:
+    missing = generation_outputs.get("r3_routed_experts_missing_routes")
+    if missing is None:
+        return
+
+    missing_cpu = missing.detach().cpu()
+    expected = generation_outputs.get("r3_routed_experts_expected_routes")
+    actual = generation_outputs.get("r3_routed_experts_actual_routes")
+    expected_cpu = expected.detach().cpu() if expected is not None else None
+    actual_cpu = actual.detach().cpu() if actual is not None else None
+
+    missing_routes = int(missing_cpu.sum().item())
+    fallback_samples = int((missing_cpu > 0).sum().item())
+    expected_routes = int(expected_cpu.sum().item()) if expected_cpu is not None else 0
+    actual_routes = int(actual_cpu.sum().item()) if actual_cpu is not None else 0
+    gen_metrics["r3/routed_experts_fallback_samples"] = fallback_samples
+    gen_metrics["r3/routed_experts_fallback_token_routes"] = missing_routes
+    gen_metrics["r3/routed_experts_expected_token_routes"] = expected_routes
+    gen_metrics["r3/routed_experts_actual_token_routes"] = actual_routes
+    gen_metrics["r3/routed_experts_fallback_token_route_fraction"] = (
+        float(missing_routes / expected_routes) if expected_routes > 0 else 0.0
+    )
+
+
+def _attach_routed_experts_to_message_log_prefix(
+    message_log: list[dict],
+    routed_experts: torch.Tensor,
+) -> int:
+    """Attach routed-expert slices to existing messages and return prefix length."""
+    cursor = 0
+    for msg in message_log:
+        token_ids = msg.get("token_ids")
+        if not isinstance(token_ids, torch.Tensor):
+            continue
+        msg_len = int(token_ids.shape[0])
+        msg["routed_experts"] = routed_experts[cursor : cursor + msg_len]
+        cursor += msg_len
+    return cursor
+
+
+def _find_routed_experts_template(message_log: list[dict]) -> Optional[torch.Tensor]:
+    for msg in message_log:
+        routed_experts = msg.get("routed_experts")
+        if isinstance(routed_experts, torch.Tensor):
+            return routed_experts
+    return None
+
+
+def _dummy_routed_experts_for_tokens(
+    token_ids: torch.Tensor,
+    template: torch.Tensor,
+) -> torch.Tensor:
+    if template.dim() != 3:
+        raise ValueError(
+            "routed_experts messages must have shape [tokens, layers, topk], "
+            f"got {tuple(template.shape)}"
+        )
+    topk = template.shape[2]
+    default_route = torch.arange(topk, dtype=template.dtype, device=template.device)
+    return (
+        default_route.view(1, 1, topk)
+        .expand(int(token_ids.shape[0]), template.shape[1], topk)
+        .clone()
+    )
+
+
+class EffortLevelsConfig(BaseModel, extra="allow"):
+    """Controls length-based reward shaping for low-effort prompts.
+
+    When a prompt contains ``low_string``, the final reward is adjusted by a
+    length-reward term that penalises overly long responses.  The reward formula
+    is::
+
+        length_reward = min(1, low_weight * (1 - response_len / low_ub))
+        new_reward    = orig_reward
+                      + orig_reward * max(length_reward, 0)
+                      + low_penalty * min(length_reward, 0)
+
+    Setting ``low_weight = 0`` or leaving ``low_string`` empty disables the
+    shaping entirely.
+    """
+
+    low_weight: float = 0.0
+    """Weight applied to the length-reward term.  Set to 0 to disable."""
+    low_penalty: float = 1.0
+    """Coefficient for the negative length-reward penalty."""
+    low_ub: int = 64000
+    """Response-length upper bound (in tokens) used to normalise the term."""
+    low_string: str = ""
+    """Substring that must appear in the user prompt to trigger shaping."""
+
+
+@dataclass
+class _EffortShapingMetrics:
+    length_rewards_low: list[float]
+    rewards_low: list[float]
+    low_lengths: list[int]
+    high_lengths: list[int]
+
+
+def _apply_effort_shaping(
+    results: list[dict],
+    nemo_gym_rows: list[dict],
+    effort_config: Optional[EffortLevelsConfig],
+) -> _EffortShapingMetrics:
+    """Apply length-based reward shaping for low-effort prompts.
+
+    Modifies ``results[i]["full_result"]["reward"]`` in place for samples whose
+    last user-turn prompt contains ``effort_config.low_string``.  Returns per-sample
+    tracking lists used to populate rollout metrics.
+
+    No-ops (returns empty lists) when ``effort_config`` is ``None``,
+    ``low_weight`` is zero, or ``low_string`` is empty.
+    """
+    length_rewards_low: list[float] = []
+    rewards_low: list[float] = []
+    low_lengths: list[int] = []
+    high_lengths: list[int] = []
+
+    if (
+        effort_config is None
+        or effort_config.low_weight <= 0
+        or not effort_config.low_string
+    ):
+        return _EffortShapingMetrics(
+            length_rewards_low, rewards_low, low_lengths, high_lengths
+        )
+
+    lengths = [
+        len(r["message_log"][-1]["token_ids"])
+        if r["message_log"][-1]["role"] == "assistant"
+        else 0
+        for r in results
+    ]
+    orig_rewards = [r["full_result"]["reward"] for r in results]
+    for i, result in enumerate(results):
+        prompt = next(
+            (
+                msg["content"]
+                for msg in reversed(
+                    nemo_gym_rows[i]["responses_create_params"]["input"]
+                )
+                if msg.get("role") == "user" and "content" in msg
+            ),
+            "",
+        )
+        if effort_config.low_string in prompt:
+            length_reward = min(
+                1.0,
+                effort_config.low_weight * (1.0 - lengths[i] / effort_config.low_ub),
+            )
+            new_reward = (
+                orig_rewards[i]
+                + orig_rewards[i] * max(length_reward, 0.0)
+                + effort_config.low_penalty * min(length_reward, 0.0)
+            )
+            result["full_result"]["reward"] = new_reward
+            length_rewards_low.append(length_reward)
+            rewards_low.append(new_reward)
+            low_lengths.append(lengths[i])
+        else:
+            high_lengths.append(lengths[i])
+
+    return _EffortShapingMetrics(
+        length_rewards_low, rewards_low, low_lengths, high_lengths
+    )
 
 
 def generate_responses(
@@ -109,6 +284,19 @@ def generate_responses(
             assistant_message["generation_logprobs"] = generation_outputs["logprobs"][
                 i, input_length:total_length
             ]
+        if "routed_experts" in generation_outputs:
+            routed_experts = generation_outputs["routed_experts"][i]
+            prefix_length = _attach_routed_experts_to_message_log_prefix(
+                batch["message_log"][i], routed_experts
+            )
+            if prefix_length != int(input_length.item()):
+                raise RuntimeError(
+                    "message_log token length does not match generation input_length "
+                    f"({prefix_length} != {int(input_length.item())})."
+                )
+            assistant_message["routed_experts"] = routed_experts[
+                input_length:total_length
+            ]
 
         batch["message_log"][i].append(assistant_message)
 
@@ -117,6 +305,7 @@ def generate_responses(
         "mean_generation_length": generation_lengths.float().mean().item(),
         "total_generated_tokens": generation_lengths.sum().item(),
     }
+    _add_r3_fallback_metrics(gen_metrics, generation_outputs)
 
     # Add response_truncated to gen_metrics for use by caller
     if response_truncated is not None:
@@ -142,16 +331,35 @@ async def generate_responses_async(
         # Ensure the key exists even if it's None, matching GenerationDatumSpec
         generation_input_data["stop_strings"] = [None] * len(input_lengths)
 
-    # Check if this is vLLM with async_engine enabled
-    use_async_generation = (
-        hasattr(policy_generation, "cfg")
-        and "vllm_cfg" in policy_generation.cfg
-        and policy_generation.cfg["vllm_cfg"]["async_engine"]
-        and hasattr(policy_generation, "generate_async")
-    )
+    # Check if this is a supported inference engine with async generation enabled.
+    # SGLang exposes ``sglang_cfg`` and gates on ``use_async_rollouts``; vLLM and
+    # Megatron expose ``cfg`` and gate on their respective ``async_engine`` flag.
+    vllm_cfg = getattr(policy_generation, "cfg", None)
+    sglang_cfg = getattr(policy_generation, "sglang_cfg", None)
+    generation_config = vllm_cfg or sglang_cfg or {}
+    backend = generation_config.get("backend", "")
 
-    assert use_async_generation, (
-        "Async generation is not enabled. Please enable async generation by setting async_engine=True in the vllm_cfg section of the policy config."
+    if backend == "sglang":
+        use_async_generation = bool(generation_config.get("use_async_rollouts", False))
+    elif backend == "vllm":
+        use_async_generation = bool(
+            generation_config.get("vllm_cfg", {}).get("async_engine", False)
+        )
+    elif backend == "megatron":
+        use_async_generation = bool(
+            generation_config.get("mcore_generation_config", {}).get(
+                "async_engine", False
+            )
+        )
+    else:
+        use_async_generation = False
+
+    assert use_async_generation and hasattr(policy_generation, "generate_async"), (
+        "Async generation is not enabled. For SGLang, set "
+        "policy.generation.use_async_rollouts=True. For vLLM, set "
+        "policy.generation.vllm_cfg.async_engine=True. For Megatron, set "
+        "policy.generation.mcore_generation_config.async_engine=True. The "
+        "generation backend must also implement generate_async."
     )
 
     # Use async generation with per-sample streaming
@@ -211,6 +419,19 @@ async def generate_responses_async(
             assistant_message["generation_logprobs"] = generation_outputs["logprobs"][
                 i, input_length:total_length
             ]
+        if "routed_experts" in generation_outputs:
+            routed_experts = generation_outputs["routed_experts"][i]
+            prefix_length = _attach_routed_experts_to_message_log_prefix(
+                batch["message_log"][i], routed_experts
+            )
+            if prefix_length != int(input_length.item()):
+                raise RuntimeError(
+                    "message_log token length does not match generation input_length "
+                    f"({prefix_length} != {int(input_length.item())})."
+                )
+            assistant_message["routed_experts"] = routed_experts[
+                input_length:total_length
+            ]
 
         batch["message_log"][i].append(assistant_message)
 
@@ -219,6 +440,7 @@ async def generate_responses_async(
         "mean_generation_length": generation_lengths.float().mean().item(),
         "total_generated_tokens": generation_lengths.sum().item(),
     }
+    _add_r3_fallback_metrics(gen_metrics, generation_outputs)
     # Attach worker metadata if present (async vLLM path)
     if "gen_leader_worker_idx" in generation_outputs:
         # generation_outputs carries this as a 1-length list per row; convert to int
@@ -350,6 +572,75 @@ def calculate_rewards(
     )
 
 
+def _compute_generation_quality_metrics(
+    per_sample_token_parts: list[list[torch.Tensor]],
+    per_sample_truncated: "torch.Tensor | list[bool]",
+    cot_token_ids: tuple[int, int] | None,
+    ngram_size: int = 4,
+) -> tuple[dict[str, float], torch.Tensor]:
+    """Type-token ratio + chain-of-thought-length metrics from generated tokens.
+
+    Shared across all rollout paths (sync, async, gym) so the metric definitions
+    have one source of truth and need no re-decode / re-tokenize.
+
+    Args:
+        per_sample_token_parts: per sample, the assistant-generated token-id tensors
+            (one entry per turn; concatenated internally).
+        per_sample_truncated: per-sample bool (tensor or list) — response hit max tokens.
+        cot_token_ids: optional (start, end) thinking-block token ids; when set, also
+            emits CoT length + the unclosed-think breakdown.
+        ngram_size: n-gram width for the distinct-n repetition rate.
+
+    Returns:
+        Tuple of (metric dict to merge into rollout_metrics, per-sample n-gram
+        repetition rate tensor for reward shaping).
+    """
+    batch_size = len(per_sample_token_parts)
+    type_token_ratio = torch.zeros(batch_size)
+    cot_token_counts = torch.zeros(batch_size)
+    unclosed_think = torch.zeros(batch_size, dtype=torch.bool)
+    ngram_repetition_rate = torch.zeros(batch_size)
+    for idx, parts in enumerate(per_sample_token_parts):
+        if not parts:
+            continue
+        gen_ids = torch.cat([torch.as_tensor(p).flatten() for p in parts])
+        num_gen = gen_ids.numel()
+        if num_gen == 0:
+            continue
+        type_token_ratio[idx] = torch.unique(gen_ids).numel() / num_gen
+        ngram_repetition_rate[idx] = ngram_rate(gen_ids, ngram_size)
+        if cot_token_ids is not None:
+            starts = (gen_ids == cot_token_ids[0]).nonzero(as_tuple=True)[0]
+            if starts.numel() > 0:
+                start = starts[0]
+                ends = (gen_ids == cot_token_ids[1]).nonzero(as_tuple=True)[0]
+                ends = ends[ends > start]
+                if ends.numel() > 0:
+                    cot_token_counts[idx] = ends[0] - start - 1
+                else:
+                    # opened a think block but never closed it (ran to EOD/truncation)
+                    cot_token_counts[idx] = num_gen - start - 1
+                    unclosed_think[idx] = True
+
+    metrics = {
+        "mean_type_token_ratio": float(type_token_ratio.mean().item()),
+        "mean_ngram_repetition_rate": float(ngram_repetition_rate.mean().item()),
+    }
+    if cot_token_ids is not None:
+        truncated = torch.as_tensor(per_sample_truncated, dtype=torch.bool)
+        metrics["mean_cot_tokens_per_sample"] = float(cot_token_counts.mean().item())
+        metrics["max_cot_tokens_per_sample"] = float(cot_token_counts.max().item())
+        # Unclosed think split by why generation stopped: max tokens mid-think vs EOD.
+        metrics["unclosed_think_rate"] = float(unclosed_think.float().mean().item())
+        metrics["max_tokens_while_thinking_rate"] = float(
+            (unclosed_think & truncated).float().mean().item()
+        )
+        metrics["eos_while_thinking_rate"] = float(
+            (unclosed_think & ~truncated).float().mean().item()
+        )
+    return metrics, ngram_repetition_rate
+
+
 def run_multi_turn_rollout(
     policy_generation: GenerationInterface,
     input_batch: BatchedDataDict[DatumSpec],
@@ -358,6 +649,7 @@ def run_multi_turn_rollout(
     max_seq_len: int,
     max_rollout_turns: int = 999999,
     greedy: bool = False,
+    cot_token_ids: tuple[int, int] | None = None,
 ) -> tuple[BatchedDataDict[DatumSpec], dict[str, Any]]:
     """Runs a multi-turn rollout loop, interacting with the environment.
 
@@ -369,6 +661,8 @@ def run_multi_turn_rollout(
         max_rollout_turns: Maximum number of agent-environment interaction turns.
         max_seq_len: Maximum sequence length allowed.
         greedy: Whether to use greedy decoding.
+        cot_token_ids: Optional (start, end) thinking-block token ids; when set, logs
+            per-sample chain-of-thought length.
 
     Returns:
         Tuple containing:
@@ -391,6 +685,9 @@ def run_multi_turn_rollout(
     sample_turn_counts = torch.zeros(batch_size, dtype=torch.int32)
     sample_token_counts = torch.zeros(batch_size, dtype=torch.int32)
     sample_assistant_token_counts = torch.zeros(batch_size, dtype=torch.int32)
+    sample_assistant_token_ids: list[list[torch.Tensor]] = [
+        [] for _ in range(batch_size)
+    ]
     sample_env_token_counts = torch.zeros(batch_size, dtype=torch.int32)
     sample_terminated = torch.zeros(batch_size, dtype=torch.bool)
     sample_truncated = torch.zeros(batch_size, dtype=torch.bool)
@@ -440,6 +737,8 @@ def run_multi_turn_rollout(
             generation_input_data["vllm_images"] = active_batch["vllm_images"]
         if "vllm_videos" in active_batch:
             generation_input_data["vllm_videos"] = active_batch["vllm_videos"]
+        if "vllm_audios" in active_batch:
+            generation_input_data["vllm_audios"] = active_batch["vllm_audios"]
 
         # generate_responses updates active_batch["message_log"] in-place
         active_batch, generated_ids, gen_metrics = generate_responses(
@@ -462,6 +761,7 @@ def run_multi_turn_rollout(
         for i, global_idx in enumerate(active_indices.tolist()):
             sample_assistant_token_counts[global_idx] += len(generated_ids[i])
             sample_token_counts[global_idx] += len(generated_ids[i])
+            sample_assistant_token_ids[global_idx].append(generated_ids[i])
 
         # Track total generated tokens this turn
         total_gen_tokens_per_turn.append(sum(len(ids) for ids in generated_ids))
@@ -519,11 +819,18 @@ def run_multi_turn_rollout(
                 # Record truncation
                 sample_truncated[active_indices[i]] = True
 
-            tokenized_env_obs_message = {
+            tokenized_env_obs_message: dict[str, Any] = {
                 "role": env_output.observations[i]["role"],
                 "content": env_obs_content,
                 "token_ids": tokenized_obs,
             }
+            routed_template = _find_routed_experts_template(
+                current_batch["message_log"][global_idx]
+            )
+            if routed_template is not None:
+                tokenized_env_obs_message["routed_experts"] = (
+                    _dummy_routed_experts_for_tokens(tokenized_obs, routed_template)
+                )
             current_batch["message_log"][global_idx].append(tokenized_env_obs_message)
 
             # Record token usage - environment
@@ -593,6 +900,11 @@ def run_multi_turn_rollout(
             sample_env_token_counts.float().mean().item()
         ),
     }
+    metrics, ngram_rate = _compute_generation_quality_metrics(
+        sample_assistant_token_ids, sample_truncated, cot_token_ids
+    )
+    rollout_metrics.update(metrics)
+    current_batch["ngram_repetition_rate"] = ngram_rate
     return current_batch, rollout_metrics
 
 
@@ -773,8 +1085,15 @@ async def run_sample_multi_turn_rollout(
             }
         )
 
-        # Get environment feedback
-        env_output = calculate_rewards(sample_batch, task_to_env)
+        # Get environment feedback.
+        # calculate_rewards uses blocking ray.get internally. Running it
+        # directly on the asyncio event loop (which this coroutine runs on)
+        # blocks every other in-flight rollout coroutine for the entire env
+        # step. In this case, need to wrap with asyncio.to_thread to make
+        # this function yieldable.
+        env_output = await asyncio.to_thread(
+            calculate_rewards, sample_batch, task_to_env
+        )
         # Update total reward and optional per-reward signals (reward1, reward2, ... rewardN)
         if env_output.rewards.ndim == 2 and env_output.rewards.shape[1] >= 1:
             multi_reward_seen = True
@@ -804,11 +1123,16 @@ async def run_sample_multi_turn_rollout(
                 tokenized_obs = torch.empty(0, dtype=tokenized_obs.dtype)
             truncated = True
 
-        env_message = {
+        env_message: dict[str, Any] = {
             "role": env_output.observations[0]["role"],
             "content": env_obs_content,
             "token_ids": tokenized_obs,
         }
+        routed_template = _find_routed_experts_template(current_message_log)
+        if routed_template is not None:
+            env_message["routed_experts"] = _dummy_routed_experts_for_tokens(
+                tokenized_obs, routed_template
+            )
         current_message_log.append(env_message)
 
         # Update token counts
@@ -867,6 +1191,7 @@ def run_async_multi_turn_rollout(
     max_seq_len: int,
     max_rollout_turns: int = 999999,
     greedy: bool = False,
+    cot_token_ids: tuple[int, int] | None = None,
 ) -> tuple[BatchedDataDict[DatumSpec], dict[str, Any]]:
     """Run multi-turn rollouts with sample-level processing.
 
@@ -881,6 +1206,8 @@ def run_async_multi_turn_rollout(
         max_seq_len: Maximum sequence length allowed
         max_rollout_turns: Maximum number of agent-environment interaction turns
         greedy: Whether to use greedy decoding
+        cot_token_ids: optional (start, end) thinking-block token ids; when set, also
+            emits CoT length + the unclosed-think breakdown.
 
     Returns:
         Tuple containing:
@@ -1048,6 +1375,17 @@ def run_async_multi_turn_rollout(
             t for m in all_sample_metrics for t in m["turn_total_tokens"]
         ]
 
+        metrics, ngram_rate = _compute_generation_quality_metrics(
+            [
+                [msg["token_ids"] for msg in ml if msg["role"] == "assistant"]
+                for ml in final_batch["message_log"]
+            ],
+            [m["truncated"] for m in all_sample_metrics],
+            cot_token_ids,
+        )
+        rollout_metrics.update(metrics)
+        final_batch["ngram_repetition_rate"] = ngram_rate
+
         return final_batch, rollout_metrics
 
     return asyncio.run(_async_rollout_implementation())
@@ -1069,7 +1407,7 @@ class AsyncNemoGymRolloutResult:
 
 
 def _calculate_single_metric(
-    values: list[float], batch_size: int, key_name: str
+    values: Sequence[float | int], batch_size: int, key_name: str
 ) -> dict:
     return {
         f"{key_name}/mean": sum(values) / batch_size,
@@ -1090,8 +1428,12 @@ def run_async_nemo_gym_rollout(
     max_seq_len: Optional[int] = None,
     max_rollout_turns: Optional[int] = None,
     greedy: bool = False,
+    effort_config: Optional[EffortLevelsConfig] = None,
+    cot_token_ids: tuple[int, int] | None = None,
 ) -> AsyncNemoGymRolloutResult:
     """Run multi-turn rollouts with NeMo-Gym. Please refer to the `run_async_multi_turn_rollout` docs for more information on the parameters."""
+    # We accept max_seq_len for API parity with the other rollout paths, but NeMo-Gym
+    # still relies on the underlying model server's configured context/window limits.
     # We leverage the same `extra_env_info` key as `run_async_multi_turn_rollout`.
     nemo_gym_rows = input_batch["extra_env_info"]
 
@@ -1101,7 +1443,21 @@ def run_async_nemo_gym_rollout(
     assert max_rollout_turns is None, (
         "`max_rollout_turns` is not supported in NeMo-Gym path!"
     )
-    assert max_seq_len is None, "`max_seq_len` is not supported in NeMo-Gym path!"
+    if "vllm_cfg" in policy_generation.cfg:
+        engine_max_model_len = policy_generation.cfg["vllm_cfg"]["max_model_len"]
+    elif "mcore_generation_config" in policy_generation.cfg:
+        engine_max_model_len = policy_generation.cfg["mcore_generation_config"][
+            "max_model_len"
+        ]
+    else:
+        engine_max_model_len = policy_generation.cfg["max_total_sequence_length"]
+    if max_seq_len is not None and max_seq_len > engine_max_model_len:
+        warnings.warn(
+            f"policy max_total_sequence_length ({max_seq_len}) is greater than the "
+            f"generation engine's max_model_len ({engine_max_model_len}). The engine "
+            "will truncate sequences to its own limit, so the policy cap will not be "
+            "honored. Lower max_total_sequence_length or raise the engine's max_model_len."
+        )
     # We don't use these stop criteria
     assert not generation_config["stop_strings"], (
         "Stop strings is not supported in the generation config in NeMo-Gym path!"
@@ -1119,16 +1475,20 @@ def run_async_nemo_gym_rollout(
     timer.start(f"{timer_prefix}/total")
 
     for rowidx, row in enumerate(nemo_gym_rows):
-        # We may need better handling here. The max tokens set here would be the max new generated tokens, not the total max tokens.
-        # Currently, we just rely on the underlying vLLM engine to do the truncation for us using the max model seq len set in the config.
-        # row["max_tokens"] = max_seq_len
-
+        # We do not translate max_seq_len into row-level max_tokens here because that would
+        # change semantics from "total sequence length" to "max new tokens".
         responses_create_params = row["responses_create_params"]
         responses_create_params["temperature"] = generation_config["temperature"]
         responses_create_params["top_p"] = generation_config["top_p"]
 
-        # Max new tokens, just like max_seq_len above is ignored and we rely on the underlying vLLM engine for truncation.
-        # generation_config["max_new_tokens"]
+        # Configure max_output_tokens to respect the max_new_tokens setting.
+        # Will clamp max_output_tokens in vllm_worker_async.py so that input + output <= max_seq_len
+        existing_max_output_tokens = responses_create_params.get("max_output_tokens")
+        responses_create_params["max_output_tokens"] = (
+            min(existing_max_output_tokens, generation_config["max_new_tokens"])
+            if existing_max_output_tokens is not None
+            else generation_config["max_new_tokens"]
+        )
 
         row["_rowidx"] = rowidx
 
@@ -1149,10 +1509,28 @@ def run_async_nemo_gym_rollout(
                 "generation_logprobs",
             )
 
+    # Length-based reward shaping for low-effort prompts
+    shaping = _apply_effort_shaping(results, nemo_gym_rows, effort_config)
+    length_rewards_low = shaping.length_rewards_low
+    rewards_low = shaping.rewards_low
+    low_lengths = shaping.low_lengths
+    high_lengths = shaping.high_lengths
+
     # Prepare for the rollout metrics calculation below. Not strictly necessary here, but good to have parity with `run_async_multi_turn_rollout`
     with timer.time(f"{timer_prefix}/prepare_for_metrics_calculation"):
         batch_size = len(nemo_gym_rows)
-        max_total_tokens_per_sample = policy_generation.cfg["vllm_cfg"]["max_model_len"]
+        if "vllm_cfg" in policy_generation.cfg:
+            max_total_tokens_per_sample = policy_generation.cfg["vllm_cfg"][
+                "max_model_len"
+            ]
+        elif "mcore_generation_config" in policy_generation.cfg:
+            max_total_tokens_per_sample = policy_generation.cfg[
+                "mcore_generation_config"
+            ]["max_model_len"]
+        else:
+            max_total_tokens_per_sample = policy_generation.cfg[
+                "max_total_sequence_length"
+            ]
         all_sample_metrics = [
             {
                 "total_reward": r["full_result"]["reward"],
@@ -1206,6 +1584,19 @@ def run_async_nemo_gym_rollout(
             # )
             # / batch_size,
         }
+        metrics, ngram_rate = _compute_generation_quality_metrics(
+            [
+                [
+                    m["token_ids"]
+                    for m in r["message_log"]
+                    if m["role"] == "assistant"
+                ]
+                for r in results
+            ],
+            [m["hit_max_tokens"] for m in all_sample_metrics],
+            cot_token_ids,
+        )
+        rollout_metrics.update(metrics)
 
     # Per-agent misc metrics
     with timer.time(f"{timer_prefix}/per_agent_misc_metrics"):
@@ -1279,8 +1670,22 @@ def run_async_nemo_gym_rollout(
             "truncated": torch.tensor(
                 [m["hit_max_tokens"] for m in all_sample_metrics], dtype=torch.bool
             ),
+            "ngram_repetition_rate": ngram_rate,
         }
     )
+
+    if length_rewards_low:
+        rollout_metrics["mean_length_reward_low"] = sum(length_rewards_low) / len(
+            length_rewards_low
+        )
+    if rewards_low:
+        rollout_metrics["mean_reward_low"] = sum(rewards_low) / len(rewards_low)
+    if low_lengths:
+        rollout_metrics["mean_length_low"] = sum(low_lengths) / len(low_lengths)
+        rollout_metrics["median_length_low"] = float(statistics.median(low_lengths))
+    if high_lengths:
+        rollout_metrics["mean_length_high"] = sum(high_lengths) / len(high_lengths)
+        rollout_metrics["median_length_high"] = float(statistics.median(high_lengths))
 
     return AsyncNemoGymRolloutResult(
         input_ids=input_ids,

@@ -16,6 +16,7 @@
 
 import json
 import logging
+from functools import lru_cache
 from typing import Any, Dict, cast
 
 import torch
@@ -379,70 +380,6 @@ def math_data_processor(
     return output
 
 
-# TODO: @yukih: unify to math_hf_data_processor once https://github.com/NVIDIA-NeMo/RL/issues/2060 is resolved.
-def math_gdpo_data_processor(
-    datum_dict: dict[str, Any],
-    task_data_spec: TaskDataSpec,
-    tokenizer: TokenizerType,
-    max_seq_length: int,
-    idx: int,
-) -> DatumSpec:
-    """Process a datum dictionary (directly loaded from data/hf_datasets/openmathinstruct2.py) into a DatumSpec for the Reward Model Environment."""
-    user_message = datum_dict["messages"]
-    problem = user_message[0]["content"]
-    extra_env_info = {"ground_truth": user_message[1]["content"]}
-
-    # merge system prompt and user prompt
-    message_list = []
-    # system prompt
-    if task_data_spec.system_prompt:
-        message_list.append(
-            {
-                "role": "system",
-                "content": task_data_spec.system_prompt,
-            }
-        )
-    # user prompt
-    if task_data_spec.prompt:
-        problem = task_data_spec.prompt.format(problem)
-    message_list.append({"role": "user", "content": problem})
-
-    message: str = tokenizer.apply_chat_template(  # type: ignore
-        message_list,
-        tokenize=False,
-        add_generation_prompt=True,
-        add_special_tokens=False,
-    )
-    token_ids = tokenizer(message, return_tensors="pt", add_special_tokens=False)[
-        "input_ids"
-    ][0]
-
-    message_log: LLMMessageLogType = [
-        {"role": "user", "content": message, "token_ids": token_ids}
-    ]
-
-    length = sum(len(m["token_ids"]) for m in message_log)
-
-    loss_multiplier = 1.0
-    if length > max_seq_length:
-        # make smaller and mask out
-        for chat_message in message_log:
-            chat_message["token_ids"] = chat_message["token_ids"][
-                : min(4, max_seq_length // len(message_log))
-            ]
-        loss_multiplier = 0.0
-
-    output: DatumSpec = {
-        "message_log": message_log,
-        "length": length,
-        "extra_env_info": extra_env_info,
-        "loss_multiplier": loss_multiplier,
-        "idx": idx,
-        "task_name": datum_dict["task_name"],
-    }
-    return output
-
-
 def math_hf_data_processor(
     datum_dict: dict[str, Any],
     task_data_spec: TaskDataSpec,
@@ -536,29 +473,38 @@ def vlm_hf_data_processor(
         datum_dict = format_refcoco_dataset(datum_dict)
     elif datum_dict["task_name"] == "geometry3k":
         datum_dict = format_geometry3k_dataset(datum_dict)
+    elif datum_dict["task_name"] == "mmpr-tiny":
+        from nemo_rl.data.datasets.response_datasets.mmpr_tiny import (
+            format_mmpr_tiny_dataset,
+        )
+
+        datum_dict = format_mmpr_tiny_dataset(datum_dict)
+    elif datum_dict["task_name"] == "avqa":
+        pass  # AVQA data is already formatted by AVQADataset.format_data
+    elif datum_dict["task_name"] == "audiomcq":
+        pass  # AudioMCQ data is already formatted by AudioMCQDataset.format_data
+    elif datum_dict["task_name"] == "mmau":
+        pass  # MMAU data is already formatted by MMAUDataset.format_data
     else:
         raise ValueError(f"No data processor for task {datum_dict['task_name']}")
 
     user_message = datum_dict["messages"]
     problem = user_message[0]["content"]
     extra_env_info = {"ground_truth": user_message[1]["content"]}
+    if "choices" in datum_dict:
+        extra_env_info["choices"] = datum_dict["choices"]
 
     message_log: VLMMessageLogType = []
     ### only one round of interaction is assumed, this can easily be extended to a conversational setting
     user_message: dict[str, Any] = {"role": "user", "content": []}
     #
     images = []
+    audios = []
     if isinstance(problem, list):
         for content in problem:
-            # for image, video, just append it
+            # for image, video, audio, just append it
             # for text, format the prompt to the problem
-            if content["type"] != "text":
-                user_message["content"].append(content)
-                if content["type"] == "image":
-                    images.append(content["image"])
-                else:
-                    raise ValueError(f"Unsupported content type: {content['type']}")
-            elif content["type"] == "text":
+            if content["type"] == "text":
                 user_message["content"].append(
                     {
                         "type": "text",
@@ -567,11 +513,45 @@ def vlm_hf_data_processor(
                         else content["text"],
                     }
                 )
+            elif content["type"] == "image":
+                user_message["content"].append(content)
+                images.append(content["image"])
+            elif content["type"] == "audio":
+                user_message["content"].append(content)
+                # Store as (audio_array, sample_rate) tuple for vLLM
+                audios.append(
+                    (content["audio"], processor.feature_extractor.sampling_rate)
+                )
+            else:
+                raise ValueError(f"Unsupported content type: {content['type']}")
     else:
         # conversation consists of a text-only message
         user_message["content"] = task_data_spec.prompt.format(problem)
 
     images = [resolve_to_image(image) for image in images]
+
+    # Detect processors that use <image> placeholder style (e.g., NemotronOmni/InternVL)
+    # vs OpenAI content list style (e.g., Qwen-VL, Gemma).
+    # These processors expand <image> tokens in __call__ but NOT in apply_chat_template,
+    # so we must use processor(text=..., images=...) directly.
+    _PLACEHOLDER_STYLE_PROCESSORS = (
+        "NemotronNanoVLV2Processor",
+        "NemotronH_Nano_Omni_Reasoning_V3Processor",
+    )
+    _uses_image_placeholder = type(processor).__name__ in _PLACEHOLDER_STYLE_PROCESSORS
+
+    if _uses_image_placeholder and images:
+        # Convert content list to <image> placeholder text format
+        image_token = getattr(processor, "image_token", "<image>")
+        text_parts = []
+        for content in user_message["content"]:
+            if content["type"] == "image":
+                text_parts.append(image_token)
+            elif content["type"] == "text":
+                text_parts.append(content["text"])
+        user_message_for_tokenize = {"role": "user", "content": "\n".join(text_parts)}
+    else:
+        user_message_for_tokenize = user_message
 
     # get formatted user message
     if hasattr(processor, "conversation_preprocessor"):
@@ -579,7 +559,7 @@ def vlm_hf_data_processor(
             user_message
         )
     else:
-        user_message_for_chat_template = user_message
+        user_message_for_chat_template = user_message_for_tokenize
 
     # this is the string-tokenized conversation template for the generation policy (for vllm)
     string_formatted_dialog = processor.apply_chat_template(
@@ -589,18 +569,35 @@ def vlm_hf_data_processor(
     )
 
     # this is the id-tokenized and image processed conversation template for the policy
-    message: dict = processor.apply_chat_template(
-        [user_message],
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
-        return_dict=True,
-    )
+    if _uses_image_placeholder and images:
+        # Dynamic-resolution path: keep pixel_values in float32 to match vLLM's
+        # DynamicResolutionImageTiler bit-for-bit. vLLM stores/normalizes in
+        # float32 and only casts at the vision_model boundary; matching that
+        # rounding order tightens rollout/train logprob agreement. The model
+        # forward dispatches on imgs_sizes and handles the bf16 cast.
+        message: dict = processor(
+            text=string_formatted_dialog,
+            images=images,
+            return_tensors="pt",
+        )
+    else:
+        message: dict = processor.apply_chat_template(
+            [user_message_for_tokenize],
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+        )
 
     # add this for backward compatibility
     user_message["token_ids"] = message["input_ids"][0]
     # add all keys and values to the user message, and the list of keys
-    multimodal_keys = get_multimodal_keys_from_processor(processor)
+    multimodal_keys = list(get_multimodal_keys_from_processor(processor))
+    # imgs_sizes is not declared in model_input_names by the NemotronOmni
+    # checkpoint's bundled image_processor, so append it explicitly when
+    # present. It packs along dim=0 (per-image).
+    if "imgs_sizes" in message and "imgs_sizes" not in multimodal_keys:
+        multimodal_keys.append("imgs_sizes")
     for key in multimodal_keys:
         if key in message:
             user_message[key] = PackedTensor(
@@ -625,6 +622,7 @@ def vlm_hf_data_processor(
         vllm_kwargs = {
             "vllm_content": None,
             "vllm_images": [],
+            "vllm_audios": [],
         }
 
         # make smaller and mask out
@@ -637,11 +635,11 @@ def vlm_hf_data_processor(
                     chat_message[key] = PackedTensor.empty_like(value)
         loss_multiplier = 0.0
     else:
-        # get the prompt content! (use this for vllm-backend that needs formatted dialog and list of images) for the entire conversation
-        # add images for vllm serving
+        # get the prompt content! (use this for vllm-backend that needs formatted dialog and list of images/audios) for the entire conversation
         vllm_kwargs = {
             "vllm_content": string_formatted_dialog,
             "vllm_images": images,
+            "vllm_audios": audios,
         }
 
     output: DatumSpec = {
@@ -758,6 +756,87 @@ def nemo_gym_data_processor(
     return output
 
 
+def kd_data_processor(
+    datum_dict: dict[str, Any],
+    task_data_spec: TaskDataSpec,
+    tokenizer: TokenizerType,
+    max_seq_length: int | None,
+    idx: int,
+) -> DatumSpec:
+    """Process a raw-text datum for cross-tokenizer distillation.
+
+    Tokenization is deferred to the collator, so the text is carried forward
+    as a single assistant message in ``message_log``.
+    """
+    output: DatumSpec = {
+        # Defensive shallow-per-message copy so downstream mutation (e.g.
+        # adding token_ids) doesn't leak back into the dataset row.
+        "message_log": [dict(m) for m in datum_dict["messages"]],
+        "loss_multiplier": 1.0,
+        "idx": idx,
+        # fake keys (not used for cross-tokenizer distillation)
+        "length": 0,
+        "extra_env_info": None,
+    }
+    if "task_name" in datum_dict:
+        output["task_name"] = datum_dict["task_name"]
+    return output
+
+
+@lru_cache(maxsize=8)
+def _open_rl_prompt_store(store_prefix: str):
+    """Open and cache the Megatron MMIDIDX store for the rl_prompt dataset.
+
+    Imported lazily so this module stays importable without megatron.
+    """
+    from megatron.core.datasets.indexed_dataset import IndexedDataset
+
+    return IndexedDataset(store_prefix)
+
+
+def mmididx_grpo_data_processor(
+    datum_dict: dict[str, Any],
+    task_data_spec: TaskDataSpec,
+    tokenizer: TokenizerType,
+    max_seq_length: int | None,
+    idx: int,
+) -> DatumSpec:
+    """Process one prompt-only omni ``rl_prompt`` doc into a DatumSpec.
+
+    The doc is already tokenized (text + inline image tokens), so its token-ids are
+    passed straight through with no chat template and no re-tokenization;
+    ``answer``/``answer_variants`` become the verifier env's ground truth.
+    """
+    store = _open_rl_prompt_store(datum_dict["store_prefix"])
+    record = store[int(datum_dict["doc_index"])]
+    if isinstance(record, tuple):  # multimodal stores return (tokens, modes)
+        record = record[0]
+    token_ids = torch.tensor(record, dtype=torch.long)
+    message_log: LLMMessageLogType = [
+        {"role": "user", "content": "", "token_ids": token_ids}
+    ]
+    length = int(token_ids.shape[0])
+
+    loss_multiplier = 1.0
+    if max_seq_length is not None and length >= max_seq_length:
+        # oversized prompt: shrink and mask out of the loss
+        message_log[0]["token_ids"] = token_ids[: max(1, min(4, max_seq_length))]
+        loss_multiplier = 0.0
+
+    output: DatumSpec = {
+        "message_log": message_log,
+        "length": length,
+        "extra_env_info": {
+            "ground_truth": datum_dict["ground_truth"],
+            "answer_variants": list(datum_dict.get("answer_variants") or []),
+        },
+        "loss_multiplier": loss_multiplier,
+        "idx": idx,
+        "task_name": datum_dict["task_name"],
+    }
+    return output
+
+
 # Processor registry. Key is the processor name, value is the processor function.
 # Note: We cast the literal dict to Dict[str, TaskDataProcessFnCallable] because
 # type checkers see each concrete function's signature as a distinct callable type.
@@ -769,13 +848,14 @@ PROCESSOR_REGISTRY: Dict[str, TaskDataProcessFnCallable] = cast(
     {
         "default": math_hf_data_processor,
         "helpsteer3_data_processor": helpsteer3_data_processor,
+        "kd_data_processor": kd_data_processor,
         "math_data_processor": math_data_processor,
         "math_hf_data_processor": math_hf_data_processor,
-        "math_gdpo_data_processor": math_gdpo_data_processor,
         "multichoice_qa_processor": multichoice_qa_processor,
         "sft_processor": sft_processor,
         "vlm_hf_data_processor": vlm_hf_data_processor,
         "nemo_gym_data_processor": nemo_gym_data_processor,
+        "mmididx_grpo_data_processor": mmididx_grpo_data_processor,
     },
 )
 

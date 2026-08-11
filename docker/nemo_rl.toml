@@ -1,5 +1,4 @@
-# NOTE: keep mounts/annotations/env in sync with nemo_rl_apertus_gh200.toml (only `image` differs)
-image = "nvcr.io#nvidia/nemo-rl:v0.6.0"
+image = "/capstor/store/cscs/swissai/infra01/MLLM/containers/nvcr.io#nvidia+nemo-rl+v0.7.0.aarch64.sqsh"
 mounts = ["/capstor", "/iopsstor", "/users"]
 writable = true
 workdir = "/opt/nemo-rl"

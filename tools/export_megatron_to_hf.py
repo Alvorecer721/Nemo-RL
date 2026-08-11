@@ -1,4 +1,17 @@
 #!/usr/bin/env python
+# Copyright (c) 2026, the Apertus project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Export a Megatron torch-dist checkpoint (NeMo-RL step_XXXX/policy/weights or
 raw Megatron-LM) to a HuggingFace checkpoint via the Megatron-Bridge mapping.
 
@@ -6,7 +19,7 @@ The export direction of the bridge was certified bit-exact (387/387 tensors,
 TP1 and TP2) on 2026-06-13; this CLI is the production wrapper around the same
 code path. Single GPU, any source parallel geometry (torch-dist re-shards).
 
-Usage (from a NeMo-RL runtime dir, e.g. the mlm-restore worktree):
+Usage (from the NeMo-RL repo root):
   uv run --locked python tools/export_megatron_to_hf.py \
       --hf-base /capstor/.../hf_checkpoints/<base model>  \
       --megatron-ckpt /path/to/step_1921/policy/weights   \
@@ -51,11 +64,11 @@ def main() -> None:
     bridge = AutoBridge.from_hf_pretrained(args.hf_base, trust_remote_code=True)
     models = bridge.load_megatron_model(args.megatron_ckpt, wrap_with_ddp=False)
 
-    # The bridge exports trainable params plus the Apertus xIELU beta/eps
-    # buffers (via the refit-emit override); the loop below backfills any
-    # remaining base-only tensors from the checkpoint. save_hf_pretrained's
+    # The bridge exports trainable parameters only; non-trainable buffers
+    # (Apertus xIELU beta/eps) come from the base checkpoint — the same
+    # constants-from-disk rule as the vLLM refit fix. save_hf_pretrained's
     # shard writer refuses incomplete shards, so we assemble and write the
-    # full state dict ourselves as a single safetensors file.
+    # full 451-tensor state dict ourselves as a single safetensors file.
     import json
     from safetensors import safe_open
     from safetensors.torch import save_file

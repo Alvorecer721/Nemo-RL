@@ -13,6 +13,7 @@
 # limitations under the License.
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -48,7 +49,8 @@ def test_init_tmp_checkpoint(checkpoint_manager, checkpoint_dir):
     # Test creating a new checkpoint
     step = 1
     training_info = {"loss": 0.5, "tensor": torch.tensor(0.5), "numpy": np.array(0.5)}
-    run_config = {"model": "test"}
+    run_config = MagicMock()
+    run_config.model_dump.return_value = {"model": "test"}
 
     save_dir = checkpoint_manager.init_tmp_checkpoint(step, training_info, run_config)
 
@@ -66,7 +68,7 @@ def test_init_tmp_checkpoint(checkpoint_manager, checkpoint_dir):
     # Check if config was saved
     with open(save_dir / "config.yaml", "r") as f:
         saved_config = yaml.safe_load(f)
-        assert saved_config == run_config
+        assert saved_config == run_config.model_dump()
 
 
 def test_finalize_checkpoint(checkpoint_manager, checkpoint_dir):
@@ -362,7 +364,10 @@ def test_save_optimizer_flag_initialization(checkpoint_config):
     assert manager.save_optimizer is False
 
 
-def test_get_resume_paths_missing_optimizer(checkpoint_manager, checkpoint_dir):
+@pytest.mark.parametrize("model_component", ["policy", "value"])
+def test_get_resume_paths_missing_optimizer(
+    checkpoint_manager, checkpoint_dir, model_component
+):
     # Create a checkpoint
     step = 1
     training_info = {"loss": 0.5}
@@ -371,14 +376,77 @@ def test_get_resume_paths_missing_optimizer(checkpoint_manager, checkpoint_dir):
 
     # Create checkpoint structure with weights but no optimizer (simulates save_optimizer=False)
     checkpoint_path = checkpoint_dir / f"step_{step}"
-    (checkpoint_path / "policy" / "weights").mkdir(parents=True)
+    expected_weights_path = checkpoint_path / model_component / "weights"
+    expected_weights_path.mkdir(parents=True)
 
     # Get resume paths
-    weights_path, optimizer_path = checkpoint_manager.get_resume_paths(checkpoint_path)
+    with pytest.warns(UserWarning, match="Optimizer state not found"):
+        weights_path, optimizer_path = checkpoint_manager.get_resume_paths(
+            checkpoint_path,
+            model_component=model_component,
+        )
 
     # Verify weights path is returned but optimizer path is None
-    assert weights_path is not None
+    assert weights_path == expected_weights_path
     assert optimizer_path is None
+
+
+@pytest.mark.parametrize("model_component", ["policy", "value"])
+def test_get_resume_paths_separate_optimizer(checkpoint_dir, model_component):
+    """DTensor checkpoints use a physical optimizer directory."""
+    checkpoint_path = checkpoint_dir / "step_1"
+    expected_weights_path = checkpoint_path / model_component / "weights"
+    expected_optimizer_path = checkpoint_path / model_component / "optimizer"
+    expected_weights_path.mkdir(parents=True)
+    expected_optimizer_path.mkdir()
+
+    weights_path, optimizer_path = CheckpointManager.get_resume_paths(
+        checkpoint_path,
+        model_component=model_component,
+    )
+
+    assert weights_path == expected_weights_path
+    assert optimizer_path == expected_optimizer_path
+
+
+def test_get_resume_paths_defaults_to_policy(checkpoint_dir):
+    """Existing one-argument callers continue to resolve the policy subtree."""
+    checkpoint_path = checkpoint_dir / "step_1"
+    expected_weights_path = checkpoint_path / "policy" / "weights"
+    expected_optimizer_path = checkpoint_path / "policy" / "optimizer"
+    expected_weights_path.mkdir(parents=True)
+    expected_optimizer_path.mkdir()
+
+    weights_path, optimizer_path = CheckpointManager.get_resume_paths(checkpoint_path)
+
+    assert weights_path == expected_weights_path
+    assert optimizer_path == expected_optimizer_path
+
+
+@pytest.mark.parametrize("model_component", ["policy", "value"])
+def test_get_resume_paths_embedded_megatron_optimizer(checkpoint_dir, model_component):
+    """MCore uses a nonexistent optimizer path as an embedded-state load flag."""
+    checkpoint_path = checkpoint_dir / "step_1"
+    expected_weights_path = checkpoint_path / model_component / "weights"
+    common_pt_path = expected_weights_path / "iter_0000000" / "common.pt"
+    common_pt_path.parent.mkdir(parents=True)
+    torch.save(
+        {
+            "optimizer": {"state": {}},
+            "opt_param_scheduler": {"num_steps": 8},
+        },
+        common_pt_path,
+    )
+    expected_optimizer_path = checkpoint_path / model_component / "optimizer"
+    assert not expected_optimizer_path.exists()
+
+    weights_path, optimizer_path = CheckpointManager.get_resume_paths(
+        checkpoint_path,
+        model_component=model_component,
+    )
+
+    assert weights_path == expected_weights_path
+    assert optimizer_path == expected_optimizer_path
 
 
 def test_get_best_checkpoint_path_no_checkpoints(checkpoint_manager, checkpoint_dir):

@@ -28,24 +28,16 @@ fi
 # owns the cluster only. gbs is config-level: 1 node executes the identical
 # training math as N nodes (DP width changes, updates do not).
 ###############################################################################
-# Run from the repo root (`cd <repo> && sbatch <this>`) or use `sbatch --chdir=<repo> <this>`; REPO_DIR defaults to $PWD, where the relative #SBATCH logs/ also land (run `mkdir -p logs` first).
+# Run from the repo root (`cd <repo> && sbatch <this>`) or anywhere with `sbatch --chdir=<repo> <this>`;
+# the relative #SBATCH logs/ paths land in the same workdir.
 REPO_DIR=${REPO_DIR:-$PWD}
-# NeMo-RL runtime: image default, or a filesystem worktree (validated branch
-# checkout) to run changed core/lock without rebuilding the image.
-RUNTIME_DIR=${RUNTIME_DIR:-/opt/nemo-rl}
+# NeMo-RL runtime: this checkout by default (Apertus deltas + bridge pin);
+# set /opt/nemo-rl to run the image's stock tree instead.
+RUNTIME_DIR=${RUNTIME_DIR:-$REPO_DIR}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
-# Anchor checkpoints + NeMo-RL logs to the persistent REPO_DIR. The recipe's
-# checkpoint_dir/log_dir are relative, so they resolve against the driver's CWD
-# — which is RUNTIME_DIR (default /opt/nemo-rl, the container's ephemeral
-# overlay; see `cd "$RUNTIME_DIR"` below) and would be discarded at job end,
-# breaking auto-resume. Override via CHECKPOINT_DIR/LOG_DIR.
-CHECKPOINT_DIR=${CHECKPOINT_DIR:-$REPO_DIR/results/dpo-apertus1p5-8b-maxmin}
-LOG_DIR=${LOG_DIR:-$REPO_DIR/logs/dpo-apertus1p5-8b-maxmin}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-0.1.1-cp313}
-# Opt-in worker-venv rebuild — pass on EVERY stock-image run when RUNTIME_DIR's uv.lock diverges from the baked venvs: the rebuild lands in /opt/ray_venvs (the container's ephemeral overlay) and does NOT persist (else the worker's numpy fails to load libscipy_openblas). Default off; `sbatch --export=ALL,NRL_FORCE_REBUILD_VENVS=true ...`. See infra/slurm/cscs/README.md (incl. NEMO_RL_VENV_DIR for real reuse).
-NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-false}
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}
 
 FULL_SET=/capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-FD-nemo-rl-binpref-full/train.parquet
 SRC_SET=/capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-Filtered-Decontaminated
@@ -61,14 +53,27 @@ srun \
     set -euo pipefail
     export PYTHONUNBUFFERED=1
     export HF_HOME=/iopsstor/scratch/cscs/${USER}/.cache/huggingface
-    export PYTHONPATH="'"$BRIDGE_ROOT"'/src:'"$XIELU_SITE"'"
-    export NRL_FORCE_REBUILD_VENVS='"$NRL_FORCE_REBUILD_VENVS"'
+    export PYTHONPATH="'"$REPO_DIR"':'"$BRIDGE_ROOT"'/src:'"$XIELU_SITE"'"
+    # Persist the project + worker venvs on capstor (skip for the image tree,
+    # whose /opt venvs are prebaked): the image defaults both to container-overlay
+    # paths that die with the job, forcing a rebuild every run.
+    # Call the uv shipped in the image (uv cache buckets are version-specific).
+    UV=${UV:-/root/.local/bin/uv}
+    if [ "'"$RUNTIME_DIR"'" != /opt/nemo-rl ]; then
+      # Team uv cache on capstor (complete for the release lock; see fixgate launcher).
+      export UV_CACHE_DIR=${UV_CACHE_DIR:-/capstor/store/cscs/swissai/infra01/MLLM/uv-cache}
+      # uv progress rendering has SIGPIPEd (exit 141) against the Slurm output stream
+      # right after large first-time installs; plain log lines are enough here.
+      export UV_NO_PROGRESS=1
+      export UV_PROJECT_ENVIRONMENT="'"$RUNTIME_DIR"'/.venv"
+      export NEMO_RL_VENV_DIR="'"$RUNTIME_DIR"'/venvs"
+    fi
     cd "'"$RUNTIME_DIR"'"
 
     # Prologue: full-set parquet (all 245,898 pairs, reference data parity).
     if [ ! -f "'"$FULL_SET"'" ]; then
       echo "=== building full-set train parquet ==="
-      uv run --locked python - <<PYEOF
+      "$UV" run --locked python - <<PYEOF
 from datasets import load_from_disk
 from pathlib import Path
 ds = load_from_disk("'"$SRC_SET"'")["train_split"]
@@ -84,7 +89,6 @@ PYEOF
     fi
 
     echo "=== DPO training: $(basename "'"$RECIPE"'") ==="
-    uv run --locked examples/run_dpo.py --config "'"$RECIPE"'" \
-      checkpointing.checkpoint_dir="'"$CHECKPOINT_DIR"'" logger.log_dir="'"$LOG_DIR"'"
+    "$UV" run --locked --extra mcore examples/run_dpo.py --config "'"$RECIPE"'"
   '
 echo "END TIME: $(date)"

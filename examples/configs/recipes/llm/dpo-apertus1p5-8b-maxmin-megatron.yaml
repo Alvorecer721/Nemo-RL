@@ -34,12 +34,15 @@ data:
     split: train
   validation:
     dataset_name: BinaryPreferenceDataset
-    data_path: /capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-FD-nemo-rl-binpref/validation
-    split: null
+    # DatasetDict root (save_to_disk): the inherited `split: validation` selects
+    # the split; pointing at the validation/ subdir loads a splitless Dataset
+    # and the split lookup degenerates into a column lookup and fails.
+    data_path: /capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-FD-nemo-rl-binpref
+    split: validation
 policy:
   model_name: /capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200  # pragma: allowlist secret
   tokenizer:
-    name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/apertus_emu3.5_wavtok_instruct_thinking_token_fixed.snapshot-20260611
+    name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official
   train_global_batch_size: 128
   train_micro_batch_size: 1
   max_total_sequence_length: 4096
@@ -49,6 +52,16 @@ policy:
   dtensor_cfg:
     enabled: false
   megatron_cfg:
+    # Fused final-linear + CE/logprob: never materializes the 266,752-wide
+    # logits (the largest activation at this vocab; ~0.5 MB/token in bf16).
+    use_linear_ce_fusion_loss: true
+    linear_ce_fusion_chunk_size: 256
+    # Upstream #2833 (f2ab62c20): the fused forward reads output_layer.weight
+    # without calling output_layer.forward(), which leaves a stale
+    # param_gather_handle in the distributed-optimizer prefetch chain and can
+    # assert on a later iteration; disable the overlap while fusion is on.
+    distributed_data_parallel_config:
+      overlap_param_gather: false
     enabled: true
     tensor_model_parallel_size: 2
     sequence_parallel: false

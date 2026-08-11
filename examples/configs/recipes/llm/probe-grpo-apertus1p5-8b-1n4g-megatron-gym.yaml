@@ -32,10 +32,11 @@ data:
   num_workers: 0
   train:
     dataset_name: NemoGymDataset
-    data_path: 3rdparty/Gym-workspace/Gym/resources_servers/math_with_judge/data/example_agent.jsonl   # committed smoke fixture; each row carries its own agent_ref
+    data_path: examples/nemo_gym/apertus/math_with_judge_example_agent.jsonl   # committed smoke fixture; each row carries its own agent_ref
+    repeat: 8
     split_validation_size: null
   validation:
-    data_path: 3rdparty/Gym-workspace/Gym/resources_servers/math_with_judge/data/example_agent.jsonl
+    data_path: examples/nemo_gym/apertus/math_with_judge_example_agent.jsonl
   default:
     dataset_name: NemoGymDataset
     env_name: nemo_gym
@@ -66,4 +67,4 @@ env:
               enable_thinking: false
 
 logger:
-  log_dir: /iopsstor/scratch/cscs/xyixuan/apertus/Nemo-RL/logs/grpo-apertus-gym
+  log_dir: logs/grpo-apertus-gym
