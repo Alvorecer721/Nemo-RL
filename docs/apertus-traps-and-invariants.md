@@ -69,11 +69,9 @@ Historical (v0.6.0-era) probe harnesses live in `nemo-rl-worktrees/v060-online-d
 
 ## 8. vLLM compile-cache is blind to kernel presence  ⚠ dormant since the generation-side kernel removal
 
-vLLM caches compiled graphs under a key that does not record which xIELU implementation
-was importable at trace time; the resolved implementation is frozen *inside* the artifact.
-Both poisoning directions occurred: kernel-equipped runs silently executed cached graphs
-with Python xIELU inlined (the retracted "+27%" was measured on such a run), and a
-kernel-free run can load graphs referencing a custom op its process cannot resolve.
+vLLM caches compiled graphs under a key blind to which xIELU implementation was
+importable at trace time; both poisoning directions occurred (full mechanics and the
+"+27%" autopsy: `docs/apertus-xielu.md`).
 
 - **Rule**: purge `~/.cache/vllm*/torch_compile_cache` at every kernel-presence boundary.
   Dormant while generation stays kernel-free (homogeneous caches); re-arms instantly if
@@ -83,12 +81,10 @@ kernel-free run can load graphs referencing a custom op its process cannot resol
 
 ## 9. vLLM throughput snapshots measure duty cycle, not speed  ⚠ permanent metric trap
 
-`Avg generation throughput: N tokens/s` lines divide tokens by the wall-clock window
-since the previous stats print — in a colocated loop (~26% generation duty cycle) the
-windows span sleep/training time, under-reporting burst speed (~4,000 tok/s aggregate)
-by up to 10× and mostly encoding print-timing alignment. Cross-run comparisons of these
-lines produced the entire false "+27%" episode: the real delta was compile-cache warmth
-(119 s vs 77 s first steps) diluting windows differently across a 3-step run.
+`Avg generation throughput: N tokens/s` lines average over wall-clock windows that
+span sleep/training time, so they encode duty cycle and print alignment, not burst
+speed; cross-run comparison of them produced the false "+27%" (full autopsy:
+`docs/apertus-xielu.md`).
 
 - **Rule**: never compare snapshot tok/s across runs. Throughput claims come from the
   per-step `generation:` phase timer normalized by `Mean Generation Length`
@@ -101,7 +97,8 @@ arrives unset, so `${VAR:-default}` applies the default. An "arm without the ker
 submitted this way ran *with* the kernel and reported plausible numbers; only an in-log
 attestation (`grep -c 'Using experimental xIELU CUDA'`) exposed it.
 
-- **Rule**: to force an empty/absent path, point the variable at an existing empty
-  directory (see `infra/slurm/cscs/bench/xielu_ab.slurm`), and have every experiment arm print
-  its own configuration attestation into its log. Intended configuration proves nothing;
-  logs attest actual configuration.
+- **Rule**: to force an empty/absent path through sbatch, point the variable at an
+  existing empty directory rather than passing an empty value — and have every
+  experiment arm print its own configuration attestation into its log (the shared
+  runner in `infra/slurm/cscs/bench/arm_lib.sh` does both legs). Intended
+  configuration proves nothing; logs attest actual configuration.

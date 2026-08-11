@@ -24,6 +24,9 @@ EDF=$REPO_DIR/logs/imgbench/nemo_rl_$VARIANT.toml
 IMG=$(sed -n 's/^image = "\(.*\)"/\1/p' "$EDF")
 echo "variant=$VARIANT node=$(hostname) img=$IMG"
 
+# NOTE: this dd warms the page cache for the first 8 GiB before the container
+# mount below, so the "cold" mount timing is partially warmed. Fine for the A/B
+# (both variants share the bias); move the dd after the mount for absolute numbers.
 echo "== raw sequential read (first 8 GiB, cold on this node) =="
 dd if="$IMG" of=/dev/null bs=64M count=128 2>&1 | tail -1
 

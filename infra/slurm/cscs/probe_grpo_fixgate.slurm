@@ -22,7 +22,10 @@ set -euo pipefail
 REPO_DIR=${REPO_DIR:-$PWD}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
-XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}  # CUDA xielu kernel for the TRAINING side (Megatron workers); vLLM generation deliberately runs its fused-Python xIELU (measured tie, see docs/apertus-xielu.md)
+XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}  # CUDA xielu kernel for the TRAINING side; see docs/apertus-xielu.md
+# Benchmarks only: set VLLM_XIELU_SITE to inject the kernel into vLLM generation,
+# overriding the recipe-level kernel-free default (bench/xielu_ab.slurm's kernel arm).
+VLLM_XIELU_SITE=${VLLM_XIELU_SITE:-}
 RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron.yaml}
 # NeMo-Gym recipes must run the dedicated runner (it binds task_to_env to the
 # gym actor); everything else uses the stock GRPO entry point.
@@ -47,7 +50,7 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     set -euo pipefail
     export PYTHONUNBUFFERED=1
     export HF_HOME=\${HF_HOME:-/iopsstor/scratch/cscs/\${USER}/.cache/huggingface}
-    export PYTHONPATH=$REPO_DIR:$BRIDGE_ROOT/src${XIELU_SITE:+:$XIELU_SITE}
+    export PYTHONPATH=$REPO_DIR:$BRIDGE_ROOT/src:$XIELU_SITE
     # Persist the project + worker venvs on capstor: the image defaults both to
     # container-overlay paths that die with the job, forcing a rebuild every run.
     # Team uv cache on capstor, seeded from the image cache (complete for the
@@ -63,13 +66,8 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     cd $REPO_DIR
     # Apertus runtime guard: fail loud if nemo_rl is the stock /opt copy rather than this checkout (online GRPO otherwise silently regresses to gen-KL ~0.79).
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'
-    # vLLM workers inherit the driver env, and the driver PYTHONPATH carries
-    # XIELU_SITE for the Megatron workers — blank it for generation explicitly,
-    # or the kernel leaks back into vLLM (its stock forward then crashes fresh
-    # compiles; the tie measurement is in docs/apertus-xielu.md).
     "$UV" run --locked --extra mcore python $RUN_SCRIPT --config $RECIPE \
       grpo.max_num_steps=$MAX_STEPS \
-      policy.generation.vllm_cfg.gpu_memory_utilization=0.40 \
-      +policy.generation.vllm_cfg.env_vars.PYTHONPATH=
+      policy.generation.vllm_cfg.gpu_memory_utilization=0.40 ${VLLM_XIELU_SITE:+policy.generation.vllm_cfg.env_vars.PYTHONPATH=$VLLM_XIELU_SITE}
   "
 echo "END TIME: $(date)"

@@ -14,31 +14,20 @@
 
 # Paired same-node A/B: fused-Python xIELU vs the CUDA custom op in vLLM
 # generation. Cross-run tok/s on 3-step probes spans 102-272 for the SAME
-# config (node + day variance), so only a same-node paired design can
-# resolve an activation-sized effect. 15 steps per arm, compile cache purged
-# before each so both arms trace fresh; python arm first so its graphs can
-# never be loaded by the kernel arm (the cache key is blind to kernel
-# presence).
+# config (node + day variance), so only a same-node paired design can resolve
+# an activation-sized effect. 15 steps per arm; both arms trace fresh (the
+# shared runner purges the compile cache first, since its key is blind to
+# kernel presence — trap 8); python arm first so its graphs can never be
+# loaded by the kernel arm. The kernel arm injects the kernel into generation
+# via VLLM_XIELU_SITE, overriding the recipe-level kernel-free default.
+# Verdict from the original runs (jobs 3045293/3045454): a tie — see
+# docs/apertus-xielu.md.
 set -euo pipefail
 echo "START $(date) node=$(hostname)"
 REPO_DIR=${REPO_DIR:-$PWD}
-EMPTY_SITE=$REPO_DIR/logs/imgbench/empty-site
-mkdir -p "$EMPTY_SITE"
+source "$REPO_DIR/infra/slurm/cscs/bench/arm_lib.sh"
 
-run_arm () {
-  local arm=$1 site=$2
-  local log=$REPO_DIR/logs/imgbench/arm_${arm}_${SLURM_JOB_ID}.log
-  rm -rf $HOME/.cache/vllm*/torch_compile_cache
-  echo "=== ARM $arm (XIELU_SITE=$site) $(date) ==="
-  ( export REPO_DIR XIELU_SITE=$site MAX_STEPS=15
-    source "$REPO_DIR/infra/slurm/cscs/probe_grpo_fixgate.slurm" ) > "$log" 2>&1
-  echo "--- ARM $arm results (log: $log)"
-  grep -oE 'Generation KL Error: [0-9.]+' "$log" | tail -3
-  grep -oE '[0-9]+\.?[0-9]* tokens/s' "$log" | tr '\n' ' '; echo
-  echo "kernel-detected: $(grep -ic 'using experimental xielu cuda' "$log" || true)"
-}
-
-run_arm python "$EMPTY_SITE"
-run_arm kernel /capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current
-rm -rf $HOME/.cache/vllm*/torch_compile_cache
+run_arm python "" MAX_STEPS=15
+run_arm kernel /capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current MAX_STEPS=15
+purge_vllm_compile_cache
 echo "END $(date)"

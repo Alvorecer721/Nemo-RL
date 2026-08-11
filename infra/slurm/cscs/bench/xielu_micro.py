@@ -3,6 +3,10 @@ import torch
 torch.manual_seed(0)
 dev = "cuda"
 
+# Mirrors the production formulas by hand: the bridge's compiled_xielu
+# (megatron/bridge/models/apertus/xielu_activation.py) is @jit_fuser-wrapped so
+# its eager form cannot be imported, and vLLM's _xielu_python is a method. If
+# either changes, update this copy or the microbenchmark measures a stale op.
 def xielu_python(x, alpha_p, alpha_n, beta, eps):
     ap = torch.nn.functional.softplus(alpha_p)
     an = beta + torch.nn.functional.softplus(alpha_n)
