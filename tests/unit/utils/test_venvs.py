@@ -59,9 +59,11 @@ def _fake_uv(venv_dir):
     return run
 
 
-def _mark_ready(venv: Path) -> None:
+def _mark_ready(venv: Path, py_executable: str = "uv run --locked") -> None:
     """Mark a venv ready the way a completed build does."""
-    (venv / VENV_READY_MARKER).write_text(venvs_module._dependency_fingerprint())
+    (venv / VENV_READY_MARKER).write_text(
+        venvs_module._dependency_fingerprint(py_executable)
+    )
 
 
 def test_create_local_venv_marks_ready_only_after_success(tmp_path):
@@ -206,7 +208,7 @@ def test_marker_records_the_dependency_fingerprint(tmp_path, project_dependencie
         create_local_venv("uv run --locked", "demo.Worker")
 
     marker = tmp_path / "demo.Worker" / VENV_READY_MARKER
-    assert marker.read_text() == venvs_module._dependency_fingerprint()
+    assert marker.read_text() == venvs_module._dependency_fingerprint("uv run --locked")
 
 
 def test_env_builder_rebuilds_when_dependencies_change(tmp_path, project_dependencies):
@@ -224,7 +226,31 @@ def test_env_builder_rebuilds_when_dependencies_change(tmp_path, project_depende
 
     rebuilt_from = (venv / VENV_READY_MARKER).read_text()
     assert rebuilt_from != built_from
-    assert rebuilt_from == venvs_module._dependency_fingerprint()
+    assert rebuilt_from == venvs_module._dependency_fingerprint("uv run --locked")
+
+
+def test_env_builder_rebuilds_when_worker_command_changes(
+    tmp_path, project_dependencies
+):
+    venv = tmp_path / "demo.Worker"
+    old_command = "uv run --locked --extra mcore"
+    new_command = "uv run --locked --extra vllm"
+
+    with patch.object(venvs_module.subprocess, "run", _fake_uv(tmp_path)):
+        _env_builder_fn(old_command, "demo.Worker", node_idx=0)
+        built_from = (venv / VENV_READY_MARKER).read_text()
+
+        _env_builder_fn(new_command, "demo.Worker", node_idx=0)
+
+    rebuilt_from = (venv / VENV_READY_MARKER).read_text()
+    assert rebuilt_from != built_from
+    assert rebuilt_from == venvs_module._dependency_fingerprint(new_command)
+
+
+def test_dependency_fingerprint_normalizes_worker_command(project_dependencies):
+    assert venvs_module._dependency_fingerprint(
+        "uv  run --locked  --extra vllm"
+    ) == venvs_module._dependency_fingerprint("uv run --locked --extra vllm")
 
 
 def test_waiter_rejects_a_venv_built_from_other_dependencies(
