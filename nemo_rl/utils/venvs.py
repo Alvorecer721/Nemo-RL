@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=None)
-def _dependency_fingerprint() -> str:
+def _dependency_fingerprint(py_executable: str) -> str:
     """Digest the inputs a worker venv resolves from.
 
     `uv run --locked` re-syncs the driver's environment only; worker venvs are
@@ -51,28 +51,38 @@ def _dependency_fingerprint() -> str:
     0.20 -> 0.25 bump, generation workers kept importing 0.20 until 0.25-only
     code failed at refit). `pyproject.toml` is digested alongside `uv.lock`
     because `[tool.uv]` build settings change the installed environment without
-    changing the resolution.
+    changing the resolution. The normalized worker command is part of the
+    fingerprint because it selects the environment's extras; two actors can
+    share the same lockfile while requiring different installed packages.
     """
     digest = hashlib.sha256()
+    digest.update(b"py_executable\0")
+    digest.update(shlex.join(shlex.split(py_executable)).encode())
+    digest.update(b"\0")
     for name in ("uv.lock", "pyproject.toml"):
         path = Path(git_root) / name
         if path.exists():
+            digest.update(name.encode())
+            digest.update(b"\0")
             digest.update(path.read_bytes())
+            digest.update(b"\0")
     return digest.hexdigest()
 
 
-def _mark_venv_ready(ready_marker: Path) -> None:
+def _mark_venv_ready(ready_marker: Path, py_executable: str) -> None:
     # Written via rename so a concurrent reader never sees a half-written
     # fingerprint and rebuilds a venv that is actually current.
     tmp = ready_marker.with_name(f"{ready_marker.name}.{os.getpid()}.tmp")
-    tmp.write_text(_dependency_fingerprint())
+    tmp.write_text(_dependency_fingerprint(py_executable))
     os.replace(tmp, ready_marker)
 
 
-def venv_is_current(ready_marker: Path) -> bool:
+def venv_is_current(ready_marker: Path, py_executable: str) -> bool:
     """Whether a venv is both ready and built from the current dependencies."""
     try:
-        return ready_marker.read_text().strip() == _dependency_fingerprint()
+        return ready_marker.read_text().strip() == _dependency_fingerprint(
+            py_executable
+        )
     except OSError:
         return False
 
@@ -155,7 +165,7 @@ def create_local_venv(
     subprocess.run([uv, "sync", "--directory", git_root], env=env, check=True)
     subprocess.run(exec_cmd, env=env, check=True)
 
-    _mark_venv_ready(ready_marker)
+    _mark_venv_ready(ready_marker, py_executable)
 
     # Return the path to the python executable in the virtual environment
     python_path = os.path.join(venv_path, "bin", "python")
@@ -179,12 +189,12 @@ def _env_builder(
 
     # Skip early return if force_rebuild is True
     if not force_rebuild and python_path.exists() and ready_marker.exists():
-        if venv_is_current(ready_marker):
+        if venv_is_current(ready_marker, py_executable):
             logger.info(f"Using existing venv at {venv_path}")
             return str(python_path)
         logger.info(
             f"Rebuilding venv at {venv_path}: it was built from different "
-            f"dependencies (uv.lock/pyproject.toml changed since)"
+            f"dependencies or worker command"
         )
 
     # Sleep to stagger node startup
@@ -224,20 +234,23 @@ def _env_builder(
         )
         deadline = time.monotonic() + build_timeout
         while time.monotonic() < deadline:
-            if venv_is_current(ready_marker) and python_path.exists():
+            if venv_is_current(ready_marker, py_executable) and python_path.exists():
                 return str(python_path)
             if not started_file.exists():
                 # The builder writes the marker and then unlinks the claim;
                 # observing the unlink first is a benign race, so give the
                 # marker one more poll before declaring the build dead.
                 time.sleep(1)
-                if venv_is_current(ready_marker) and python_path.exists():
+                if (
+                    venv_is_current(ready_marker, py_executable)
+                    and python_path.exists()
+                ):
                     return str(python_path)
                 if ready_marker.exists():
                     raise RuntimeError(
                         f"The builder of venv {venv_path} completed against "
-                        f"different dependencies than this job's uv.lock/"
-                        f"pyproject.toml. Concurrent jobs must not share "
+                        f"different dependencies or worker command than this "
+                        f"job. Concurrent jobs must not share "
                         f"NEMO_RL_VENV_DIR across a dependency change; let one "
                         f"job settle the venvs first."
                     )
