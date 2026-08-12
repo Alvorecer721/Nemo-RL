@@ -166,12 +166,20 @@ its dirty suffix) added three lessons before being parked:
   session, so a build cannot be driven from inside a CE container; run it via
   `sbatch`, or an `srun` step with no `--environment`.
 
-With those cleared, builds still exited without a message shortly after the
-`custom-setup` stage, and a host-side run failed earlier still with `conmon
-exited prematurely`, which points at rootless Podman state on a node that has
-served many interrupted builds. Retry on a fresh allocation. The delivered
-image above remains the certified artifact; only its provenance suffix is
-affected.
+With those cleared, the blocker is the user session rather than the launcher.
+A batch step has no logind session, so rootless Podman warns `Failed to add
+pause process to systemd sandbox cgroup: dial unix /run/user/<uid>/bus`, and
+although the registry container reports `listening on [::]:5000`, the
+readiness probe never reaches it and the build stops before its first stage.
+Providing `XDG_RUNTIME_DIR` is necessary but not sufficient: the socket that
+rootless port publishing wants comes with the session, not the directory.
+Until that is solved, build the image the way every successful build was
+produced — from an interactive allocation with a real user session, running on
+the compute node host rather than inside a Container Engine container.
+
+The delivered image above remains the certified artifact when used the
+certified way; see the warning under the image table for what it lacks
+standalone.
 
 ### Image validation
 
