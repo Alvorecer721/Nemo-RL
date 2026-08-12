@@ -100,12 +100,12 @@ RUN GITHUB_ARTIFACTORY=github.com \
     && CMAKE_VERSION=4.0.3 \
     && ARCH=$(uname -m) \
     && CMAKE_INSTALLER="cmake-${CMAKE_VERSION}-linux-${ARCH}" \
-    && curl --retry 3 --retry-delay 2 -fsSL -o "${CMAKE_INSTALLER}.tar.gz" \
+    && CMAKE_ARCHIVE="/tmp/${CMAKE_INSTALLER}.tar.gz" \
+    && curl --retry 3 --retry-delay 2 -fsSL -o "${CMAKE_ARCHIVE}" \
         "https://${GITHUB_ARTIFACTORY}/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_INSTALLER}.tar.gz" \
-    && tar -xzf "${CMAKE_INSTALLER}.tar.gz" \
-    && cp -r "${CMAKE_INSTALLER}/bin/"* /usr/local/bin/ \
-    && cp -r "${CMAKE_INSTALLER}/share/"* /usr/local/share/ \
-    && rm -rf "${CMAKE_INSTALLER}" "${CMAKE_INSTALLER}.tar.gz"
+    && tar -xzf "${CMAKE_ARCHIVE}" -C /usr/local --strip-components=1 \
+        "${CMAKE_INSTALLER}/bin" "${CMAKE_INSTALLER}/share" \
+    && rm -f "${CMAKE_ARCHIVE}"
 
 # Install uv and python
 ARG UV_VERSION=0.11.28
@@ -226,6 +226,8 @@ UV_LINK_MODE=hardlink uv sync --frozen --no-install-project
 if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
     UV_LINK_MODE=hardlink uv sync --frozen --extra vllm --no-install-project
 fi
+EOF
+RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
     UV_LINK_MODE=hardlink uv sync --frozen --extra sglang --no-install-project
 fi
@@ -238,6 +240,8 @@ uv sync --link-mode symlink --frozen --all-groups --no-install-project
 # The ray install will include the older aiohttp version in its cache
 find /root/.cache/uv -type d -path "*ray/_private/runtime_env/agent/thirdparty_files/aiohttp*" -exec rm -rf {} +
 
+mkdir -p /root/.cache/uv
+CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}" | md5sum | cut -c1-12)
 echo "${CACHE_KEY}" > /root/.cache/uv/.cache-key
 EOF
 
@@ -385,31 +389,61 @@ EOF
 # Potentially not necessary if the repo is passed in as a complete repository (w/ full git history),
 # so do a quick check before trying to unshallow.
 RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
-ARG BASE_IMAGE
-RUN --mount=type=cache,id=trtllm-wheel-cache-${TARGETARCH}-${BASE_IMAGE},from=trtllm-wheel-cache-seed,source=.,target=/root/.cache/trtllm-wheels,sharing=locked <<"EOF" bash -exu
-NEGATIVE_FILTERS=""
-if [[ -n "${SKIP_VLLM_BUILD:-}" ]]; then
-    NEGATIVE_FILTERS="$NEGATIVE_FILTERS vllm"
-fi
-if [[ -n "${SKIP_SGLANG_BUILD:-}" ]]; then
-    NEGATIVE_FILTERS="$NEGATIVE_FILTERS sglang"
-fi
-if [[ -n "${SKIP_TRTLLM_BUILD:-}" ]]; then
-    NEGATIVE_FILTERS="$NEGATIVE_FILTERS trtllm"
-fi
-# Reuse the custom wheel produced by the hermetic stage. Normal uv artifacts
-# stay in /root/.cache/uv, which remains available to symlinked environments.
-# Mirror only the current content-addressed TRT-LLM wheel into the image so
-# runtime `uv run --extra trtllm` calls do not fall back to a source build.
-export TRTLLM_WHEEL_CACHE_DIR=/root/.cache/trtllm-wheels
-export TRTLLM_WHEEL_CACHE_MIRROR_DIR=/opt/trtllm_wheels
-export TRTLLM_REQUIRE_CACHED_WHEEL=1
-if [[ -n "$NEGATIVE_FILTERS" ]]; then
-    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py --negative-filters $NEGATIVE_FILTERS
-else
-    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py
+# Commit the frozen Ray environments in bounded groups. A single layer for all
+# workers temporarily requires Podman to hold the working tree, compressed
+# blob, and unpacked result at once, which exceeds Clariden's node-local tmpfs.
+# The larger training and utility environments are committed one actor at a
+# time: even the five-environment DTensor group exceeds the temporary space
+# available while Podman packs and then unpacks a cache layer. Positive filters
+# match actor FQNs and retain every non-system environment in the current actor
+# registry.
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
+    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py vllm
 fi
 EOF
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
+    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py sglang
+fi
+EOF
+ARG BASE_IMAGE
+RUN --mount=type=cache,id=trtllm-wheel-cache-${TARGETARCH}-${BASE_IMAGE},from=trtllm-wheel-cache-seed,source=.,target=/root/.cache/trtllm-wheels,sharing=locked <<"EOF" bash -exu
+if [[ -z "${SKIP_TRTLLM_BUILD:-}" ]]; then
+    # Reuse the custom wheel produced by the hermetic stage. Normal uv
+    # artifacts stay in /root/.cache/uv, which remains available to symlinked
+    # environments. Mirror only the current content-addressed TRT-LLM wheel so
+    # runtime `uv run --extra trtllm` calls cannot fall back to a source build.
+    export TRTLLM_WHEEL_CACHE_DIR=/root/.cache/trtllm-wheels
+    export TRTLLM_WHEEL_CACHE_MIRROR_DIR=/opt/trtllm_wheels
+    export TRTLLM_REQUIRE_CACHED_WHEEL=1
+    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py trtllm
+fi
+EOF
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    dtensor_policy_worker.DTensorPolicyWorker
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    dtensor_policy_worker_v2.DTensorPolicyWorkerV2
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    dtensor_value_worker_v2.DTensorValueWorkerV2
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    dtensor_quant_policy_worker.DTensorQuantPolicyWorker
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    megatron_policy_worker.MegatronPolicyWorker
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    megatron_value_worker.MegatronValueWorker
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    megatron_quant_policy_worker.MegatronQuantPolicyWorker
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    async_utils.AsyncTrajectoryCollector
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    async_utils.ReplayBuffer
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    sync_rollout_actor.SyncRolloutActor
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    nemo_gym.NemoGym
 
 # Prefetch NeMo Gym internal venvs (gym servers like code_gen, math_with_judge, etc.)
 # into the image. Gated on NEMO_GYM_PREFETCH_CONFIGS (no-op by default). Runs after the
