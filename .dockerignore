@@ -7,7 +7,7 @@
 *.log
 *.tar
 *.tar.gz
-.venv
+.venv*
 venv
 venvs
 __pycache__/
