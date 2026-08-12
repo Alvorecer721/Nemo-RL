@@ -53,3 +53,10 @@ tests/unit/unit_results.json
 tests/unit/unit_results/
 logs/
 xielu-builds/
+
+# Local recovery and crash artifacts
+/.tmp/
+/core_nid*
+
+# Machine-local EDF for the custom image produced by the CSCS builder
+/docker/nemo_rl_vllm0251.toml

@@ -82,12 +82,12 @@ RUN GITHUB_ARTIFACTORY=github.com \
     && CMAKE_VERSION=3.31.1 \
     && ARCH=$(uname -m) \
     && CMAKE_INSTALLER="cmake-${CMAKE_VERSION}-linux-${ARCH}" \
-    && curl --retry 3 --retry-delay 2 -fsSL -o "${CMAKE_INSTALLER}.tar.gz" \
+    && CMAKE_ARCHIVE="/tmp/${CMAKE_INSTALLER}.tar.gz" \
+    && curl --retry 3 --retry-delay 2 -fsSL -o "${CMAKE_ARCHIVE}" \
         "https://${GITHUB_ARTIFACTORY}/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_INSTALLER}.tar.gz" \
-    && tar -xzf "${CMAKE_INSTALLER}.tar.gz" \
-    && cp -r "${CMAKE_INSTALLER}/bin/"* /usr/local/bin/ \
-    && cp -r "${CMAKE_INSTALLER}/share/"* /usr/local/share/ \
-    && rm -rf "${CMAKE_INSTALLER}" "${CMAKE_INSTALLER}.tar.gz"
+    && tar -xzf "${CMAKE_ARCHIVE}" -C /usr/local --strip-components=1 \
+        "${CMAKE_INSTALLER}/bin" "${CMAKE_INSTALLER}/share" \
+    && rm -f "${CMAKE_ARCHIVE}"
 
 # Install uv and python
 ARG UV_VERSION=0.11.18
@@ -173,29 +173,76 @@ fi
 if [[ -n "${BUILD_CUSTOM_FLASHINFER:-}" ]]; then
     bash tools/build-custom-flashinfer.sh ${BUILD_CUSTOM_FLASHINFER_URL:-} ${BUILD_CUSTOM_FLASHINFER_REF:-}
 fi
-# uv sync has a more reliable resolver than simple uv pip install which can fail
-
-# Sync each training + inference backend one at a time (since they may conflict)
-# to warm the uv cache, then at the end just sync the default dependencies.
-# Do everything in one layer to prevent large layers.
-
-# The venv is symlinked to avoid bloating the layer size
+# Install the common environment first. Later backend-specific syncs use
+# disposable environments so their conflicting package sets warm the uv cache
+# without bloating image layers.
 UV_LINK_MODE=hardlink uv sync --locked --no-install-project
+EOF
+
+# Commit backend cache additions independently. This bounds the working-layer
+# size on builders with node-local storage and makes expensive native builds
+# (notably Transformer Engine) reusable after an interrupted build.
+RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
-    UV_LINK_MODE=hardlink uv sync --locked --extra vllm --no-install-project
+    source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
+    uv venv --seed /tmp/nemo-rl-warm-vllm
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
+        uv sync --locked --no-install-project
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
+        uv sync --locked --extra vllm --no-install-project
+    rm -rf /tmp/nemo-rl-warm-vllm
 fi
+EOF
+RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
-    UV_LINK_MODE=hardlink uv sync --locked --extra sglang --no-install-project
+    uv venv --seed /tmp/nemo-rl-warm-sglang
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
+        uv sync --locked --no-install-project
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
+        uv sync --locked --extra sglang --no-install-project
+    rm -rf /tmp/nemo-rl-warm-sglang
 fi
-uv sync --link-mode symlink --locked --extra mcore --no-install-project
-uv sync --link-mode symlink --locked --extra automodel --no-install-project
-uv sync --link-mode symlink --locked --extra modelopt --no-install-project
+EOF
+# Transformer Engine uses its own architecture list rather than
+# TORCH_CUDA_ARCH_LIST. Keep it configurable so platform launchers can avoid
+# compiling CUDA's full default architecture set.
+ARG NVTE_CUDA_ARCHS
+RUN <<"EOF" bash -exu
+uv venv --seed /tmp/nemo-rl-warm-mcore
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
+    uv sync --locked --no-install-project
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
+    uv sync --locked --extra mcore --no-install-project
+rm -rf /tmp/nemo-rl-warm-mcore
+EOF
+RUN <<"EOF" bash -exu
+uv venv --seed /tmp/nemo-rl-warm-automodel
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
+    uv sync --locked --no-install-project
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
+    uv sync --locked --extra automodel --no-install-project
+rm -rf /tmp/nemo-rl-warm-automodel
+EOF
+RUN <<"EOF" bash -exu
+uv venv --seed /tmp/nemo-rl-warm-modelopt
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
+    uv sync --locked --no-install-project
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
+    uv sync --locked --extra modelopt --no-install-project
+rm -rf /tmp/nemo-rl-warm-modelopt
+EOF
+
+# Assemble the image's actual project environment from the now-warm cache.
+RUN <<"EOF" bash -exu
+source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
 uv sync --link-mode symlink --locked --all-groups --no-install-project
 
 # Remove the aiohttp in this uv cache dir to fully address CVE GHSA-mqqc-3gqh-h2x8
 # The ray install will include the older aiohttp version in its cache
 find /root/.cache/uv -type d -path "*ray/_private/runtime_env/agent/thirdparty_files/aiohttp*" -exec rm -rf {} +
 
+mkdir -p /root/.cache/uv
+CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}" | md5sum | cut -c1-12)
 echo "${CACHE_KEY}" > /root/.cache/uv/.cache-key
 EOF
 
@@ -264,20 +311,48 @@ COPY --from=nemo-rl --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-rl
 # Potentially not necessary if the repo is passed in as a complete repository (w/ full git history),
 # so do a quick check before trying to unshallow.
 RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
+# Commit the frozen Ray environments in bounded groups. A single layer for all
+# workers temporarily requires Podman to hold the working tree, compressed
+# blob, and unpacked result at once, which exceeds Clariden's node-local tmpfs.
+# The larger training and utility environments are committed one actor at a
+# time: even the five-environment DTensor group exceeds the temporary space
+# available while Podman packs and then unpacks a cache layer. Positive filters
+# match actor FQNs and retain the same 17 environments as the original
+# all-at-once invocation.
 RUN <<"EOF" bash -exu
-NEGATIVE_FILTERS=""
-if [[ -n "${SKIP_VLLM_BUILD:-}" ]]; then
-    NEGATIVE_FILTERS="$NEGATIVE_FILTERS vllm"
-fi
-if [[ -n "${SKIP_SGLANG_BUILD:-}" ]]; then
-    NEGATIVE_FILTERS="$NEGATIVE_FILTERS sglang"
-fi
-if [[ -n "$NEGATIVE_FILTERS" ]]; then
-    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py --negative-filters $NEGATIVE_FILTERS
-else
-    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py
+if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
+    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py vllm
 fi
 EOF
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
+    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py sglang
+fi
+EOF
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    dtensor_policy_worker.DTensorPolicyWorker
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    dtensor_policy_worker_v2.DTensorPolicyWorkerV2
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    dtensor_value_worker_v2.DTensorValueWorkerV2
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    dtensor_quant_policy_worker.DTensorQuantPolicyWorker
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    megatron_policy_worker.MegatronPolicyWorker
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    megatron_value_worker.MegatronValueWorker
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    megatron_quant_policy_worker.MegatronQuantPolicyWorker
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    async_utils.AsyncTrajectoryCollector
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    async_utils.ReplayBuffer
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    sync_rollout_actor.SyncRolloutActor
+RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+    nemo_gym.NemoGym
 
 # Prefetch NeMo Gym internal venvs (gym servers like code_gen, math_with_judge, etc.)
 # into the image. Gated on NEMO_GYM_PREFETCH_CONFIGS (no-op by default). Runs after the
