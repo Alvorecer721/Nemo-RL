@@ -3,7 +3,7 @@
 # disk-load carries to the async path (gen-KL ~0.0003), the one unverified prerequisite for gym.
 # Async GRPO requires non-colocated: on 1 node this splits 2 GPUs for generation + 2 for
 # training (TP2/DP1, no host-offload), so it does NOT exercise the colocated refit/sleep_level path.
-defaults: probe-grpo-apertus1p5-8b-1n4g-megatron.yaml
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe.yaml
 
 loss_fn:
   use_importance_sampling_correction: true

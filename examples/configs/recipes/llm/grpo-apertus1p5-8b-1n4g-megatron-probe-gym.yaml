@@ -1,7 +1,7 @@
 # Single-turn NeMo-Gym GRPO smoke for Apertus 1.5 8B (math_with_judge, no judge).
 # Inherits the validated colocated probe (Apertus model/tokenizer/megatron/sleep_level=2)
 # and overlays the gym wiring: HTTP-served async vLLM + math_with_judge env + simple_agent.
-defaults: probe-grpo-apertus1p5-8b-1n4g-megatron.yaml
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe.yaml
 
 grpo:
   num_prompts_per_step: 4
