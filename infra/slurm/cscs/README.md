@@ -137,6 +137,28 @@ Historical build output is under `logs/nrl-vllm0251-image_*.{out,err}`. Direct
 step-39 recovery was an allocation-specific rescue, not the supported rebuild
 path; use `build_nemo_rl_image.slurm` for future builds.
 
+A later attempt to reproduce the image from a committed tree (so the tag drops
+its dirty suffix) added three lessons before being parked:
+
+- Batch steps have no logind session, so rootless Podman found no
+  `/run/user/<uid>` and died on `pause.pid`. The launcher now provides
+  `XDG_RUNTIME_DIR` itself, which is why earlier builds only ever worked from
+  interactive allocations.
+- An interrupted build leaves the registry lock naming a job that is still
+  alive, and the helper then refuses to start. Release it with
+  `registry down <cache-dir>` after confirming `registry status <cache-dir>`
+  reports stopped and nothing answers on port 5000.
+- Podman lives on the compute node's host, not inside the Container Engine
+  session, so a build cannot be driven from inside a CE container; run it via
+  `sbatch`, or an `srun` step with no `--environment`.
+
+With those cleared, builds still exited without a message shortly after the
+`custom-setup` stage, and a host-side run failed earlier still with `conmon
+exited prematurely`, which points at rootless Podman state on a node that has
+served many interrupted builds. Retry on a fresh allocation. The delivered
+image above remains the certified artifact; only its provenance suffix is
+affected.
+
 ### Image validation
 
 These probes use `/opt/nemo-rl` plus the frozen worker environments, so a
