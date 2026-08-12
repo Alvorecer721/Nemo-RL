@@ -334,37 +334,37 @@ RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallo
 # all-at-once invocation.
 RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
-    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py vllm
+    UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py vllm
 fi
 EOF
 RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
-    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py sglang
+    UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py sglang
 fi
 EOF
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     dtensor_policy_worker.DTensorPolicyWorker
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     dtensor_policy_worker_v2.DTensorPolicyWorkerV2
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     dtensor_value_worker_v2.DTensorValueWorkerV2
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     dtensor_quant_policy_worker.DTensorQuantPolicyWorker
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     megatron_policy_worker.MegatronPolicyWorker
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     megatron_value_worker.MegatronValueWorker
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     megatron_quant_policy_worker.MegatronQuantPolicyWorker
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     async_utils.AsyncTrajectoryCollector
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     async_utils.ReplayBuffer
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     sync_rollout_actor.SyncRolloutActor
-RUN UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py \
+RUN UV_LINK_MODE=symlink uv run --no-sync nemo_rl/utils/prefetch_venvs.py \
     nemo_gym.NemoGym
 
 # Prefetch NeMo Gym internal venvs (gym servers like code_gen, math_with_judge, etc.)
@@ -383,7 +383,7 @@ if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
         "${NEMO_GYM_VLLM_VERSION}" "${NEMO_GYM_VLLM_VERSION}" "${WHEEL_ARCH}" > "${GYM_VLLM_OVERRIDE}"
     UV_TORCH_BACKEND="${NEMO_GYM_CUDA}" \
     UV_OVERRIDE="${GYM_VLLM_OVERRIDE}" \
-    UV_LINK_MODE=symlink uv run python examples/nemo_gym/prefetch_venvs.py $NEMO_GYM_PREFETCH_CONFIGS
+    UV_LINK_MODE=symlink uv run --no-sync python examples/nemo_gym/prefetch_venvs.py $NEMO_GYM_PREFETCH_CONFIGS
     rm -f "${GYM_VLLM_OVERRIDE}"
 fi
 EOF
