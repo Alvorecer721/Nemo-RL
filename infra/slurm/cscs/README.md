@@ -92,11 +92,13 @@ builder's reported `BUILD COMPLETE` path.
 | OCI image ID | `6a97a914bfae7af4ab75d76be7ad19a7c2b193fd727fb84bd6ba606a26e00754` |
 | Persistent OCI data | `/iopsstor/scratch/cscs/xyixuan/podman-cache/nemo-rl` |
 
-The image ID suffix is `<12-char-git-revision>-<12-char-source-state-hash>`.
-The state hash covers staged and unstaged tracked changes plus the paths and
-contents of non-ignored untracked files. It identifies a dirty build but does
-not preserve its source. Commit the image changes before relying on a build as
-reconstructible source.
+The image ID suffix is `<12-char-git-revision>-<12-char-build-input-hash>`.
+Release builds reject dirty repositories and dirty recursive submodules. The
+input hash records the full source commit, recursive submodule SHAs, the pinned
+base-image manifest, and platform build arguments. The launcher copies only
+Git-tracked files while preserving metadata needed for Podman's persistent
+layer-cache identity, so ignored files and mutable `.git` metadata cannot
+enter it.
 
 ### Build and cache lifecycle
 
@@ -110,24 +112,34 @@ sbatch --chdir="$PWD" infra/slurm/cscs/build_nemo_rl_image.slurm
 ```
 
 Useful environment overrides are `SCRATCH_ROOT`, `CACHE_DIR`, `OUTPUT_DIR`,
-`LOCAL_REGISTRY_TOOL`, `REGISTRY_IMAGE_ARCHIVE`, `MAX_JOBS`,
-`NVTE_CUDA_ARCHS`, and `PODMAN_STORAGE_BASE`. The default architecture is
-arm64/GH200 and Transformer Engine is limited to `NVTE_CUDA_ARCHS=90`.
+`REGISTRY_IMAGE_ARCHIVE`, `BASE_IMAGE`, `MAX_JOBS`, `NVTE_CUDA_ARCHS`, and
+`PODMAN_STORAGE_BASE`. `HERMETIC_CACHE_TAG=rebuild` deliberately rebuilds all
+dependencies instead of resuming the pinned hermetic image. The default
+architecture is arm64/GH200, the NGC base is digest-pinned, and Transformer
+Engine is limited to `NVTE_CUDA_ARCHS=90`.
 
 The build has two different stores:
 
 - `PODMAN_STORAGE_BASE` is allocation-local overlay storage. It disappears
   with the compute node and is only working space for Podman commits.
 - `CACHE_DIR` is a Lustre-backed registry data directory. The registry process
-  and `localhost:5000` endpoint exist only while `registry up "$CACHE_DIR"` is
-  running, but its blobs, cached layers, and the final manifest survive node
-  changes. The `.sqsh` in `OUTPUT_DIR` is the delivered Container Engine image
-  and also survives the allocation.
+  and `127.0.0.1:5000` endpoint exist only during the build, but its blobs,
+  cached layers, and the final manifest survive node changes. The launcher
+  takes an automatic `flock` before writing this shared cache. The `.sqsh` in
+  `OUTPUT_DIR` is the delivered Container Engine image and also survives the
+  allocation.
 
 The launcher cleans interrupted Buildah containers before building, restores a
 pinned `registry:3` bootstrap image, waits for registry readiness, pushes the
 final OCI manifest, exports SquashFS, verifies its superblock, and checks the
 vLLM renderer/tokenizer/tool-parser import boundary.
+
+For a source-only release, the launcher verifies the current dependency
+fingerprint and resumes from the content-addressed final hermetic cache image.
+This is intentional: Podman models a named source context as a parent image,
+so any source edit otherwise invalidates the earlier dependency COPY layers.
+When dependencies change, run with `HERMETIC_CACHE_TAG=rebuild`, then replace
+the pinned tag and fingerprint with the new completed hermetic-stage values.
 
 ### Failure and recovery ledger
 
@@ -151,31 +163,24 @@ Historical build output is under `logs/nrl-vllm0251-image_*.{out,err}`. Direct
 step-39 recovery was an allocation-specific rescue, not the supported rebuild
 path; use `build_nemo_rl_image.slurm` for future builds.
 
-A later attempt to reproduce the image from a committed tree (so the tag drops
-its dirty suffix) added three lessons before being parked:
+A later attempt to reproduce the image from a committed tree added three more
+launcher fixes:
 
 - Batch steps have no logind session, so rootless Podman found no
   `/run/user/<uid>` and died on `pause.pid`. The launcher now provides
   `XDG_RUNTIME_DIR` itself, which is why earlier builds only ever worked from
   interactive allocations.
-- An interrupted build leaves the registry lock naming a job that is still
-  alive, and the helper then refuses to start. Release it with
-  `registry down <cache-dir>` after confirming `registry status <cache-dir>`
-  reports stopped and nothing answers on port 5000.
+- Cache ownership now uses a process-held `flock`, so Slurm releases it even
+  when an interrupted build cannot run cleanup.
 - Podman lives on the compute node's host, not inside the Container Engine
   session, so a build cannot be driven from inside a CE container; run it via
   `sbatch`, or an `srun` step with no `--environment`.
 
-With those cleared, the blocker is the user session rather than the launcher.
-A batch step has no logind session, so rootless Podman warns `Failed to add
-pause process to systemd sandbox cgroup: dial unix /run/user/<uid>/bus`, and
-although the registry container reports `listening on [::]:5000`, the
-readiness probe never reaches it and the build stops before its first stage.
-Providing `XDG_RUNTIME_DIR` is necessary but not sufficient: the socket that
-rootless port publishing wants comes with the session, not the directory.
-Until that is solved, build the image the way every successful build was
-produced — from an interactive allocation with a real user session, running on
-the compute node host rather than inside a Container Engine container.
+Plain batch jobs have no logind session. The registry therefore uses host
+networking and binds `127.0.0.1:5000` directly; it does not use rootless port
+publishing, which was the remaining session-bus dependency. A missing session
+bus may still produce a harmless cgroup warning, but no longer blocks registry
+readiness.
 
 The delivered image above remains the certified artifact when used the
 certified way; see the warning under the image table for what it lacks
@@ -240,13 +245,11 @@ every later training job starts hot.
   started. Use `UV_PROJECT_ENVIRONMENT=$PWD/.venv-test uv run --locked --extra mcore --group
   test bash tests/run_unit.sh unit/` (`.venv-test` is gitignored). `mcore` and `vllm` are
   declared conflicting extras, so ask for one.
-- **A dependency bump does NOT reach existing worker venvs**: `uv run --locked` re-syncs only
-  the driver `.venv`; the per-worker venvs under `<repo>/venvs/` are readiness-marker-gated and
-  keep serving whatever lock they were built against. After the vLLM 0.20→0.25 bump, generation
-  workers silently ran vLLM 0.20 until new 0.25-only code crashed the refit
-  (`ModuleNotFoundError: ...fused_moe.routed_experts`). After any lock change, move the old tree
-  aside and let workers rebuild: `mv venvs venvs.stale && mkdir venvs` (delete `venvs.stale` in
-  the background — capstor removes are slow).
+- **Worker venvs rebuild automatically when their inputs change**: the readiness marker records
+  `uv.lock`, `pyproject.toml`, and the normalized worker command that selects its extras. A later
+  job repairs the environment in place when any of those inputs differ. This prevents a lock
+  bump such as vLLM 0.20→0.25, or an actor moving between extras, from silently reusing the old
+  packages. Let one job settle shared venvs before starting concurrent jobs across such a change.
 - **`Pretrained run config not found ... iter_0000000/run_config.yaml` on rank>0**: a stale,
   half-written conversion cache. Delete the `$HF_HOME/nemo_rl/model__*` directory for that
   checkpoint and rerun — rank 0 reconverts cleanly.
