@@ -18,6 +18,53 @@
 import gc
 import json
 import os
+import types
+
+
+def check_fp8_refit_storage() -> None:
+    """Keep stable FP8 parameter storage across repeated refits."""
+    import torch
+    from vllm.model_executor.layers.quantization.utils import fp8_utils
+
+    from nemo_rl.models.generation.vllm.quantization import fp8
+
+    layer = types.SimpleNamespace(
+        weight=torch.nn.Parameter(torch.zeros(4, 4), requires_grad=False),
+        weight_scale_inv=torch.nn.Parameter(torch.zeros(1, 1), requires_grad=False),
+    )
+    method = types.SimpleNamespace(
+        block_quant=True,
+        quant_config=types.SimpleNamespace(
+            is_checkpoint_fp8_serialized=True,
+            activation_scheme="dynamic",
+        ),
+    )
+    original_process = fp8_utils.process_fp8_weight_block_strategy
+    original_post_process = fp8.maybe_post_process_fp8_weight_block
+    try:
+        fp8_utils.process_fp8_weight_block_strategy = lambda weight, scale: (
+            torch.ones_like(weight),
+            torch.ones_like(scale),
+        )
+        fp8.maybe_post_process_fp8_weight_block = lambda _layer: None
+
+        weight_ptr = layer.weight.data.data_ptr()
+        scale_ptr = layer.weight_scale_inv.data.data_ptr()
+        weight_param = layer.weight
+        scale_param = layer.weight_scale_inv
+        for _ in range(3):
+            fp8.process_weights_after_loading(method, layer)
+
+        assert layer.weight.data.data_ptr() == weight_ptr
+        assert layer.weight_scale_inv.data.data_ptr() == scale_ptr
+        assert layer.weight is weight_param
+        assert layer.weight_scale_inv is scale_param
+        assert torch.equal(layer.weight.data, torch.ones(4, 4))
+        assert torch.equal(layer.weight_scale_inv.data, torch.ones(1, 1))
+    finally:
+        fp8_utils.process_fp8_weight_block_strategy = original_process
+        fp8.maybe_post_process_fp8_weight_block = original_post_process
+    print("fp8_refit_storage=OK")
 
 
 def main() -> None:
@@ -34,6 +81,7 @@ def main() -> None:
     assert torch.cuda.get_device_name(0) == "NVIDIA GH200 120GB"
     print(f"vllm_version={vllm.__version__}")
     print(f"gpu={torch.cuda.get_device_name(0)}")
+    check_fp8_refit_storage()
 
     llm = LLM(
         model=os.environ["APERTUS_CKPT"],
