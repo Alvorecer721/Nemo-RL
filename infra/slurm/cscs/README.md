@@ -190,6 +190,12 @@ every later training job starts hot.
   submissions**: the next `uv run` re-syncs it, and simultaneous jobs racing that re-sync can
   degrade into source rebuilds and uv lock timeouts (two probes died this way). One solo job —
   or `prepare_env.slurm` — settles it; steady-state parallel submissions are unaffected.
+- **Run the unit suite in its own venv, never the shared `.venv`**: the suite needs the
+  `test` group, so `uv run` re-syncs `.venv` to a shape no training job wants, and a job
+  starting alongside re-syncs it back — a suite run died mid-collection this way when a probe
+  started. Use `UV_PROJECT_ENVIRONMENT=$PWD/.venv-test uv run --locked --extra mcore --group
+  test bash tests/run_unit.sh unit/` (`.venv-test` is gitignored). `mcore` and `vllm` are
+  declared conflicting extras, so ask for one.
 - **A dependency bump does NOT reach existing worker venvs**: `uv run --locked` re-syncs only
   the driver `.venv`; the per-worker venvs under `<repo>/venvs/` are readiness-marker-gated and
   keep serving whatever lock they were built against. After the vLLM 0.20→0.25 bump, generation

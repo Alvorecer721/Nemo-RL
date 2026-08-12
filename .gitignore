@@ -6,6 +6,7 @@
 *.tar
 *.tar.gz
 .venv
+.venv-test
 venv
 venvs
 __pycache__/
