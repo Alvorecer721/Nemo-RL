@@ -274,6 +274,12 @@ WORKDIR /opt/nemo-rl
 
 FROM hermetic AS release
 
+# Release-stage venv materialization should normally be cache-only, but direct
+# wheel sources can still be fetched if a prior warm was interrupted. Tolerate
+# transient registry/GitHub HTTP failures without publishing a partial image.
+ENV UV_HTTP_RETRIES=10
+ENV UV_HTTP_TIMEOUT=60
+
 # Re-declare build args for this stage
 ARG SKIP_VLLM_BUILD
 ARG SKIP_SGLANG_BUILD
