@@ -4,7 +4,7 @@
 # Val:   MATH-500 (text) -> cross-modal reasoning-transfer probe (graded by the math env).
 # Base:  the NON-GYM megatron probe (inherits grpo_math_8B_megatron; Apertus ckpt + _tools_fixed tokenizer
 #        + TP=2 + sleep_level=2). No gym, no HTTP rollout server.
-defaults: probe-grpo-apertus1p5-8b-1n4g-megatron.yaml
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe.yaml
 
 grpo:
   num_prompts_per_step: 64

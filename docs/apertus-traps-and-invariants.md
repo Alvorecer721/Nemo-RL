@@ -59,7 +59,7 @@ Short resume tests: keep the config byte-identical and kill externally.
 ```bash
 # 1. step-0 refit self-diff: NRL_DEBUG_REFIT_SELFDIFF_DIR=... run_grpo (debug recipe)
 #    → expect 0 tensors changed
-# 2. GRPO probe (probe-grpo-apertus1p5-8b-1n4g-megatron.yaml, vllm util 0.40)
+# 2. GRPO probe (grpo-apertus1p5-8b-1n4g-megatron-probe.yaml, vllm util 0.40)
 #    → expect Generation KL Error < 0.002
 # 3. online-DPO smoke (infra/slurm/cscs/probe_nemo_rl_dpo_megatron_apertus.slurm)
 #    → expect step-1 preference_loss ≈ 0.6931

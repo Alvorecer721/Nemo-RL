@@ -1,9 +1,0 @@
-# GRPO+ALP + n-gram repetition penalty ablation arm (additive with ALP).
-# n=4 (helper default) + tau=0.10 from the failure-mode analysis: healthy distinct-4 rate ~0.05,
-# degenerate (looping/unterminated) ~0.16-0.21, so the threshold leaves clean CoT untouched.
-defaults: probe-grpo-apertus1p5-8b-1n4g-megatron-gym-reasoning-alp.yaml
-
-grpo:
-  reward_shaping:
-    ngram_penalty_coef: 0.5         # conservative max-penalty; additive with ALP
-    ngram_penalty_threshold: 0.10   # rate at/below this -> no penalty

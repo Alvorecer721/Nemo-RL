@@ -3,7 +3,7 @@
 # enable_thinking=true prompts CoT; uses_reasoning_parser stays false (Apertus has no vLLM
 # reasoning parser, and math_with_judge's math-verify extracts \boxed{} from the full text).
 # Longer sequence length to fit the chain-of-thought.
-defaults: probe-grpo-apertus1p5-8b-1n4g-megatron-gym.yaml
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe-gym.yaml
 
 policy:
   max_total_sequence_length: 8192
