@@ -112,6 +112,16 @@ printf '[storage]\ndriver = "overlay"\nrunroot = "%s"\ngraphroot = "%s"\n' \
     > "$PODMAN_STORAGE_CONF"
 export CONTAINERS_STORAGE_CONF="$PODMAN_STORAGE_CONF"
 
+# Rootless Podman keeps its pause process under XDG_RUNTIME_DIR. A batch step
+# has no logind session, so /run/user/<uid> does not exist and every command
+# dies on `open .../libpod/tmp/pause.pid`. Interactive allocations happen to
+# have one, which is why this only bites plain sbatch submissions.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$PODMAN_STORAGE_BASE/xdg}"
+if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+fi
+
 # Reconcile rootless runtime state after an interrupted Slurm step while
 # preserving images and layers already present in the allocation-local store.
 podman system migrate
