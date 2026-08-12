@@ -273,7 +273,7 @@ if [[ "$HERMETIC_CACHE_TAG" != "rebuild" ]]; then
         /opt/nemo-rl/uv.lock | cut -d' ' -f1)
     HERMETIC_VLLM_VERSION=$(podman run --rm \
         --entrypoint /opt/nemo_rl_venv/bin/python "$HERMETIC_IMAGE" -c \
-        'from importlib.metadata import version; print(version("vllm"))')
+        'import tomllib; lock = tomllib.load(open("/opt/nemo-rl/uv.lock", "rb")); print(next(package["version"] for package in lock["package"] if package["name"] == "vllm"))')
     [[ "$HERMETIC_PYPROJECT_MD5" == "97ef0774da410409aadeb5cb9abc73a2" ]]
     [[ "$HERMETIC_LOCK_MD5" == "f15bff1a3d93527478961a86c99efc14" ]]
     [[ "$HERMETIC_VLLM_VERSION" == "$VLLM_VERSION" ]]
