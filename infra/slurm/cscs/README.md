@@ -66,17 +66,12 @@ image built from this checkout. It runs the baked `/opt/nemo-rl` tree and
 frozen environments under `/opt/ray_venvs`; it does not require checkout-local
 `.venv` or `venvs` directories.
 
-> **Run it with a checkout, not standalone.** The published SquashFS was baked
-> from `336136c10490-dirty-fd360335e307`, which predates three fixes that
-> landed with the bump: the `packed_broadcast` stream joins (without them a
-> refit broadcast can still be in flight while weights are mutated or read,
-> which corrupts logprobs silently under vLLM >= 0.25), and the RayExecutorV2
-> TCPStore and MessageQueue port patches (without them an engine spanning
-> nodes fails at startup with `EADDRINUSE`). Every certification result quoted
-> here comes from the CSCS launchers, which put this checkout ahead of the
-> baked tree on `PYTHONPATH` and use checkout-local environments, so those
-> fixes were in effect. The baked tree alone is only safe for engines inside a
-> single node and is not a certified refit path until the image is rebuilt.
+The current SquashFS is a clean, standalone build from `cef7e2ddb9d4`. It
+contains the `packed_broadcast` stream joins, RayExecutorV2 TCPStore and
+MessageQueue port patches, FP8 in-place refit fix, and dependency-aware frozen
+environment markers. It supersedes the earlier
+`336136c10490-dirty-fd360335e307` artifact, which required a checkout overlay
+and must not be used for multi-node startup or refit certification.
 
 The EDF is intentionally ignored because its
 `image` field points at a user- or project-specific SquashFS path. Create it by
@@ -85,11 +80,11 @@ builder's reported `BUILD COMPLETE` path.
 
 | Field | Value |
 | --- | --- |
-| SquashFS | `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-336136c10490-fd360335e307.sqsh` |
-| Size | 47,629,271,040 bytes (about 45 GiB) |
-| SHA-256 | `d98ab83e796e7829da468df77e18f11f1ae8abe2a1b6313d5c9081c6ea63f32a` |
-| OCI tag | `nemo-rl-apertus:vllm-0.25.1-336136c10490-fd360335e307` |
-| OCI image ID | `6a97a914bfae7af4ab75d76be7ad19a7c2b193fd727fb84bd6ba606a26e00754` |
+| SquashFS | `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-cef7e2ddb9d4-f62a9972872b.sqsh` |
+| Size | 48,752,754,688 bytes (about 45.4 GiB) |
+| SHA-256 | `3d36df6b3ec654bf3691f29fd33f3759c09a0a2d437cfcca773ff234cbc8a592` |
+| OCI tag | `nemo-rl-apertus:vllm-0.25.1-cef7e2ddb9d4-f62a9972872b` |
+| OCI image ID | `824dff64d3d2bae6310fef29d8b24864544b35719875aa51cee9196a4616733e` |
 | Persistent OCI data | `/iopsstor/scratch/cscs/xyixuan/podman-cache/nemo-rl` |
 
 The image ID suffix is `<12-char-git-revision>-<12-char-build-input-hash>`.
@@ -143,9 +138,9 @@ the pinned tag and fingerprint with the new completed hermetic-stage values.
 
 ### Failure and recovery ledger
 
-Nine substantive build/recovery attempts were made across three build
-allocations. Three additional 18-second Slurm jobs failed during launcher
-bootstrap and did not begin image construction.
+Thirteen substantive build/recovery attempts were made. Three additional
+18-second Slurm jobs failed during launcher bootstrap and did not begin image
+construction.
 
 | Attempt | Failure or action | Durable fix/result |
 | --- | --- | --- |
@@ -158,6 +153,10 @@ bootstrap and did not begin image construction.
 | 7 | Registry blobs existed, but a reconstructed `COPY --link` parent missed the descendant Podman cache identity | Stopped the wasteful traversal and recovered from the allocation-local step-39 parent. |
 | 8 | Recovery reached NemoGym but ran out of space because about 70 interrupted Buildah containers retained overlays | Added `podman system migrate`, external prune, and build-container prune before each build. |
 | 9 | Cleaned transient state, finalized the image, pushed its manifest, and exported SquashFS | Successful artifact listed above. |
+| 10 | A clean hermetic resume reached the release vLLM/SGLang environments, but direct GitHub wheel fetches failed with transient HTTP/2 refused streams; the prefetch summary also returned success with failed workers | Retry each worker environment, propagate failures out of prefetch, and pass completed paths directly to wrapper generation. |
+| 11 | Retries recovered the vLLM and SGLang environments and crossed four split DTensor layers, but the outer `uv run` auto-synced the already-complete main environment and failed before the Python retry loop | Invoke release helpers with `uv run --no-sync`; their inner worker `uv sync` remains explicit, retried, and fail-closed. |
+| 12 | The first no-sync build invoked the helper by file path, so Python started in `nemo_rl/utils` and could not import `nemo_rl` | Invoke it as `python -m nemo_rl.utils.prefetch_venvs`, preserving the project import root without an outer sync. |
+| 13 | The module-based build recovered two transient direct-wheel failures, committed every worker separately, pushed OCI image `824dff64d3d2`, exported SquashFS, and passed the baked import check | Successful standalone artifact listed above; job `3069254`. |
 
 Historical build output is under `logs/nrl-vllm0251-image_*.{out,err}`. Direct
 step-39 recovery was an allocation-specific rescue, not the supported rebuild
@@ -182,9 +181,9 @@ publishing, which was the remaining session-bus dependency. A missing session
 bus may still produce a harmless cgroup warning, but no longer blocks registry
 readiness.
 
-The delivered image above remains the certified artifact when used the
-certified way; see the warning under the image table for what it lacks
-standalone.
+The successful build log is `logs/nrl-vllm0251-image_3069254.out`. It records
+all 47 release steps, final OCI publication, SquashFS export and checksum, and
+the baked vLLM 0.25.1 renderer, tokenizer, and tool-parser import check.
 
 ### Image validation
 
@@ -199,9 +198,24 @@ sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
 
 sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
   infra/slurm/cscs/probe_nemo_rl_vllm0251_image.slurm
+
+sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
+  infra/slurm/cscs/probe_nemo_rl_grpo_vllm0251_image.slurm
+
+sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
+  infra/slurm/cscs/probe_nemo_rl_vllm0251_multinode_image.slurm
 ```
 
-On allocation `3061315` on 2026-08-12, the DPO probe injected the ABI-matched
+The builder's CPU-side standalone boundary check passed on job `3069254`:
+the exported image reports vLLM `0.25.1`, OpenAI `2.6.1`, and xgrammar
+`0.2.3`, and imports the renderer, tokenizer, and Apertus tool parser from its
+baked tree. Run the four GPU probes above after changing the artifact; they
+cover real-model generation and repeated FP8 storage-preserving refit, a
+four-GH200 DPO step with CUDA xIELU, a four-GH200 GRPO refit/KL step, and a
+two-node TP8 vLLM startup respectively.
+
+For historical comparison, the checkout-overlay validation on allocation
+`3061315` on 2026-08-12 injected the ABI-matched
 `xielu-site-current` into the frozen Megatron worker environment and passed a
 CUDA xIELU forward/backward preflight. It then loaded the real Apertus 1.5 8B
 policy and reference checkpoint on four GH200s, trained one MaxMin batch,
