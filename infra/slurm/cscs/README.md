@@ -64,7 +64,21 @@ until the mechanism is pinned down.
 The machine-local `docker/nemo_rl_vllm0251.toml` EDF selects the custom arm64
 image built from this checkout. It runs the baked `/opt/nemo-rl` tree and
 frozen environments under `/opt/ray_venvs`; it does not require checkout-local
-`.venv` or `venvs` directories. The EDF is intentionally ignored because its
+`.venv` or `venvs` directories.
+
+> **Run it with a checkout, not standalone.** The published SquashFS was baked
+> from `336136c10490-dirty-fd360335e307`, which predates three fixes that
+> landed with the bump: the `packed_broadcast` stream joins (without them a
+> refit broadcast can still be in flight while weights are mutated or read,
+> which corrupts logprobs silently under vLLM >= 0.25), and the RayExecutorV2
+> TCPStore and MessageQueue port patches (without them an engine spanning
+> nodes fails at startup with `EADDRINUSE`). Every certification result quoted
+> here comes from the CSCS launchers, which put this checkout ahead of the
+> baked tree on `PYTHONPATH` and use checkout-local environments, so those
+> fixes were in effect. The baked tree alone is only safe for engines inside a
+> single node and is not a certified refit path until the image is rebuilt.
+
+The EDF is intentionally ignored because its
 `image` field points at a user- or project-specific SquashFS path. Create it by
 copying `docker/nemo_rl.toml` and replacing only the `image` value with the
 builder's reported `BUILD COMPLETE` path.
