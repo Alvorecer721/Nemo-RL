@@ -280,16 +280,23 @@ ARG SKIP_SGLANG_BUILD
 # Space-separated config paths whose NeMo Gym venvs are prefetched into the image
 # (empty default = skip). Consumed by the gym prefetch RUN below.
 ARG NEMO_GYM_PREFETCH_CONFIGS=
+ARG BASE_IMAGE
 ARG NEMO_RL_COMMIT
+ARG NEMO_RL_BUILD_INPUTS_SHA256
+ARG NEMO_RL_BUILD_FINGERPRINT_B64
 ARG NVIDIA_BUILD_ID
 ARG NVIDIA_BUILD_REF
 ARG RC_DATE=00.00
 ARG TARGETARCH
 ENV NEMO_RL_COMMIT=${NEMO_RL_COMMIT:-<unknown>}
+ENV NEMO_RL_BUILD_INPUTS_SHA256=${NEMO_RL_BUILD_INPUTS_SHA256:-<unknown>}
 ENV NVIDIA_BUILD_ID=${NVIDIA_BUILD_ID:-<unknown>}
 ENV NVIDIA_BUILD_REF=${NVIDIA_BUILD_REF:-<unknown>}
 LABEL com.nvidia.build.id="${NVIDIA_BUILD_ID}"
 LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
+LABEL org.opencontainers.image.revision="${NEMO_RL_COMMIT}"
+LABEL org.opencontainers.image.base.name="${BASE_IMAGE}"
+LABEL org.opencontainers.image.source-inputs="${NEMO_RL_BUILD_INPUTS_SHA256}"
 
 ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
 
@@ -374,9 +381,16 @@ if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
     rm -f "${GYM_VLLM_OVERRIDE}"
 fi
 EOF
-# Generate container fingerprint for frozen environment support
-# Store outside /opt/nemo-rl to avoid being overwritten by user mounts
-RUN python tools/generate_fingerprint.py > /opt/nemo_rl_container_fingerprint
+# Generate the container fingerprint for frozen environment support. A local
+# tracked-files-only build context intentionally has no .git directory, so its
+# launcher supplies the fingerprint captured from the exact source commit.
+# Remote/default builds retain the existing in-container fallback.
+RUN if [[ -n "${NEMO_RL_BUILD_FINGERPRINT_B64:-}" ]]; then \
+        printf '%s' "${NEMO_RL_BUILD_FINGERPRINT_B64}" \
+            | base64 -d > /opt/nemo_rl_container_fingerprint; \
+    else \
+        python tools/generate_fingerprint.py > /opt/nemo_rl_container_fingerprint; \
+    fi
 
 # NOTICES.txt file points to where the OSS source code is archived
 RUN echo "This distribution includes open source which is archived at the following URL: https://opensource.nvidia.com/oss/teams/nvidia/nemo-rl/${RC_DATE}:linux-${TARGETARCH}/index.html" > NOTICES.txt && \
