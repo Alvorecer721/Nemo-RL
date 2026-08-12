@@ -22,6 +22,7 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --partition=normal
+#SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --export=NONE
 
 set -euo pipefail
