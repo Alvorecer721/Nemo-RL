@@ -89,7 +89,7 @@ gold, so the normalized/symbolic comparator carries it.)
    `{prompt_token_ids, ground_truth, answer_variants, task_name}`.
 2. `nemo_rl/data/processors.py` — add `mmididx_grpo_data_processor` + register in `PROCESSOR_REGISTRY`.
 3. `nemo_rl/environments/single_turn_verifier_environment.py` — the verifier env (§3).
-4. `examples/configs/recipes/llm/probe-grpo-apertus-omni-reasoning-alp.yaml` — inherits the
+4. `examples/configs/recipes/llm/grpo-apertus-omni-reasoning-alp-smoke.yaml` — inherits the
    reasoning-ALP base; binds the new dataset + `single_turn_verifier` env + omni ckpt/tokenizer +
    `stop_token_ids` + ALP.
 
