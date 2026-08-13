@@ -119,6 +119,15 @@ class AsyncTrajectoryCollector:
         self._spawning_targets: set[int] = set()
         self._counter_lock: _threading.Lock = _threading.Lock()
 
+        # Failure tracking for prompt-group workers. _failure_lock guards both
+        # _failure_count and _fatal_error_message.
+        self._failure_lock: _threading.Lock = _threading.Lock()
+        self._failure_count: int = 0
+        self._fatal_error_message: str | None = None
+        self._max_generation_failures = self.master_config.grpo["async_grpo"][
+            "max_generation_failures"
+        ]
+
     def _calculate_target_weights(self, generation_weight_version: int) -> list[int]:
         """Calculate target weight versions for given generation weight version.
 
@@ -265,6 +274,8 @@ class AsyncTrajectoryCollector:
 
                 # Check if generation limits require pausing collection
                 if self._should_pause_for_generation_limits() and self.running:
+                    self._generation_limit_cleared.clear()
+
                     # Only log warning once per weight version
                     if self._last_limit_warning_version != self.current_weight_version:
                         async_cfg = self.master_config.grpo.get("async_grpo", {})
@@ -279,8 +290,6 @@ class AsyncTrajectoryCollector:
                             f"already exist in buffer. Waiting for weight update..."
                         )
                         self._last_limit_warning_version = self.current_weight_version
-
-                        self._generation_limit_cleared.clear()  # Clear the event to pause
 
                     # Efficiently wait for generation limits to be cleared (no polling!)
                     self._generation_limit_cleared.wait()
@@ -448,6 +457,21 @@ class AsyncTrajectoryCollector:
 
     def get_weight_version(self) -> int:
         return self.current_weight_version
+
+    def check_health(self) -> None:
+        """Raise the stored fatal worker error, if any.
+
+        Called by the trainer between sampling iterations. When a generation
+        worker has recorded a fatal failure (consecutive count exceeded
+        max_generation_failures), this raises it so the training job dies
+        instead of stalling on an empty replay buffer. Safe to call
+        repeatedly: returns silently when no fatal error is set, and raises
+        every time once one is.
+        """
+        with self._failure_lock:
+            error_message = self._fatal_error_message
+        if error_message is not None:
+            raise RuntimeError(error_message)
 
     def pause(self) -> None:
         """Pause trajectory collection."""
@@ -722,6 +746,7 @@ class AsyncTrajectoryCollector:
         target_weight_version: int,
         prompt_idx: int,
     ) -> None:
+        wake_generation_limits_after_cleanup = False
         try:
             # Import here to avoid circular dependency
             from nemo_rl.algorithms.grpo import _should_use_nemo_gym
@@ -794,51 +819,84 @@ class AsyncTrajectoryCollector:
             }
 
             # Use exponential backoff when buffer is full
-            try:
-                backoff_delay = 0.01
-                while self.running:
-                    status = ray.get(
-                        self.replay_buffer.add.remote(
-                            trajectory_group,
-                            generation_weight_version,
-                            target_weight_version,
-                        )
+            backoff_delay = 0.01
+            while self.running:
+                status = ray.get(
+                    self.replay_buffer.add.remote(
+                        trajectory_group,
+                        generation_weight_version,
+                        target_weight_version,
                     )
-                    if status == "success":
-                        with self._counter_lock:
-                            self._buffered_per_target[target_weight_version] = (
-                                self._buffered_per_target.get(target_weight_version, 0)
-                                + 1
-                            )
-                            buffered_count = self._buffered_per_target[
-                                target_weight_version
-                            ]
-                            spawned_count = self._spawned_per_target.get(
-                                target_weight_version, 0
-                            )
-                        print(
-                            f"📦 Buffered per-prompt group (prompt_idx {prompt_idx}, "
-                            f"target_weight {target_weight_version}) "
-                            f"[{buffered_count}/{spawned_count} buffered]"
+                )
+                if status == "success":
+                    with self._counter_lock:
+                        self._buffered_per_target[target_weight_version] = (
+                            self._buffered_per_target.get(target_weight_version, 0) + 1
                         )
-                        break
-                    elif status == "full":
-                        # Exponential backoff up to 0.5 second
-                        time.sleep(min(backoff_delay, 0.5))
-                        backoff_delay *= 1.5
-                    else:
-                        # Unexpected status, wait briefly
-                        time.sleep(0.01)
-            except Exception as e:
-                print(f"❌ Failed to enqueue per-prompt group to buffer: {e}")
-                import traceback
+                        buffered_count = self._buffered_per_target[
+                            target_weight_version
+                        ]
+                        spawned_count = self._spawned_per_target.get(
+                            target_weight_version, 0
+                        )
+                    print(
+                        f"📦 Buffered per-prompt group (prompt_idx {prompt_idx}, "
+                        f"target_weight {target_weight_version}) "
+                        f"[{buffered_count}/{spawned_count} buffered]"
+                    )
+                    break
+                elif status == "full":
+                    # Exponential backoff up to 0.5 second
+                    time.sleep(min(backoff_delay, 0.5))
+                    backoff_delay *= 1.5
+                else:
+                    # Unexpected status, wait briefly
+                    time.sleep(0.01)
 
-                traceback.print_exc()
-        except Exception as e:
-            print(f"❌ Error in prompt group worker: {e}")
+            if not self.running:
+                return
+
+            with self._failure_lock:
+                if self._fatal_error_message is None:
+                    self._failure_count = 0
+        except Exception as error:
+            if not self.running:
+                return
+
             import traceback
 
-            traceback.print_exc()
+            failure_traceback = traceback.format_exc()
+            with self._failure_lock:
+                self._failure_count += 1
+                failure_count = self._failure_count
+                failure_limit = self._max_generation_failures
+                is_fatal = failure_count > failure_limit
+                if is_fatal and self._fatal_error_message is None:
+                    self._fatal_error_message = (
+                        "AsyncTrajectoryCollector aborting: "
+                        f"{failure_count} prompt-group worker failure(s) exceeded "
+                        f"max_generation_failures={failure_limit}. "
+                        f"generation_weight={generation_weight_version}, "
+                        f"target_weight={target_weight_version}, "
+                        f"prompt_idx={prompt_idx}: {error!r}\n"
+                        f"Worker traceback:\n{failure_traceback}"
+                    )
+            wake_generation_limits_after_cleanup = True
+            print(
+                "[AsyncTrajectoryCollector] prompt-group worker FAILED "
+                f"(failure {failure_count}, tolerating {failure_limit}) "
+                f"generation_weight={generation_weight_version} "
+                f"target_weight={target_weight_version} "
+                f"prompt_idx={prompt_idx}\n{failure_traceback}",
+                flush=True,
+            )
+            if is_fatal:
+                print(
+                    "[AsyncTrajectoryCollector] FATAL: failure count "
+                    f"{failure_count} exceeds threshold {failure_limit}; trainer "
+                    "will be notified on the next check_health() call.",
+                    flush=True,
+                )
         finally:
             with self._counter_lock:
                 self._completed_per_target[target_weight_version] = (
@@ -857,3 +915,5 @@ class AsyncTrajectoryCollector:
                 import traceback
 
                 traceback.print_exc()
+            if wake_generation_limits_after_cleanup:
+                self._generation_limit_cleared.set()
