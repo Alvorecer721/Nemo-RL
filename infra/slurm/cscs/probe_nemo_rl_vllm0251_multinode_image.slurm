@@ -71,6 +71,18 @@ srun \
     unset PYTHONPATH
     export PYTHONUNBUFFERED=1
     export HF_HOME=${HF_HOME:-/iopsstor/scratch/cscs/${USER:-$(id -un)}/.cache/huggingface}
+    # Preserve per-rank transport diagnostics: a stalled NCCL collective can
+    # otherwise leave only the rank 0 pre-init line in the deduplicated Ray log.
+    export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
+    export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET,ENV}
+    export NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE:-$RUN_DIR/nccl.%h.%p.log}
+    # The vLLM 0.25.1 direct PyNccl warm-up stalls with the CSCS OFI plugin for
+    # node-spanning communicators. Its PyTorch process-group fallback uses the
+    # same NCCL transport and passes the equivalent eight-rank collective.
+    # Hopper symmetric-memory rendezvous also requires a shared memory topology
+    # that is unavailable across independent Clariden GH200 nodes.
+    export VLLM_DISABLE_PYNCCL=${VLLM_DISABLE_PYNCCL:-1}
+    export VLLM_ALLREDUCE_USE_SYMM_MEM=${VLLM_ALLREDUCE_USE_SYMM_MEM:-0}
     RAY_PORT=6379
     RAY_RES="{\"worker_units\": ${GPUS_PER_NODE}, \"slurm_managed_ray_cluster\": 1}"
 

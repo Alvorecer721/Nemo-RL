@@ -3,6 +3,10 @@
 This directory contains the Clariden/GH200 Slurm wrappers used to build, probe, and train with the NeMo-RL `nvcr.io/nvidia/nemo-rl:v0.7.0` container on Slingshot.
 
 The default container environment is `docker/nemo_rl.toml` in this checkout. The wrappers set `CUDA_CACHE_PATH` and Hugging Face cache paths in shell code because TOML values are not shell-expanded by Pyxis/EDF.
+Its AWS OFI hook and NCCL/libfabric values follow the current
+[CSCS NCCL guidance](https://docs.cscs.ch/software/communication/nccl/): the
+portable `cuda-dl` hook, GPU Direct RDMA through `PHB`, and
+`FI_CXI_DEFAULT_TX_SIZE=16384`.
 
 The EDF points at the shared pre-pulled image in `MLLM/containers/`, so no user ever waits on an NGC pull. Measured cost of serving it from capstor instead of a per-user iopsstor imagestore (fresh nodes, same sqsh, paired runs sharing a page-cache pre-warm — so the values are comparative, not true cold-start absolutes): sequential read 2.2 vs 7.7 GB/s, container mount 11.8 vs 7.6 s, `import torch` 2.6 vs 2.2 s — about five seconds per job start, which the zero-pull onboarding more than repays. A paired same-node A/B additionally measured ~1.5–2% slower steady-state generation on the capstor-served image (~0.5% of end-to-end step time) — noted for honesty, not action. Point `image =` back at `nvcr.io#nvidia/nemo-rl:v0.7.0` if you prefer paging from your own imagestore.
 
@@ -213,6 +217,19 @@ baked tree. Run the four GPU probes above after changing the artifact; they
 cover real-model generation and repeated FP8 storage-preserving refit, a
 four-GH200 DPO step with CUDA xIELU, a four-GH200 GRPO refit/KL step, and a
 two-node TP8 vLLM startup respectively.
+
+The two-node probe carries a CSCS-specific vLLM 0.25.1 collective workaround:
+it disables vLLM's direct PyNccl and Hopper symmetric-memory backends for the
+node-spanning TP8 group, leaving collectives to PyTorch's NCCL process group
+over the AWS OFI plugin. A standalone eight-rank PyTorch all-reduce and TP8
+generation both pass on the same two-node Slingshot topology. Job `3072893`
+also passed with NCCL's default lazy connection behavior, so
+`NCCL_RUNTIME_CONNECT` is deliberately not overridden.
+
+This workaround is intentionally scoped to the CSCS node-spanning launcher.
+The generic `VllmGeneration` path remains unchanged: disabling these backends
+globally would also remove optimized paths from single-node and other supported
+platforms. Revisit the generic path only with a topology-aware upstream guard.
 
 For historical comparison, the checkout-overlay validation on allocation
 `3061315` on 2026-08-12 injected the ABI-matched
