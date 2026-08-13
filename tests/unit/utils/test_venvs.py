@@ -74,6 +74,41 @@ def test_create_local_venv_marks_ready_only_after_success(tmp_path):
     assert (venv / VENV_READY_MARKER).exists()
 
 
+def test_base_sync_retains_actor_extra_until_exact_worker_sync(tmp_path):
+    calls = []
+
+    def record_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _fake_uv(tmp_path)(cmd, **kwargs)
+
+    with patch.object(venvs_module.subprocess, "run", record_run):
+        create_local_venv("uv run --locked --extra vllm", "demo.Worker")
+
+    assert calls[1][1:3] == ["sync", "--inexact"]
+    assert "--inexact" not in calls[2]
+    assert calls[2][1:6] == ["run", "--exact", "--locked", "--extra", "vllm"]
+
+
+def test_non_uv_worker_keeps_exact_base_sync(tmp_path):
+    calls = []
+
+    def record_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _fake_uv(tmp_path)(cmd, **kwargs)
+
+    with patch.object(venvs_module.subprocess, "run", record_run):
+        create_local_venv("python -V", "demo.Worker")
+
+    assert calls[1][1] == "sync"
+    assert "--inexact" not in calls[1]
+    assert calls[2] == [
+        "python",
+        "-V",
+        "echo",
+        f"Finished creating venv {tmp_path}/demo.Worker",
+    ]
+
+
 def test_create_local_venv_failure_leaves_no_marker(tmp_path):
     calls = {"n": 0}
 
@@ -251,6 +286,19 @@ def test_dependency_fingerprint_normalizes_worker_command(project_dependencies):
     assert venvs_module._dependency_fingerprint(
         "uv  run --locked  --extra vllm"
     ) == venvs_module._dependency_fingerprint("uv run --locked --extra vllm")
+
+
+def test_dependency_fingerprint_resolves_checkout_aliases(
+    tmp_path, project_dependencies
+):
+    alias = tmp_path / "project-alias"
+    alias.symlink_to(project_dependencies, target_is_directory=True)
+    real_command = f"uv run --locked --directory={project_dependencies}"
+    alias_command = f"uv run --locked --directory={alias}"
+
+    assert venvs_module._dependency_fingerprint(
+        real_command
+    ) == venvs_module._dependency_fingerprint(alias_command)
 
 
 def test_waiter_rejects_a_venv_built_from_other_dependencies(

@@ -41,6 +41,19 @@ VENV_READY_MARKER = "NEMO_RL_VENV_READY"
 logger = logging.getLogger(__name__)
 
 
+def _normalized_worker_command(py_executable: str) -> str:
+    """Normalize command syntax and aliases without conflating distinct roots."""
+    normalized = []
+    for token in shlex.split(py_executable):
+        option, separator, value = token.partition("=")
+        if separator and os.path.isabs(value):
+            token = f"{option}={os.path.realpath(value)}"
+        elif os.path.isabs(token):
+            token = os.path.realpath(token)
+        normalized.append(token)
+    return shlex.join(normalized)
+
+
 @lru_cache(maxsize=None)
 def _dependency_fingerprint(py_executable: str) -> str:
     """Digest the inputs a worker venv resolves from.
@@ -57,7 +70,7 @@ def _dependency_fingerprint(py_executable: str) -> str:
     """
     digest = hashlib.sha256()
     digest.update(b"py_executable\0")
-    digest.update(shlex.join(shlex.split(py_executable)).encode())
+    digest.update(_normalized_worker_command(py_executable).encode())
     digest.update(b"\0")
     for name in ("uv.lock", "pyproject.toml"):
         path = Path(git_root) / name
@@ -158,11 +171,23 @@ def create_local_venv(
     exec_cmd = shlex.split(py_executable)
     if exec_cmd and exec_cmd[0] == "uv":
         exec_cmd[0] = uv
+    is_uv_run = len(exec_cmd) > 1 and exec_cmd[0] == uv and exec_cmd[1] == "run"
+    if is_uv_run and "--exact" not in exec_cmd:
+        exec_cmd.insert(2, "--exact")
     # Command doesn't matter, since `uv` syncs the environment no matter the command.
     exec_cmd.extend(["echo", f"Finished creating venv {venv_path}"])
 
-    # Always run uv sync first to ensure the build requirements are set (for --no-build-isolation packages)
-    subprocess.run([uv, "sync", "--directory", git_root], env=env, check=True)
+    # Always sync the base build requirements first (for --no-build-isolation
+    # packages), but retain an already-installed actor extra. The following
+    # exact `uv run --extra ...` still prunes anything outside the requested
+    # actor environment. Without --inexact, every rebuild removes large vLLM
+    # or MCore packages here only to install the same versions one command
+    # later.
+    base_sync_cmd = [uv, "sync"]
+    if is_uv_run:
+        base_sync_cmd.append("--inexact")
+    base_sync_cmd.extend(["--directory", git_root])
+    subprocess.run(base_sync_cmd, env=env, check=True)
     subprocess.run(exec_cmd, env=env, check=True)
 
     _mark_venv_ready(ready_marker, py_executable)
