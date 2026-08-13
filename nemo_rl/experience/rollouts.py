@@ -1593,7 +1593,7 @@ def run_async_nemo_gym_rollout(
                 ]
                 for r in results
             ],
-            [m["hit_max_tokens"] for m in all_sample_metrics],
+            [bool(m["hit_max_tokens"]) for m in all_sample_metrics],
             cot_token_ids,
         )
         rollout_metrics.update(metrics)
