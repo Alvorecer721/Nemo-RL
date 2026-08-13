@@ -89,7 +89,9 @@ class ApertusToolParser(ToolParser):
         try:
             body_start = start + len(self.start)
             end = model_output.find(self.end, body_start)
-            raw = model_output[body_start:end] if end != -1 else model_output[body_start:]
+            raw = (
+                model_output[body_start:end] if end != -1 else model_output[body_start:]
+            )
             array_obj = json.loads(raw.strip())
             if not isinstance(array_obj, list):
                 raise ValueError("Apertus tool-call payload is not a JSON array")
@@ -119,7 +121,7 @@ class ApertusToolParser(ToolParser):
         if self.start not in previous_text:
             pre = current_text[: current_text.find(self.start)]
             if len(pre) > len(previous_text):
-                return DeltaMessage(content=pre[len(previous_text):])
+                return DeltaMessage(content=pre[len(previous_text) :])
         # Apertus serializes tool args as one inverted-JSON block; rather than diff
         # re-serialized partial JSON (non-monotonic), emit the whole call once the
         # block closes, reusing the tested non-streaming parse.
