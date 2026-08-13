@@ -22,3 +22,4 @@ policy:
         gpus_per_node: 2
     vllm_cfg:
       async_engine: true
+      tensor_parallel_size: 2
