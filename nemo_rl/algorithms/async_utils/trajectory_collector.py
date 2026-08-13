@@ -290,10 +290,10 @@ class AsyncTrajectoryCollector:
                     self._refit_pause_cleared.wait()
                     print("▶️ Refit completed, resuming collection")
 
-                # Check if generation limits require pausing collection
+                # Clear before checking the predicate so a worker wakeup cannot
+                # land between the check and clear and then be lost.
+                self._generation_limit_cleared.clear()
                 if self._should_pause_for_generation_limits() and self.running:
-                    self._generation_limit_cleared.clear()
-
                     # Only log warning once per weight version
                     if self._last_limit_warning_version != self.current_weight_version:
                         async_cfg = self.master_config.grpo.get("async_grpo", {})
@@ -315,6 +315,8 @@ class AsyncTrajectoryCollector:
                     # Double-check we're still running after being woken up
                     if not self.running:
                         break
+                else:
+                    self._generation_limit_cleared.set()
 
                 if not self.running:
                     break
@@ -475,15 +477,12 @@ class AsyncTrajectoryCollector:
 
             self._cleanup_finished_threads()
 
-        except Exception as e:
+        except Exception:
             if target_weight is not None:
                 with self._counter_lock:
                     self._spawning_targets.discard(target_weight)
                 self._maybe_release_target(target_weight)
-            print(f"❌ Error processing batch: {e}")
-            import traceback
-
-            traceback.print_exc()
+            raise
 
     def get_weight_version(self) -> int:
         return self.current_weight_version
@@ -896,9 +895,6 @@ class AsyncTrajectoryCollector:
                 if self._fatal_error_message is None:
                     self._failure_count = 0
         except Exception as error:
-            if not self.running:
-                return
-
             import traceback
 
             failure_traceback = traceback.format_exc()
