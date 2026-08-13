@@ -11,6 +11,8 @@ policy:
     max_new_tokens: 2048
 cluster:
   num_nodes: 1
+checkpointing:
+  enabled: false
 logger:
   wandb_enabled: false
   log_dir: logs/grpo-apertus-omni-smoke
