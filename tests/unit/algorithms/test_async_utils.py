@@ -1077,13 +1077,18 @@ class TestReplayBufferNew:
 class TestAsyncTrajectoryCollector:
     """Test cases for AsyncTrajectoryCollector."""
 
-    def create_local_collector(self, replay_buffer=None):
+    def create_local_collector(
+        self, replay_buffer=None, max_generation_failures: int = 0
+    ):
         """Create a non-Ray collector instance for unit-testing local state."""
         collector_cls = AsyncTrajectoryCollector.__ray_metadata__.modified_class
         mock_generation = MockGenerationInterface()
         mock_tokenizer = mock.MagicMock()
         task_to_env = {}
         master_config = self.create_mock_config()
+        master_config.grpo["async_grpo"]["max_generation_failures"] = (
+            max_generation_failures
+        )
         if replay_buffer is None:
             replay_buffer = mock.MagicMock()
 
@@ -1103,7 +1108,10 @@ class TestAsyncTrajectoryCollector:
                 "num_prompts_per_step": 2,
                 "num_generations_per_prompt": 3,
                 "max_rollout_turns": 1,
-                "async_grpo": {"max_trajectory_age_steps": 2},
+                "async_grpo": {
+                    "max_trajectory_age_steps": 2,
+                    "max_generation_failures": 0,
+                },
             },
             "policy": {
                 "max_total_sequence_length": 512,
@@ -1411,6 +1419,87 @@ class TestAsyncTrajectoryCollector:
         assert target_weight not in collector._spawned_per_target
         assert target_weight not in collector._completed_per_target
 
+    def test_prompt_group_failure_threshold_resets_after_success(self, monkeypatch):
+        """Only consecutive prompt-group failures should make the collector fatal."""
+        from nemo_rl.algorithms import grpo as grpo_mod
+
+        class RemoteMethod:
+            def remote(self, *args, **kwargs):
+                return "success"
+
+        class FakeReplayBuffer:
+            add = RemoteMethod()
+
+        batch = self.create_mock_batch(size=1)
+        rollout = mock.MagicMock(
+            side_effect=[
+                RuntimeError("transient failure"),
+                (batch, {}),
+                RuntimeError("first consecutive failure"),
+                RuntimeError("fatal consecutive failure"),
+                (batch, {}),
+            ]
+        )
+        collector = self.create_local_collector(
+            replay_buffer=FakeReplayBuffer(), max_generation_failures=1
+        )
+        collector.running = True
+
+        monkeypatch.setattr(grpo_mod, "_should_use_nemo_gym", lambda _config: False)
+        monkeypatch.setattr(trajectory_collector_mod.ray, "get", lambda value: value)
+        monkeypatch.setattr(
+            trajectory_collector_mod, "run_async_multi_turn_rollout", rollout
+        )
+
+        collector._generation_limit_cleared.clear()
+        collector._run_prompt_group_worker(batch, 3, 4, 10)
+        collector.check_health()
+        assert collector._failure_count == 1
+        assert collector._generation_limit_cleared.is_set()
+
+        collector._run_prompt_group_worker(batch, 3, 4, 11)
+        collector.check_health()
+        assert collector._failure_count == 0
+
+        collector._run_prompt_group_worker(batch, 5, 6, 12)
+        collector.check_health()
+        collector._run_prompt_group_worker(batch, 5, 6, 13)
+
+        with pytest.raises(RuntimeError, match="max_generation_failures=1") as exc_info:
+            collector.check_health()
+        message = str(exc_info.value)
+        assert "generation_weight=5" in message
+        assert "target_weight=6" in message
+        assert "prompt_idx=13" in message
+        assert "fatal consecutive failure" in message
+
+        # Fatal health is sticky even if a later worker succeeds.
+        collector._run_prompt_group_worker(batch, 7, 8, 14)
+        with pytest.raises(RuntimeError, match="max_generation_failures=1"):
+            collector.check_health()
+
+    def test_worker_shutdown_error_is_not_counted(self, monkeypatch):
+        """An in-flight worker stopping during shutdown is not a generation failure."""
+        from nemo_rl.algorithms import grpo as grpo_mod
+
+        batch = self.create_mock_batch(size=1)
+        collector = self.create_local_collector(max_generation_failures=0)
+        collector.running = False
+        collector._generation_limit_cleared.clear()
+
+        monkeypatch.setattr(grpo_mod, "_should_use_nemo_gym", lambda _config: False)
+        monkeypatch.setattr(
+            trajectory_collector_mod,
+            "run_async_multi_turn_rollout",
+            mock.MagicMock(side_effect=RuntimeError("shutdown interrupted rollout")),
+        )
+
+        collector._run_prompt_group_worker(batch, 3, 4, 10)
+
+        assert collector._failure_count == 0
+        assert not collector._generation_limit_cleared.is_set()
+        collector.check_health()
+
     def test_dataloader_state_retrieval(self):
         """Test getting dataloader state for checkpointing."""
         buffer = ReplayBuffer.remote(max_size=10)
@@ -1448,7 +1537,10 @@ class TestAsyncUtilsIntegration:
                 "num_prompts_per_step": 2,
                 "num_generations_per_prompt": 2,
                 "max_rollout_turns": 1,
-                "async_grpo": {"max_trajectory_age_steps": 1},
+                "async_grpo": {
+                    "max_trajectory_age_steps": 1,
+                    "max_generation_failures": 0,
+                },
             },
             "policy": {
                 "max_total_sequence_length": 512,

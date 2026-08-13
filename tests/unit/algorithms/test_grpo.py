@@ -188,6 +188,7 @@ def mock_grpo_components():
                 "async_grpo": {
                     "enabled": False,
                     "max_trajectory_age_steps": 1,
+                    "max_generation_failures": 0,
                 },
                 "seq_logprob_error_threshold": None,
                 "adv_estimator": {
@@ -662,10 +663,16 @@ class StubReplayBuffer:
 
 
 class StubAsyncTrajectoryCollector:
-    """Non-Ray stub of AsyncTrajectoryCollector for unit testing
+    """Non-Ray stub of AsyncTrajectoryCollector for unit testing.
 
-    Each method is a property that returns a MagicMock with a 'remote' attribute.
+    Actor methods expose MagicMocks with a ``remote`` attribute.
     """
+
+    def __init__(self, health_side_effect=None):
+        self.check_health = MagicMock()
+        self.check_health.remote = MagicMock(
+            return_value=None, side_effect=health_side_effect
+        )
 
     @property
     def start_collection(self):
@@ -725,7 +732,10 @@ class StubAsyncTrajectoryCollector:
 
 
 def mock_async_grpo_infrastructure(
-    mock_batch, mock_rollout_metrics, seq_logprob_error_result=None
+    mock_batch,
+    mock_rollout_metrics,
+    seq_logprob_error_result=None,
+    collector_health_side_effect=None,
 ):
     """
     Context manager that mocks all async GRPO infrastructure (Ray actors, venv, etc).
@@ -742,7 +752,9 @@ def mock_async_grpo_infrastructure(
         mock_batch=mock_batch,
         mock_rollout_metrics=mock_rollout_metrics,
     )
-    stub_collector = StubAsyncTrajectoryCollector()
+    stub_collector = StubAsyncTrajectoryCollector(
+        health_side_effect=collector_health_side_effect
+    )
 
     # Patch venv creation
     stack.enter_context(
@@ -828,6 +840,56 @@ def mock_async_grpo_infrastructure(
     )
 
     return stack
+
+
+@pytest.mark.parametrize(
+    "collector_health_side_effect",
+    [
+        [RuntimeError("collector health failed")],
+        [None, RuntimeError("collector health failed")],
+    ],
+    ids=["initial-buffer-wait", "main-loop"],
+)
+def test_async_grpo_propagates_collector_failure_and_cleans_up(
+    mock_grpo_components, collector_health_side_effect
+):
+    """A fatal collector result aborts and cleans up at each health-check site."""
+    mock_batch = next(iter(mock_grpo_components["train_dataloader"]))
+    mock_rollout_metrics = {"mean_gen_tokens_per_sample": 2.0}
+    master_config = mock_grpo_components["master_config"]
+    master_config.grpo["max_num_steps"] = 1
+    master_config.grpo["max_num_epochs"] = 1
+    master_config.grpo["val_period"] = 0
+    master_config.grpo["val_at_start"] = False
+    master_config.grpo["val_at_end"] = False
+    master_config.grpo["use_dynamic_sampling"] = False
+    master_config.policy["generation"]["colocated"]["enabled"] = False
+
+    with (
+        mock_async_grpo_infrastructure(
+            mock_batch,
+            mock_rollout_metrics,
+            collector_health_side_effect=collector_health_side_effect,
+        ),
+        pytest.raises(RuntimeError, match="collector health failed"),
+    ):
+        async_grpo_train(
+            mock_grpo_components["policy"],
+            _mock_policy_generation(),
+            mock_grpo_components["train_dataloader"],
+            mock_grpo_components["val_dataloader"],
+            mock_grpo_components["tokenizer"],
+            mock_grpo_components["loss_fn"],
+            mock_grpo_components["task_to_env"],
+            mock_grpo_components["val_task_to_env"],
+            mock_grpo_components["logger"],
+            mock_grpo_components["checkpointer"],
+            _default_grpo_save_state(),
+            master_config,
+        )
+
+    mock_grpo_components["checkpointer"].shutdown.assert_called_once()
+    mock_grpo_components["policy"].shutdown.assert_called_once()
 
 
 @pytest.mark.parametrize(
