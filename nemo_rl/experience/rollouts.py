@@ -2779,7 +2779,7 @@ def _postprocess_single_nemo_gym_group(
                 ]
                 for r in results
             ],
-            [m["hit_max_tokens"] for m in all_sample_metrics],
+            [bool(m["hit_max_tokens"]) for m in all_sample_metrics],
             cot_token_ids,
         )
         rollout_metrics.update(metrics)
