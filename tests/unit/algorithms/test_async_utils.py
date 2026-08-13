@@ -1261,6 +1261,32 @@ class TestAsyncTrajectoryCollector:
         assert status["data_exhausted"] is False
         assert status["errored"] is False
 
+    def test_generation_limit_wakeup_is_not_lost(self):
+        """A target release between the predicate and wait must wake collection."""
+
+        class CheckedEvent(threading.Event):
+            def wait(self, timeout: float | None = None) -> bool:
+                assert self.is_set(), "generation-limit wakeup was lost"
+                return super().wait(timeout)
+
+        collector = self.create_local_collector()
+        self._prime_collection_loop(collector)
+        generation_event = CheckedEvent()
+        collector._generation_limit_cleared = generation_event
+
+        def release_target_during_check() -> bool:
+            generation_event.set()
+            return True
+
+        collector._should_pause_for_generation_limits = release_target_during_check
+        processed = []
+        collector._process_batch = lambda batch: processed.append(batch)
+        collector.dataloader = [{"b": 0}]
+
+        collector._collection_loop()
+
+        assert processed == [{"b": 0}]
+
     def create_mock_config(self) -> MasterConfig:
         """Create a mock master config for testing."""
         config = {
@@ -1505,7 +1531,8 @@ class TestAsyncTrajectoryCollector:
             FailingThread,
         )
 
-        collector._process_batch(FakeBatch())
+        with pytest.raises(RuntimeError, match="thread start failed"):
+            collector._process_batch(FakeBatch())
 
         assert target_weight not in collector._generating_targets
         assert target_weight not in collector._spawning_targets
@@ -1638,8 +1665,8 @@ class TestAsyncTrajectoryCollector:
         with pytest.raises(RuntimeError, match="max_generation_failures=1"):
             collector.check_health()
 
-    def test_worker_shutdown_error_is_not_counted(self, monkeypatch):
-        """An in-flight worker stopping during shutdown is not a generation failure."""
+    def test_worker_error_after_collection_stops_is_fatal(self, monkeypatch):
+        """Collector liveness must not suppress an in-flight worker failure."""
         from nemo_rl.algorithms import grpo as grpo_mod
 
         batch = self.create_mock_batch(size=1)
@@ -1651,14 +1678,15 @@ class TestAsyncTrajectoryCollector:
         monkeypatch.setattr(
             trajectory_collector_mod,
             "run_async_multi_turn_rollout",
-            mock.MagicMock(side_effect=RuntimeError("shutdown interrupted rollout")),
+            mock.MagicMock(side_effect=RuntimeError("late rollout failure")),
         )
 
         collector._run_prompt_group_worker(batch, 3, 4, 10)
 
-        assert collector._failure_count == 0
-        assert not collector._generation_limit_cleared.is_set()
-        collector.check_health()
+        assert collector._failure_count == 1
+        assert collector._generation_limit_cleared.is_set()
+        with pytest.raises(RuntimeError, match="late rollout failure"):
+            collector.check_health()
 
     def test_dataloader_state_retrieval(self):
         """Test getting dataloader state for checkpointing."""
