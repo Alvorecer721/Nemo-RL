@@ -84,7 +84,7 @@ print(f"baked_nemo_rl={root}")
 print("baked_grpo_worker_venvs=OK")
 PY
 
-    /opt/nemo_rl_venv/bin/python /opt/nemo-rl/examples/run_grpo.py \
+    /opt/nemo_rl_venv/bin/python -m examples.run_grpo \
       --config "$RECIPE" \
       grpo.max_num_steps=1 \
       grpo.num_prompts_per_step=4 \
