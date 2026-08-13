@@ -26,6 +26,10 @@ policy:
       max_model_len: 8192
 data:
   _override_: true
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
   train:
     dataset_name: RLPromptDataset
     data_path: /capstor/store/cscs/swissai/infra01/vision-datasets/tokenized/alignment/deepvision_rl
@@ -39,6 +43,9 @@ data:
     processor: math_data_processor
     task_name: math
     env_name: math
+  default:
+    prompt_file: examples/prompts/cot.txt
+    system_prompt_file: null
 env:
   single_turn_verifier:
     num_workers: 8
