@@ -107,6 +107,7 @@ project-includes = [
   "nemo_rl/data/datasets/response_datasets/openmathinstruct2.py",
   "nemo_rl/data/datasets/response_datasets/openr1_math.py",
   "nemo_rl/data/datasets/response_datasets/refcoco.py",
+  "nemo_rl/data/datasets/response_datasets/rl_prompt_dataset.py",
   "nemo_rl/data/datasets/response_datasets/response_dataset.py",
   "nemo_rl/data/datasets/response_datasets/squad.py",
   "nemo_rl/data/datasets/response_datasets/tulu3.py",

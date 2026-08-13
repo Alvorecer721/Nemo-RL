@@ -392,7 +392,7 @@ jobs:
           for file in $(uv run --group dev pyrefly check $(git ls-files 'nemo_rl/**/*.py' 'examples/**/*.py' 'docs/*.py' 'tools/**/*.py') --output-format json | jq -r --slurpfile all_files <(git ls-files 'nemo_rl/**/*.py' 'examples/**/*.py' 'docs/*.py' 'tools/**/*.py' | jq -R -s 'split("\n")[:-1]') --arg pwd "$(pwd)/" '(.errors | group_by(.path) | map({(.[0].path | sub($pwd; "")): length}) | add // {}) as $error_counts | $all_files[0][] | . as $file | if ($error_counts[$file] // 0) == 0 then $file else empty end'); do
             if ! fgrep -q "$file" pyrefly.toml; then
               echo "File $file has zero errors but is not in pyrefly.toml in the 'project-includes' list. Please add it to this whitelist."
-              ((missing_count++))
+              missing_count=$((missing_count + 1))
             fi
           done
 
