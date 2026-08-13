@@ -118,7 +118,7 @@ subprocess.run([str(mcore_venv / "bin/python"), "-c", probe], check=True)
 PY
 
     printf "=== one-step baked-image DPO smoke ===\n"
-    /opt/nemo_rl_venv/bin/python /opt/nemo-rl/examples/run_dpo.py \
+    /opt/nemo_rl_venv/bin/python -m examples.run_dpo \
       --config "$RECIPE" \
       policy.model_name="$APERTUS_CKPT" \
       policy.tokenizer.name="$APERTUS_TOKENIZER" \
