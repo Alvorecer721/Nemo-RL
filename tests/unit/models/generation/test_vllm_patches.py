@@ -14,13 +14,15 @@
 
 """Guards for the vLLM source patches that had no coverage.
 
-The two port patches ship their own suites. These cover the remaining two:
+The two port patches ship their own suites. These cover the remaining patches:
 
 * ``_patch_vllm_tool_parser_namespace_tool`` is the most load-bearing patch in
   the repo -- it is the only thing that makes vLLM 0.25.1 importable against
   the pinned ``openai==2.6.1``. If upstream reorders that import block the
   patch logs a warning and returns, and every engine then dies on
   ``import vllm.tool_parsers``. So the anchor needs pinning.
+* ``_patch_vllm_invalid_mnnvl_workspace`` backports vLLM #49043 so compiled
+  TP engines reject a workspace with no NVSwitch multicast pointer.
 * the ``VLLM_RAY_EXTRA_ENV_VARS_TO_COPY`` merge replaced the old
   ``ADDITIONAL_ENV_VARS`` file patch and is what now carries
   ``RAY_ENABLE_UV_RUN_RUNTIME_ENV`` and every user ``extra_env_vars`` to the
@@ -31,6 +33,8 @@ The two port patches ship their own suites. These cover the remaining two:
 import ast
 import logging
 import os
+import sys
+import types
 
 import pytest
 
@@ -120,6 +124,35 @@ def test_radio_layerscale_patch_anchor_still_matches_installed_vllm(
     content = patched_radio_source.read_text()
     assert _RADIO_MARKER in content
     assert "Skip layer-scale entries that vLLM doesn't use" not in content
+
+
+_FLASHINFER_AR_SOURCE = "distributed/device_communicators/flashinfer_all_reduce.py"
+_MNNVL_PATCH_FN = "_patch_vllm_invalid_mnnvl_workspace"
+_MNNVL_MARKER = 'backend == "mnnvl" and not getattr(workspace, "mc_ptr", 0)'
+
+
+@pytest.fixture
+def patched_flashinfer_ar_source(tmp_path, monkeypatch):
+    """The installed FlashInfer all-reduce source, unpatched then patched."""
+    copied = write_unpatched_copy(
+        _FLASHINFER_AR_SOURCE,
+        _MNNVL_PATCH_FN,
+        tmp_path / "flashinfer_all_reduce.py",
+    )
+    monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
+    patches._patch_vllm_invalid_mnnvl_workspace(logging.getLogger(__name__))
+    return copied
+
+
+@pytest.mark.vllm
+def test_invalid_mnnvl_workspace_patch_matches_installed_vllm(
+    patched_flashinfer_ar_source,
+):
+    """Pin vLLM #49043's guard and fallback contract against the wheel."""
+    content = patched_flashinfer_ar_source.read_text()
+    assert _MNNVL_MARKER in content
+    assert "workspace.destroy()" in content
+    assert "return None" in content
     ast.parse(content)
 
 
@@ -156,6 +189,51 @@ def test_radio_layerscale_patch_warns_on_unknown_source(monkeypatch, tmp_path, c
 
     assert radio_source.read_text() == "class RadioModel:\n    pass\n"
     assert "vLLM 0.25.1 source shape was not found" in caplog.text
+
+
+@pytest.mark.vllm
+def test_invalid_mnnvl_workspace_patch_is_idempotent(
+    patched_flashinfer_ar_source, monkeypatch
+):
+    """Multiple generation workers can patch the shared wheel concurrently."""
+    before = patched_flashinfer_ar_source.read_text()
+    monkeypatch.setattr(
+        patches,
+        "_get_vllm_file",
+        lambda _relative: str(patched_flashinfer_ar_source),
+    )
+    patches._patch_vllm_invalid_mnnvl_workspace(logging.getLogger(__name__))
+    assert patched_flashinfer_ar_source.read_text() == before
+
+
+def test_source_compat_applies_all_interpreter_independent_patches(monkeypatch):
+    """Direct vllm.LLM callers need both patches that precede vLLM imports."""
+    applied = []
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.__path__ = []
+    fake_vllm_logger = types.ModuleType("vllm.logger")
+    fake_vllm_logger.init_logger = logging.getLogger
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.logger", fake_vllm_logger)
+    monkeypatch.setattr(
+        patches,
+        "_patch_vllm_tool_parser_namespace_tool",
+        lambda _logger: applied.append("tool-parser"),
+    )
+    monkeypatch.setattr(
+        patches,
+        "_patch_vllm_invalid_mnnvl_workspace",
+        lambda _logger: applied.append("mnnvl"),
+    )
+    monkeypatch.setattr(
+        patches,
+        "_patch_vllm_radio_layerscale_loader",
+        lambda _logger: applied.append("radio"),
+    )
+
+    patches.ensure_vllm_source_compat()
+
+    assert applied == ["tool-parser", "radio", "mnnvl"]
 
 
 @pytest.mark.parametrize(
