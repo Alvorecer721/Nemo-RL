@@ -58,8 +58,8 @@ srun \
     export RUN_LOG='"$RUN_DIR"'/run.log
     export APERTUS_CKPT='"$APERTUS_CKPT"'
     export APERTUS_TOKENIZER='"$APERTUS_TOKENIZER"'
-    PROBE_SCRIPT='"$REPO_DIR"'/infra/slurm/cscs/probe_nemo_rl_vllm0251_image.py
-
     cd /opt/nemo-rl
-    /usr/local/bin/python-VllmGenerationWorker "$PROBE_SCRIPT" 2>&1 | tee "$RUN_LOG"
+    /usr/local/bin/python-VllmGenerationWorker \
+      -m infra.slurm.cscs.probe_nemo_rl_vllm0251_image \
+      2>&1 | tee "$RUN_LOG"
   '

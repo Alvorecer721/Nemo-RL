@@ -33,17 +33,12 @@ CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
 RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nrl_vllm0251_mn_${SLURM_JOB_ID}}
 APERTUS_CKPT=${APERTUS_CKPT:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200}
 APERTUS_TOKENIZER=${APERTUS_TOKENIZER:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official}
-PROBE_SCRIPT=$REPO_DIR/infra/slurm/cscs/probe_nemo_rl_vllm0251_multinode_image.py
 GPUS_PER_NODE=4
 NUM_NODES=$SLURM_JOB_NUM_NODES
 EXPECTED_UNITS=$((NUM_NODES * GPUS_PER_NODE))
 
 [[ -r "$CONTAINER_ENV" ]] || {
   echo "Container EDF not found at CONTAINER_ENV=$CONTAINER_ENV" >&2
-  exit 1
-}
-[[ -r "$PROBE_SCRIPT" ]] || {
-  echo "Probe script not found at $PROBE_SCRIPT" >&2
   exit 1
 }
 mkdir -p "$RUN_DIR"
@@ -61,7 +56,7 @@ printf 'head=%s\nhead_ip=%s\nnodes=%s\ncontainer_env=%s\n' \
   "$head_node" "$HEAD_IP" "$NUM_NODES" "$CONTAINER_ENV"
 
 export APERTUS_CKPT APERTUS_TOKENIZER EXPECTED_UNITS GPUS_PER_NODE HEAD_IP
-export PROBE_SCRIPT RUN_DIR
+export RUN_DIR
 export SLURM_EXPORT_ENV=ALL
 unset LD_PRELOAD
 
@@ -96,7 +91,9 @@ srun \
         exit 1
       }
       cd /opt/nemo-rl
-      /opt/nemo_rl_venv/bin/python "$PROBE_SCRIPT" 2>&1 | tee "$RUN_DIR/run.log"
+      /opt/nemo_rl_venv/bin/python \
+        -m infra.slurm.cscs.probe_nemo_rl_vllm0251_multinode_image \
+        2>&1 | tee "$RUN_DIR/run.log"
       grep -Fq "multinode_vllm_startup=OK" "$RUN_DIR/run.log"
     else
       until (exec 3<>"/dev/tcp/${HEAD_IP}/${RAY_PORT}") 2>/dev/null; do
