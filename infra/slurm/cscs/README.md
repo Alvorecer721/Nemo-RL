@@ -259,6 +259,21 @@ The generic `VllmGeneration` path remains unchanged: disabling these backends
 globally would also remove optimized paths from single-node and other supported
 platforms. Revisit the generic path only with a topology-aware upstream guard.
 
+### Parallelism placement on quad-GH200 nodes
+
+Upstream validates TP8 on 8-GPU nodes, where the whole TP group stays inside
+NVLink. On Clariden's quad-GH200 nodes the same setting silently becomes
+node-spanning: every per-layer all-reduce crosses Slingshot instead of NVLink,
+which is both a throughput cliff and the reason the collective workaround above
+exists. Upstream TP8 test results therefore do not transfer to this cluster.
+
+Default placement here: keep TP inside the node (TP <= 4), scale generation
+across nodes with additional engine replicas (data parallel), and cross nodes
+with pipeline parallelism when a model outgrows the roughly 384 GB a TP4 node
+provides (NeMo-RL requires the async engine whenever PP > 1). Node-spanning
+TP8 is certified by the two-node probe but remains a last resort: it pays
+Slingshot latency on every layer and depends on the scoped workaround.
+
 For historical comparison, the checkout-overlay validation on allocation
 `3061315` on 2026-08-12 injected the ABI-matched
 `xielu-site-current` into the frozen Megatron worker environment and passed a
