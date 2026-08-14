@@ -15,6 +15,7 @@ import os
 import warnings
 from collections import defaultdict
 from dataclasses import asdict, dataclass, fields
+from enum import Enum
 from functools import partial
 
 import numpy as np
@@ -50,6 +51,13 @@ class DPOSaveState:
     total_steps: int  # Track total number of steps across all epochs
     consumed_samples: int
     total_valid_tokens: int  # Track total number of non-padding tokens during training
+
+
+class DPOTrainStatus(Enum):
+    """Reason the DPO training loop stopped."""
+
+    COMPLETED = "completed"
+    TIMED_OUT = "timed_out"
 
 
 def _initial_dpo_save_state() -> DPOSaveState:
@@ -527,8 +535,16 @@ def dpo_train(
     logger,
     checkpointer,
     dpo_save_state: DPOSaveState,
-) -> None:
+) -> DPOTrainStatus:
     # Run dpo training
+    if (
+        master_config.checkpointing["checkpoint_must_save_by"] is not None
+        and not master_config.checkpointing["enabled"]
+    ):
+        raise ValueError(
+            "checkpointing must be enabled when checkpoint_must_save_by is set"
+        )
+
     timer = Timer()
     timeout = TimeoutChecker(
         timeout=master_config.checkpointing["checkpoint_must_save_by"],
@@ -786,15 +802,18 @@ def dpo_train(
             current_step += 1
             total_steps += 1
 
+            if is_last_step:
+                if total_steps >= master_config.dpo.max_num_steps:
+                    print(
+                        "Max number of steps has been reached, stopping training early",
+                        flush=True,
+                    )
+                return DPOTrainStatus.COMPLETED
             if should_save_by_timeout:
                 print("Timeout has been reached, stopping training early", flush=True)
-                return
-            if total_steps >= master_config.dpo.max_num_steps:
-                print(
-                    "Max number of steps has been reached, stopping training early",
-                    flush=True,
-                )
-                return
+                return DPOTrainStatus.TIMED_OUT
 
         current_epoch += 1
         current_step = 0  # Reset step counter for new epoch
+
+    return DPOTrainStatus.COMPLETED
