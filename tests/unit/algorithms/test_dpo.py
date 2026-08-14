@@ -21,6 +21,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from nemo_rl.algorithms.dpo import (
     DPOConfig,
+    DPOTrainStatus,
     MasterConfig,
     _get_dpo_save_state,
     _initial_dpo_save_state,
@@ -255,7 +256,7 @@ def test_exit_on_max_steps(mock_dpo_components):
     dpo_save_state = _initial_dpo_save_state()
 
     # Run training
-    dpo_train(
+    status = dpo_train(
         mock_dpo_components["policy"],
         mock_dpo_components["train_dataloader"],
         mock_dpo_components["val_dataloader"],
@@ -268,6 +269,7 @@ def test_exit_on_max_steps(mock_dpo_components):
     )
 
     # Verify we only trained for 12 steps.
+    assert status is DPOTrainStatus.COMPLETED
     assert mock_dpo_components["policy"].train.call_count == 12
 
 
@@ -280,7 +282,7 @@ def test_exit_on_max_epochs(mock_dpo_components):
     dpo_save_state = _initial_dpo_save_state()
 
     # Run training
-    dpo_train(
+    status = dpo_train(
         mock_dpo_components["policy"],
         mock_dpo_components["train_dataloader"],
         mock_dpo_components["val_dataloader"],
@@ -293,7 +295,75 @@ def test_exit_on_max_epochs(mock_dpo_components):
     )
 
     # Verify we trained for exactly two epochs (20 batches).
+    assert status is DPOTrainStatus.COMPLETED
     assert mock_dpo_components["policy"].train.call_count == 20
+
+
+def test_completed_checkpoint_does_not_train(mock_dpo_components):
+    """Test that a completed checkpoint reports completion without training."""
+    max_num_steps = mock_dpo_components["master_config"].dpo.max_num_steps
+    dpo_save_state = _initial_dpo_save_state()
+    dpo_save_state.total_steps = max_num_steps
+
+    status = dpo_train(
+        mock_dpo_components["policy"],
+        mock_dpo_components["train_dataloader"],
+        mock_dpo_components["val_dataloader"],
+        mock_dpo_components["tokenizer"],
+        mock_dpo_components["loss_fn"],
+        mock_dpo_components["master_config"],
+        mock_dpo_components["logger"],
+        mock_dpo_components["checkpointer"],
+        dpo_save_state,
+    )
+
+    assert status is DPOTrainStatus.COMPLETED
+    mock_dpo_components["policy"].train.assert_not_called()
+
+
+def test_checkpoint_timeout_requires_checkpointing(mock_dpo_components):
+    """Test that a timeout cannot silently stop without a resumable checkpoint."""
+    master_config = mock_dpo_components["master_config"]
+    master_config.checkpointing["checkpoint_must_save_by"] = "00:00:01:00"
+
+    with pytest.raises(
+        ValueError,
+        match="checkpointing must be enabled when checkpoint_must_save_by is set",
+    ):
+        dpo_train(
+            mock_dpo_components["policy"],
+            mock_dpo_components["train_dataloader"],
+            mock_dpo_components["val_dataloader"],
+            mock_dpo_components["tokenizer"],
+            mock_dpo_components["loss_fn"],
+            master_config,
+            mock_dpo_components["logger"],
+            mock_dpo_components["checkpointer"],
+            _initial_dpo_save_state(),
+        )
+
+
+def test_completion_wins_when_timeout_coincides_with_final_step(
+    mock_dpo_components,
+):
+    """Test that finishing on the timeout boundary does not request a restart."""
+    mock_dpo_components["master_config"].dpo.max_num_steps = 1
+
+    with patch("nemo_rl.algorithms.dpo.TimeoutChecker") as mock_timeout_class:
+        mock_timeout_class.return_value.check_save.return_value = True
+        status = dpo_train(
+            mock_dpo_components["policy"],
+            mock_dpo_components["train_dataloader"],
+            mock_dpo_components["val_dataloader"],
+            mock_dpo_components["tokenizer"],
+            mock_dpo_components["loss_fn"],
+            mock_dpo_components["master_config"],
+            mock_dpo_components["logger"],
+            mock_dpo_components["checkpointer"],
+            _initial_dpo_save_state(),
+        )
+
+    assert status is DPOTrainStatus.COMPLETED
 
 
 def test_exit_on_timeout(mock_dpo_components, capsys):
@@ -313,7 +383,7 @@ def test_exit_on_timeout(mock_dpo_components, capsys):
         mock_timeout_class.return_value = mock_timeout_instance
 
         # Run training
-        dpo_train(
+        status = dpo_train(
             mock_dpo_components["policy"],
             mock_dpo_components["train_dataloader"],
             mock_dpo_components["val_dataloader"],
@@ -326,6 +396,7 @@ def test_exit_on_timeout(mock_dpo_components, capsys):
         )
 
         # Verify training stopped at 8 steps (when check_save returned True)
+        assert status is DPOTrainStatus.TIMED_OUT
         assert mock_dpo_components["policy"].train.call_count == 8
 
         # Verify the timeout message was printed and is near the end (not followed by more training)
