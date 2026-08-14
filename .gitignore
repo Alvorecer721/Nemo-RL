@@ -6,6 +6,7 @@
 *.tar
 *.tar.gz
 .venv
+.venv-test
 venv
 venvs
 __pycache__/
@@ -53,3 +54,9 @@ tests/unit/unit_results.json
 tests/unit/unit_results/
 logs/
 xielu-builds/
+
+# Local recovery and crash artifacts
+/.tmp/
+/core_nid*
+
+# Machine-local EDF for the custom image produced by the CSCS builder

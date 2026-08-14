@@ -97,11 +97,16 @@ install_arm64_from_source() {
 
     cd "${build_dir}"
     ./scripts/download-dependencies
-    ./scripts/compile-dependencies
+    # gocryptfs ships pathological long-name test fixtures that are not needed
+    # for its binary.  fuse-overlayfs can extract them but may fail to remove
+    # them afterward with ENAMETOOLONG, which makes this image layer fail during
+    # cleanup even though Apptainer installed successfully.
+    TAR_OPTIONS="--exclude=*/tests/example_filesystems/*" ./scripts/compile-dependencies
     ./mconfig --without-suid
     make -C builddir
     make -C builddir install
     ./scripts/install-dependencies
+    cd /
     rm -rf "${build_dir}"
 
     apt-get install -y --no-install-recommends "${runtime_packages[@]}"

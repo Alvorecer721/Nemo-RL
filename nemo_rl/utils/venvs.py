@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import logging
 import os
 import shlex
@@ -32,9 +33,71 @@ DEFAULT_VENV_DIR = os.path.join(git_root, "venvs")
 # long before packages land, so a crashed build leaves a venv that looks usable.
 # `uv sync` is convergent (it repairs a partial venv), so an unmarked venv is
 # simply rebuilt in place — no deletion needed.
+#
+# The marker holds the dependency fingerprint it was built from, so the same
+# rebuild-in-place path also covers a venv that predates a dependency change.
 VENV_READY_MARKER = "NEMO_RL_VENV_READY"
 
 logger = logging.getLogger(__name__)
+
+
+def _normalized_worker_command(py_executable: str) -> str:
+    """Normalize command syntax and aliases without conflating distinct roots."""
+    normalized = []
+    for token in shlex.split(py_executable):
+        option, separator, value = token.partition("=")
+        if separator and os.path.isabs(value):
+            token = f"{option}={os.path.realpath(value)}"
+        elif os.path.isabs(token):
+            token = os.path.realpath(token)
+        normalized.append(token)
+    return shlex.join(normalized)
+
+
+@lru_cache(maxsize=None)
+def _dependency_fingerprint(py_executable: str) -> str:
+    """Digest the inputs a worker venv resolves from.
+
+    `uv run --locked` re-syncs the driver's environment only; worker venvs are
+    reused whenever they are marked ready, so a lockfile bump would otherwise
+    leave them serving the previous resolution indefinitely (after the vLLM
+    0.20 -> 0.25 bump, generation workers kept importing 0.20 until 0.25-only
+    code failed at refit). `pyproject.toml` is digested alongside `uv.lock`
+    because `[tool.uv]` build settings change the installed environment without
+    changing the resolution. The normalized worker command is part of the
+    fingerprint because it selects the environment's extras; two actors can
+    share the same lockfile while requiring different installed packages.
+    """
+    digest = hashlib.sha256()
+    digest.update(b"py_executable\0")
+    digest.update(_normalized_worker_command(py_executable).encode())
+    digest.update(b"\0")
+    for name in ("uv.lock", "pyproject.toml"):
+        path = Path(git_root) / name
+        if path.exists():
+            digest.update(name.encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _mark_venv_ready(ready_marker: Path, py_executable: str) -> None:
+    # Written via rename so a concurrent reader never sees a half-written
+    # fingerprint and rebuilds a venv that is actually current.
+    tmp = ready_marker.with_name(f"{ready_marker.name}.{os.getpid()}.tmp")
+    tmp.write_text(_dependency_fingerprint(py_executable))
+    os.replace(tmp, ready_marker)
+
+
+def venv_is_current(ready_marker: Path, py_executable: str) -> bool:
+    """Whether a venv is both ready and built from the current dependencies."""
+    try:
+        return ready_marker.read_text().strip() == _dependency_fingerprint(
+            py_executable
+        )
+    except OSError:
+        return False
 
 
 @lru_cache(maxsize=None)
@@ -87,8 +150,13 @@ def create_local_venv(
     ready_marker = Path(venv_path) / VENV_READY_MARKER
     ready_marker.unlink(missing_ok=True)
 
+    # Honor a pinned uv (UV env var) instead of PATH resolution: a personal uv
+    # earlier on PATH can be too old for the project's [tool.uv] fields and
+    # fail the build.
+    uv = os.environ.get("UV", "uv")
+
     # Create the virtual environment
-    uv_venv_cmd = ["uv", "venv", "--allow-existing", venv_path]
+    uv_venv_cmd = [uv, "venv", "--allow-existing", venv_path]
     subprocess.run(uv_venv_cmd, check=True)
 
     # Execute the command with the virtual environment
@@ -101,14 +169,28 @@ def create_local_venv(
 
     # Split the py_executable into command and arguments
     exec_cmd = shlex.split(py_executable)
+    if exec_cmd and exec_cmd[0] == "uv":
+        exec_cmd[0] = uv
+    is_uv_run = len(exec_cmd) > 1 and exec_cmd[0] == uv and exec_cmd[1] == "run"
+    if is_uv_run and "--exact" not in exec_cmd:
+        exec_cmd.insert(2, "--exact")
     # Command doesn't matter, since `uv` syncs the environment no matter the command.
     exec_cmd.extend(["echo", f"Finished creating venv {venv_path}"])
 
-    # Always run uv sync first to ensure the build requirements are set (for --no-build-isolation packages)
-    subprocess.run(["uv", "sync", "--directory", git_root], env=env, check=True)
+    # Always sync the base build requirements first (for --no-build-isolation
+    # packages), but retain an already-installed actor extra. The following
+    # exact `uv run --extra ...` still prunes anything outside the requested
+    # actor environment. Without --inexact, every rebuild removes large vLLM
+    # or MCore packages here only to install the same versions one command
+    # later.
+    base_sync_cmd = [uv, "sync"]
+    if is_uv_run:
+        base_sync_cmd.append("--inexact")
+    base_sync_cmd.extend(["--directory", git_root])
+    subprocess.run(base_sync_cmd, env=env, check=True)
     subprocess.run(exec_cmd, env=env, check=True)
 
-    ready_marker.touch()
+    _mark_venv_ready(ready_marker, py_executable)
 
     # Return the path to the python executable in the virtual environment
     python_path = os.path.join(venv_path, "bin", "python")
@@ -132,8 +214,13 @@ def _env_builder(
 
     # Skip early return if force_rebuild is True
     if not force_rebuild and python_path.exists() and ready_marker.exists():
-        logger.info(f"Using existing venv at {venv_path}")
-        return str(python_path)
+        if venv_is_current(ready_marker, py_executable):
+            logger.info(f"Using existing venv at {venv_path}")
+            return str(python_path)
+        logger.info(
+            f"Rebuilding venv at {venv_path}: it was built from different "
+            f"dependencies or worker command"
+        )
 
     # Sleep to stagger node startup
     time.sleep(1 * node_idx)
@@ -172,15 +259,26 @@ def _env_builder(
         )
         deadline = time.monotonic() + build_timeout
         while time.monotonic() < deadline:
-            if ready_marker.exists() and python_path.exists():
+            if venv_is_current(ready_marker, py_executable) and python_path.exists():
                 return str(python_path)
             if not started_file.exists():
-                # The builder touches the marker and then unlinks the claim;
+                # The builder writes the marker and then unlinks the claim;
                 # observing the unlink first is a benign race, so give the
                 # marker one more poll before declaring the build dead.
                 time.sleep(1)
-                if ready_marker.exists() and python_path.exists():
+                if (
+                    venv_is_current(ready_marker, py_executable)
+                    and python_path.exists()
+                ):
                     return str(python_path)
+                if ready_marker.exists():
+                    raise RuntimeError(
+                        f"The builder of venv {venv_path} completed against "
+                        f"different dependencies or worker command than this "
+                        f"job. Concurrent jobs must not share "
+                        f"NEMO_RL_VENV_DIR across a dependency change; let one "
+                        f"job settle the venvs first."
+                    )
                 raise RuntimeError(
                     f"The builder of venv {venv_path} exited without completing "
                     f"(no {VENV_READY_MARKER}); see its logs for the build error."
