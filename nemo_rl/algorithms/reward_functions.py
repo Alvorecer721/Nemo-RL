@@ -271,7 +271,6 @@ def apply_reward_shaping(
 
     updated_rewards = torch.zeros_like(rewards)
     for i, message_response_length in enumerate(response_lengths):
-
         # Calculate the exceed length and the corresponding reward penalty
         exceed_length = message_response_length - expected_response_length
         overlong_reward = min(

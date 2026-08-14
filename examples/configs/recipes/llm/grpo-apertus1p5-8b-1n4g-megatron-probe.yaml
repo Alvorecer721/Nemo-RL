@@ -1,69 +1,35 @@
-# Phase-0 probe: STOCK v0.7.0 GRPO on Apertus 1.5 8B — zero new algorithm code.
-# Purpose: validate the online-loop legs never exercised by DPO:
-#   (1) vLLM loading Apertus inside NeMo-RL's generation workers
-#   (2) per-step Megatron->vLLM weight refit for our arch (xIELU/QK-norm/266k)
-#   (3) generation-vs-training logprob agreement (lp_error gate)
 defaults: ../../grpo_math_8B_megatron.yaml
-
 grpo:
   num_prompts_per_step: 8
   num_generations_per_prompt: 4
   max_num_steps: 3
   val_period: 0
-  val_at_start: false
-  cot_think_token_ids: [32, 33]   # thinking-pair token ids, for CoT-length logging
-
+  cot_think_token_ids:
+  - 32
+  - 33
 data:
   train:
-    dataset_name: DeepScaler   # few-MB download; OpenMathInstruct-2 is ~20GB
-    split_validation_size: 0.05
-
-checkpointing:
-  enabled: false
-
+    dataset_name: DeepScaler
 policy:
-  model_name: /capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200  # pragma: allowlist secret
+  model_name: /capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200
   tokenizer:
     name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official
-  train_global_batch_size: 32   # = num_prompts_per_step * num_generations_per_prompt
-  train_micro_batch_size: 1
+  train_global_batch_size: 32
   logprob_batch_size: 2
   max_total_sequence_length: 2048
-
   megatron_cfg:
-    force_reconvert_from_hf: false   # load the cached Megatron ckpt directly (skip HF reconvert)
-    # No use_linear_ce_fusion_loss here: it is incompatible with sequence
-    # packing (enabled in the GRPO base), which has its own fused-loss knob
-    # (sequence_packing.fuse_loss). Linear-CE fusion is a DPO-side win.
     tensor_model_parallel_size: 2
     pipeline_model_parallel_size: 1
-    sequence_parallel: false
     bias_activation_fusion: false
-    optimizer:
-      # ZeRO-1: shard the Adam state + fp32 master across the DP group (=2 here at TP2/PP1); this already matches the stock base default (grpo_math_1B_megatron.yaml) and the Apertus Megatron pretraining (--use-distributed-optimizer).
-      # Kept explicit to document the colocation reliance, but it is NOT the OOM fix — that is vllm_cfg.sleep_level below; the optimizer was already sharded (inherited) when the run OOM'd.
-      use_distributed_optimizer: true
-
   generation:
     max_new_tokens: 512
     vllm_cfg:
-      # Generation is kernel-free by config contract: vLLM workers inherit the
-      # driver env, whose PYTHONPATH carries the training-side xIELU kernel
-      # (XIELU_SITE) — blank it here so the invariant travels with every recipe
-      # in this family on every launcher (measured tie; docs/apertus-xielu.md).
       env_vars:
-        PYTHONPATH: ""
-      tensor_parallel_size: 1
+        PYTHONPATH: ''
       gpu_memory_utilization: 0.55
       max_model_len: 2048
-      # sleep level 2 discards vLLM weights on offload instead of backing them up to host RAM (~17 GiB/worker); refit overwrites them next step anyway, so this removes the host-RAM term that OOM-killed the step-2 refit.
       sleep_level: 2
-
 logger:
-  wandb_enabled: false
-  tensorboard_enabled: false
   log_dir: logs/grpo-apertus-probe
-
 cluster:
   gpus_per_node: 4
-  num_nodes: 1

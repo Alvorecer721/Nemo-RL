@@ -1,42 +1,31 @@
-# Online GRPO + Adaptive Length Penalty on Apertus 1.5 8B (omni) — NATIVE env path (NOT NeMo-Gym).
-# Train: DeepVision rl_prompt MMIDIDX store (prompt-only, image tokens inline), prompts capped at 2048
-#        -> ~6k output budget in an 8k context. Reward = gold-set match (single_turn_verifier).
-# Val:   MATH-500 (text) -> cross-modal reasoning-transfer probe (graded by the math env).
-# Base:  the NON-GYM megatron probe (inherits grpo_math_8B_megatron; Apertus ckpt + _tools_fixed tokenizer
-#        + TP=2 + sleep_level=2). No gym, no HTTP rollout server.
 defaults: grpo-apertus1p5-8b-1n4g-megatron-probe.yaml
-
 grpo:
   num_prompts_per_step: 64
-  num_generations_per_prompt: 8     # GRPO group size (K)
-  max_num_epochs: 1
-  max_num_steps: 2000               # 1 epoch over the <=2048 subset is ~1488 steps at npp=64
+  num_generations_per_prompt: 8
+  max_num_steps: 2000
   val_period: 50
-  val_at_start: true                # MATH-500 baseline before any omni RL
+  val_at_start: true
   max_val_samples: 500
   reward_shaping:
     enabled: true
     alp_coef: 1.0
-    max_response_length: 6000       # must be <= generation.max_new_tokens
-
+    max_response_length: 6000
 policy:
-  train_global_batch_size: 512      # = num_prompts_per_step * num_generations_per_prompt
+  train_global_batch_size: 512
   max_total_sequence_length: 8192
   tokenizer:
     chat_template_kwargs:
-      enable_thinking: true         # for the MATH-500 val render; train omni prompts already bake it in
+      enable_thinking: true
   generation:
     max_new_tokens: 6000
-    stop_token_ids: [2, 68, 72]     # Apertus EOS set: </s>, <|assistant_end|>, <|tools_suffix|>
+    stop_token_ids:
+    - 2
+    - 68
+    - 72
     vllm_cfg:
       max_model_len: 8192
-
 data:
-  _override_: true                  # replace the base math data, don't merge -> must supply all keys grpo reads
-  max_input_seq_length: ${policy.max_total_sequence_length}
-  shuffle: true
-  num_workers: 1
-  use_multiple_dataloader: false
+  _override_: true
   train:
     dataset_name: RLPromptDataset
     data_path: /capstor/store/cscs/swissai/infra01/vision-datasets/tokenized/alignment/deepvision_rl
@@ -50,30 +39,18 @@ data:
     processor: math_data_processor
     task_name: math
     env_name: math
-  default:
-    prompt_file: examples/prompts/cot.txt   # only reaches the text val (omni train is pre-tokenized)
-    system_prompt_file: null
-
 env:
   single_turn_verifier:
     num_workers: 8
-  math:
-    num_workers: 8
-    math_verify_impl: hf_math_verify
-
 cluster:
-  gpus_per_node: 4
-  num_nodes: 8                       # 8 proven safe; 16 tested ceiling; 32 deadlocks
-
+  num_nodes: 8
 checkpointing:
   enabled: true
   checkpoint_dir: results/grpo-apertus-omni-reasoning-alp-8n
   save_period: 50
   keep_top_k: 5
-
 logger:
   wandb_enabled: true
-  tensorboard_enabled: false
   log_dir: logs/grpo-apertus-omni-reasoning-alp-8n
   wandb:
     project: grpo-apertus

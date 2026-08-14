@@ -276,9 +276,7 @@ def test_quality_term_two_pair_explicit_numbers():
     data = {
         "input_ids": torch.zeros(4, 2, dtype=torch.long),
         "reference_policy_logprobs": ref,
-        "token_mask": torch.tensor(
-            [[0.0, 1.0]] * 4, dtype=torch.float64
-        ),
+        "token_mask": torch.tensor([[0.0, 1.0]] * 4, dtype=torch.float64),
         "sample_mask": torch.ones(4, dtype=torch.float64),
     }
     # rewards r = beta * (lp - ref): [1.0, -2.0, 1.0, -2.0]
