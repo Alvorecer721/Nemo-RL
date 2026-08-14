@@ -80,12 +80,14 @@ and must not be used for multi-node startup or refit certification.
 
 The EDF is intentionally ignored because its
 `image` field points at a user- or project-specific SquashFS path. Create it by
-copying `docker/nemo_rl.toml` and replacing only the `image` value with the
-builder's reported `BUILD COMPLETE` path.
+copying `docker/nemo_rl.toml` and replacing only the `image` value — either with
+the shared certified copy below (no build needed, readable by all of `infra01`)
+or with your own builder's reported `BUILD COMPLETE` path.
 
 | Field | Value |
 | --- | --- |
-| SquashFS | `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-7c68228e4f09-38c6b702948c.sqsh` |
+| Shared SquashFS | `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus+v0.7.0+vllm-0.25.1.aarch64.sqsh` |
+| Builder original | `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-7c68228e4f09-38c6b702948c.sqsh` |
 | Size | 48,752,754,688 bytes (about 45.4 GiB) |
 | SHA-256 | `d50f39e45f6104d13e12b9323dbe28cc91b0f13e3a250d029ce6cc7e7646742a` |
 | OCI tag | `nemo-rl-apertus:vllm-0.25.1-7c68228e4f09-38c6b702948c` |
