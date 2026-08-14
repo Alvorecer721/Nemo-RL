@@ -72,5 +72,18 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     "$UV" run --locked --extra mcore python $RUN_SCRIPT --config $RECIPE \
       grpo.max_num_steps=$MAX_STEPS \
       policy.generation.vllm_cfg.gpu_memory_utilization=0.40 ${VLLM_XIELU_SITE:+policy.generation.vllm_cfg.env_vars.PYTHONPATH=$VLLM_XIELU_SITE}
-  "
+  " || probe_rc=$?
+
+# Persist the KL gate evidence outside wipeable logs/: one TSV row per run so a
+# probe's pass/fail survives log cleanup (sacct alone cannot prove steps ran).
+{
+  out_file=$(scontrol show job "$SLURM_JOB_ID" -o 2>/dev/null | grep -oP 'StdOut=\K\S+')
+  kl_values=$(grep -h "Generation KL Error" "$out_file" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | paste -sd, -)
+  mkdir -p "$REPO_DIR/results"
+  printf '%s\t%s\t%s\t%s\trc=%s\tkl=[%s]\n' \
+    "$(date +%F_%T)" "$SLURM_JOB_ID" "$SLURM_JOB_NAME" "$(basename "$RECIPE")" \
+    "${probe_rc:-0}" "${kl_values:-NONE}" >> "$REPO_DIR/results/probe_ledger.tsv"
+} || true
+
 echo "END TIME: $(date)"
+exit "${probe_rc:-0}"
