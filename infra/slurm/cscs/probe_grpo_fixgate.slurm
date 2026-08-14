@@ -26,7 +26,7 @@ XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aar
 # Benchmarks only: set VLLM_XIELU_SITE to inject the kernel into vLLM generation,
 # overriding the recipe-level kernel-free default (bench/xielu_ab.slurm's kernel arm).
 VLLM_XIELU_SITE=${VLLM_XIELU_SITE:-}
-RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron.yaml}
+RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-probe.yaml}
 # NeMo-Gym recipes must run the dedicated runner (it binds task_to_env to the
 # gym actor); everything else uses the stock GRPO entry point.
 RUN_SCRIPT=${RUN_SCRIPT:-examples/run_grpo.py}
@@ -49,6 +49,9 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
   --gpus-per-task=4 --cpus-per-task="$SLURM_CPUS_PER_TASK" bash -c "
     set -euo pipefail
     export PYTHONUNBUFFERED=1
+    # Pin uv for worker-venv builders too (venvs.py honors UV): a personal uv
+    # on PATH can predate the project's [tool.uv] fields and fail the build.
+    export UV=$UV
     export HF_HOME=\${HF_HOME:-/iopsstor/scratch/cscs/\${USER}/.cache/huggingface}
     export PYTHONPATH=$REPO_DIR:$BRIDGE_ROOT/src:$XIELU_SITE
     # Persist the project + worker venvs on capstor: the image defaults both to
