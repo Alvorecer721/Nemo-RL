@@ -62,4 +62,3 @@ xielu-builds/
 /core_nid*
 
 # Machine-local EDF for the custom image produced by the CSCS builder
-/docker/nemo_rl_vllm0251.toml

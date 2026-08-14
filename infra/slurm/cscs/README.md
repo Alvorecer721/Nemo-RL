@@ -78,11 +78,10 @@ supersedes the earlier
 `336136c10490-dirty-fd360335e307` artifact, which required a checkout overlay
 and must not be used for multi-node startup or refit certification.
 
-The EDF is intentionally ignored because its
-`image` field points at a user- or project-specific SquashFS path. Create it by
-copying `docker/nemo_rl.toml` and replacing only the `image` value — either with
-the shared certified copy below (no build needed, readable by all of `infra01`)
-or with your own builder's reported `BUILD COMPLETE` path.
+The EDF ships with the checkout and points at the shared certified copy below
+(no build needed, readable by all of `infra01`). To run your own build instead,
+replace only its `image` value with the builder's reported `BUILD COMPLETE`
+path — and leave the checked-in default on the shared copy.
 
 | Field | Value |
 | --- | --- |
