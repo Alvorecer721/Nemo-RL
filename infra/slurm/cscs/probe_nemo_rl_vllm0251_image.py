@@ -18,7 +18,9 @@
 import gc
 import json
 import os
+import time
 import types
+from pathlib import Path
 
 
 def check_fp8_refit_storage() -> None:
@@ -68,8 +70,12 @@ def check_fp8_refit_storage() -> None:
 
 
 def main() -> None:
+    import nemo_rl
     from nemo_rl.models.generation.vllm.patches import ensure_vllm_source_compat
 
+    nemo_rl_root = Path(nemo_rl.__file__).resolve()
+    assert nemo_rl_root.is_relative_to("/opt/nemo-rl"), nemo_rl_root
+    print(f"baked_nemo_rl={nemo_rl_root}")
     ensure_vllm_source_compat()
 
     import torch
@@ -78,9 +84,22 @@ def main() -> None:
     from vllm import LLM, SamplingParams
 
     assert vllm.__version__ == "0.25.1", vllm.__version__
-    assert torch.cuda.get_device_name(0) == "NVIDIA GH200 120GB"
+    tensor_parallel_size = int(os.environ.get("TENSOR_PARALLEL_SIZE", "1"))
+    enforce_eager = os.environ.get("ENFORCE_EAGER", "true").lower() == "true"
+    num_prompts = int(os.environ.get("PROBE_NUM_PROMPTS", "1"))
+    max_tokens = int(os.environ.get("PROBE_MAX_TOKENS", "24"))
+    assert tensor_parallel_size >= 1, tensor_parallel_size
+    assert torch.cuda.device_count() >= tensor_parallel_size, (
+        torch.cuda.device_count(),
+        tensor_parallel_size,
+    )
+    for device_index in range(tensor_parallel_size):
+        assert torch.cuda.get_device_name(device_index) == "NVIDIA GH200 120GB"
     print(f"vllm_version={vllm.__version__}")
     print(f"gpu={torch.cuda.get_device_name(0)}")
+    print(f"cuda_device_count={torch.cuda.device_count()}")
+    print(f"tensor_parallel_size={tensor_parallel_size}")
+    print(f"enforce_eager={enforce_eager}")
     check_fp8_refit_storage()
 
     llm = LLM(
@@ -89,7 +108,9 @@ def main() -> None:
         dtype="bfloat16",
         max_model_len=512,
         gpu_memory_utilization=0.50,
-        enforce_eager=True,
+        enforce_eager=enforce_eager,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend="ray" if tensor_parallel_size > 1 else None,
         trust_remote_code=True,
     )
     tokenizer = AutoTokenizer.from_pretrained(os.environ["APERTUS_TOKENIZER"])
@@ -103,19 +124,29 @@ def main() -> None:
         tokenize=False,
         add_generation_prompt=True,
     )
+    generation_start = time.perf_counter()
     outputs = llm.generate(
-        [prompt],
+        [prompt] * num_prompts,
         SamplingParams(
             temperature=0.0,
-            max_tokens=24,
+            max_tokens=max_tokens,
             ignore_eos=True,
             skip_special_tokens=False,
         ),
     )
+    generation_seconds = time.perf_counter() - generation_start
+    total_generated_tokens = sum(len(output.outputs[0].token_ids) for output in outputs)
+    assert len(outputs) == num_prompts, outputs
+    assert total_generated_tokens == num_prompts * max_tokens, outputs
     generated = outputs[0].outputs[0]
-    assert len(generated.token_ids) == 24, outputs
+    assert len(generated.token_ids) == max_tokens, outputs
     assert generated.text.strip(), outputs
-    print(f"generated_tokens={len(generated.token_ids)}")
+    print(f"generated_prompts={len(outputs)}")
+    print(f"generated_tokens={total_generated_tokens}")
+    print(f"generation_seconds={generation_seconds:.3f}")
+    print(
+        f"generation_tokens_per_second={total_generated_tokens / generation_seconds:.2f}"
+    )
     print(f"generated_text={generated.text!r}")
 
     # Validate the plugin against vLLM 0.25.1 protocol objects in this runtime.

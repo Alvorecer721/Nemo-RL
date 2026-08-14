@@ -229,22 +229,35 @@ sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
   infra/slurm/cscs/probe_nemo_rl_grpo_async_vllm0251_image.slurm
 
 sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
+  infra/slurm/cscs/probe_nemo_rl_vllm0251_tp4_image.slurm
+
+sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
   infra/slurm/cscs/probe_nemo_rl_vllm0251_multinode_image.slurm
 ```
 
 The builder's CPU-side standalone boundary check passed on job `3077164`:
 the exported image reports vLLM `0.25.1`, OpenAI `2.6.1`, and xgrammar
 `0.2.3`, and imports the renderer, tokenizer, and Apertus tool parser from its
-baked tree. Run the five GPU probes above after changing the artifact; they
+baked tree. Run the six GPU probes above after changing the artifact; they
 cover real-model generation and repeated FP8 storage-preserving refit, a
 four-GH200 DPO step with CUDA xIELU, synchronous and asynchronous four-GH200
-GRPO refit/KL steps, and a two-node TP8 vLLM startup respectively.
+GRPO refit/KL steps, a compiled single-node TP4 vLLM run, and a two-node TP8
+vLLM startup respectively.
 
 The baked TP2 async probe passed on job `3077837` in 4:48. It ran one compiled
 TP2 AsyncLLM engine on two GH200s and TP2 Megatron training on the other two,
 rejected the invalid MNNVL workspace, captured CUDA graphs, completed two GRPO
 steps with generation KL error `0.0000`, refit successfully, and used the CUDA
 xIELU training kernel.
+
+The baked single-node TP4 probe passed on job `3078831` in 3:27. It loaded the
+real Apertus 1.5 8B checkpoint across all four GH200s with compilation enabled,
+rejected the unusable MNNVL multicast workspace, initialized the compiled
+TRT-LLM FlashInfer all-reduce backend, captured CUDA graphs, and generated four
+64-token responses. This is the relevant full-node inference certification for
+Clariden. The two-node TP8 probe is optional, non-blocking scalability evidence;
+current Apertus 8B Async-GRPO uses one node with TP2 inference and TP2 training
+and does not require TP8.
 
 The two-node probe carries a CSCS-specific vLLM 0.25.1 collective workaround:
 it disables vLLM's direct PyNccl and Hopper symmetric-memory backends for the
@@ -272,7 +285,9 @@ across nodes with additional engine replicas (data parallel), and cross nodes
 with pipeline parallelism when a model outgrows the roughly 384 GB a TP4 node
 provides (NeMo-RL requires the async engine whenever PP > 1). Node-spanning
 TP8 is certified by the two-node probe but remains a last resort: it pays
-Slingshot latency on every layer and depends on the scoped workaround.
+Slingshot latency on every layer and depends on the scoped workaround. It is
+not a release blocker for the current one-node Apertus 8B workloads; the
+single-node TP4 probe is the maximum relevant tensor-parallel certification.
 
 For historical comparison, the checkout-overlay validation on allocation
 `3061315` on 2026-08-12 injected the ABI-matched
