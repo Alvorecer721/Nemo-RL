@@ -15,12 +15,11 @@
 set -euo pipefail
 echo "START TIME: $(date)"
 
-# ~1,921 steps x ~30-45 s exceeds one 12 h window: chain windows with
-# singleton dependency; auto-resume picks up from the latest checkpoint.
+# ~1,921 steps x ~30-45 s exceeds one 12 h window. Stop early enough to save a
+# checkpoint, then queue one successor only when training reports that timeout.
 AUTO_REQUEUE=${AUTO_REQUEUE:-true}
-if [ "$AUTO_REQUEUE" = true ]; then
-    sbatch --dependency=singleton --job-name="$SLURM_JOB_NAME" "$0"
-fi
+CHECKPOINT_MUST_SAVE_BY=${CHECKPOINT_MUST_SAVE_BY:-00:11:30:00}
+DPO_TIMEOUT_EXIT_CODE=75  # EX_TEMPFAIL; propagated through the single-task srun.
 
 ###############################################################################
 # Apertus-1.5 8B DPO — MaxMin full set, reference-identical hyperparameters.
@@ -43,7 +42,7 @@ FULL_SET=/capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datas
 SRC_SET=/capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-Filtered-Decontaminated
 
 unset LD_PRELOAD
-srun \
+if srun \
   --mpi=pmix \
   --environment="$CONTAINER_ENV" \
   --ntasks=1 \
@@ -89,6 +88,26 @@ PYEOF
     fi
 
     echo "=== DPO training: $(basename "'"$RECIPE"'") ==="
-    "$UV" run --locked --extra mcore examples/run_dpo.py --config "'"$RECIPE"'"
+    "$UV" run --locked --extra mcore examples/run_dpo.py --config "'"$RECIPE"'" \
+      checkpointing.checkpoint_must_save_by="'"$CHECKPOINT_MUST_SAVE_BY"'"
   '
+then
+    train_exit_code=0
+else
+    train_exit_code=$?
+fi
+
+if [ "$train_exit_code" -eq "$DPO_TIMEOUT_EXIT_CODE" ]; then
+    if [ "$AUTO_REQUEUE" = true ]; then
+        echo "DPO checkpoint deadline reached; submitting one successor job"
+        sbatch --dependency=singleton --job-name="$SLURM_JOB_NAME" "$0"
+    else
+        echo "DPO checkpoint deadline reached; AUTO_REQUEUE is disabled" >&2
+        exit "$train_exit_code"
+    fi
+elif [ "$train_exit_code" -ne 0 ]; then
+    echo "DPO training failed with exit code $train_exit_code; not resubmitting" >&2
+    exit "$train_exit_code"
+fi
+
 echo "END TIME: $(date)"
