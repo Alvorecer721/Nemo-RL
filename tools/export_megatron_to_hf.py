@@ -12,8 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Export a Megatron torch-dist checkpoint (NeMo-RL step_XXXX/policy/weights or
-raw Megatron-LM) to a HuggingFace checkpoint via the Megatron-Bridge mapping.
+"""Export a Megatron torch-dist checkpoint to Hugging Face via Megatron Bridge.
+
+The source can be NeMo-RL ``step_XXXX/policy/weights`` or raw Megatron-LM.
 
 The export direction of the bridge was certified bit-exact (387/387 tensors,
 TP1 and TP2) on 2026-06-13; this CLI is the production wrapper around the same
@@ -37,10 +38,22 @@ from pathlib import Path
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--hf-base", required=True, help="HF checkpoint defining the architecture/config")
-    p.add_argument("--megatron-ckpt", required=True, help="torch-dist weights dir (contains iter_*/ or is an iter dir)")
+    p.add_argument(
+        "--hf-base",
+        required=True,
+        help="HF checkpoint defining the architecture/config",
+    )
+    p.add_argument(
+        "--megatron-ckpt",
+        required=True,
+        help="torch-dist weights dir (contains iter_*/ or is an iter dir)",
+    )
     p.add_argument("--out", required=True)
-    p.add_argument("--tokenizer", default=None, help="tokenizer dir to copy into the output (default: from --hf-base)")
+    p.add_argument(
+        "--tokenizer",
+        default=None,
+        help="tokenizer dir to copy into the output (default: from --hf-base)",
+    )
     args = p.parse_args()
 
     out = Path(args.out)
@@ -70,11 +83,14 @@ def main() -> None:
     # shard writer refuses incomplete shards, so we assemble and write the
     # full 451-tensor state dict ourselves as a single safetensors file.
     import json
+
     from safetensors import safe_open
     from safetensors.torch import save_file
 
-    state = {name: t.detach().to("cpu", torch.bfloat16).contiguous()
-             for name, t in bridge.export_hf_weights(models, show_progress=True)}
+    state = {
+        name: t.detach().to("cpu", torch.bfloat16).contiguous()
+        for name, t in bridge.export_hf_weights(models, show_progress=True)
+    }
     base = Path(args.hf_base)
     with open(base / "model.safetensors.index.json") as f:
         index = json.load(f)["weight_map"]
@@ -85,13 +101,23 @@ def main() -> None:
     extra = [k for k in state if k not in index]
     assert not extra, f"exported keys absent from base index: {extra[:5]}"
     assert set(state) == set(index), "tensor set mismatch vs base checkpoint"
-    print(f"exported {len(state) - len(missing)} params + {len(missing)} buffers from base")
+    print(
+        f"exported {len(state) - len(missing)} params + {len(missing)} buffers from base"
+    )
     save_file(state, str(out / "model.safetensors"), metadata={"format": "pt"})
 
     tok_src = Path(args.tokenizer) if args.tokenizer else base
-    for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
-                 "generation_config.json", "chat_template.jinja"):
-        src = (base if name in ("config.json", "generation_config.json") else tok_src) / name
+    for name in (
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "generation_config.json",
+        "chat_template.jinja",
+    ):
+        src = (
+            base if name in ("config.json", "generation_config.json") else tok_src
+        ) / name
         if src.exists():
             shutil.copy2(src, out / name)
     print(f"exported -> {out}")

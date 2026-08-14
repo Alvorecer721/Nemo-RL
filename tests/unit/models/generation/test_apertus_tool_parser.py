@@ -42,8 +42,9 @@ def parser():
 
 @pytest.mark.vllm
 def test_registers_under_apertus():
-    import nemo_rl.models.generation.vllm.apertus_tool_parser  # noqa: F401  registers via decorator
     from vllm.tool_parsers.abstract_tool_parser import ToolParserManager
+
+    import nemo_rl.models.generation.vllm.apertus_tool_parser  # noqa: F401  registers via decorator
 
     assert "apertus" in ToolParserManager.list_registered()
 
@@ -52,7 +53,10 @@ def test_registers_under_apertus():
 @pytest.mark.parametrize(
     "output, expected",
     [
-        (f'{P}[{{"get_weather": {{"city": "Paris"}}}}]{S}', [("get_weather", {"city": "Paris"})]),
+        (
+            f'{P}[{{"get_weather": {{"city": "Paris"}}}}]{S}',
+            [("get_weather", {"city": "Paris"})],
+        ),
         (f'{P}[{{"a": {{}}}}, {{"b": {{"x": 1}}}}]{S}', [("a", {}), ("b", {"x": 1})]),
         (f'{P}[{{"calc": {{"expr": "a}}b"}}}}]{S}', [("calc", {"expr": "a}b"})]),
         (f'{P}[{{"f": {{"x": 1}}}}]', [("f", {"x": 1})]),  # missing suffix (truncated)
@@ -122,7 +126,10 @@ def test_adjust_request_forces_skip_special_tokens_with_tools(parser):
             "function": {
                 "name": "f",
                 "description": "d",
-                "parameters": {"type": "object", "properties": {"x": {"type": "string"}}},
+                "parameters": {
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                },
             },
         }
     ]
@@ -160,5 +167,7 @@ def test_streaming_emits_complete_tool_call_at_block_close(parser):
 
 @pytest.mark.vllm
 def test_streaming_passes_content_through(parser):
-    dm = parser.extract_tool_calls_streaming("", "hello world", "hello world", [], [], [], request=None)
+    dm = parser.extract_tool_calls_streaming(
+        "", "hello world", "hello world", [], [], [], request=None
+    )
     assert dm is not None and dm.content == "hello world" and not dm.tool_calls
