@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Single-turn verifier environment that grades rollouts against a gold set.
+r"""Single-turn verifier environment that grades rollouts against a gold set.
 
 Grades each rollout by extracting its final answer (``\\boxed{}`` first, then an
 ``Answer:`` line) and matching it against ``{ground_truth} U answer_variants`` with a
@@ -65,7 +65,7 @@ def _mute_output():
 
 
 def _extract_boxed_answer(text: str) -> Optional[str]:
-    """Extract the last \\boxed{...} expression from text."""
+    r"""Extract the last \boxed{...} expression from text."""
     idx = text.rfind("\\boxed{")
     if idx < 0:
         return None

@@ -1,0 +1,16 @@
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe.yaml
+loss_fn:
+  use_importance_sampling_correction: true
+grpo:
+  async_grpo:
+    enabled: true
+policy:
+  generation:
+    colocated:
+      enabled: false
+      resources:
+        num_nodes: 1
+        gpus_per_node: 2
+    vllm_cfg:
+      async_engine: true
+      tensor_parallel_size: 2

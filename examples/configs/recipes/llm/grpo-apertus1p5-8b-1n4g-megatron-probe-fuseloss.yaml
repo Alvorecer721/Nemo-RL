@@ -2,7 +2,7 @@
 # (SequencePackingFusionLossWrapper, upstream-tested) — the fusion-class
 # memory win available to packed GRPO, since linear-CE fusion is asserted
 # incompatible with packing. Same gate as the base probe: gen-KL ~0.0003.
-defaults: probe-grpo-apertus1p5-8b-1n4g-megatron.yaml
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe.yaml
 
 policy:
   sequence_packing:
