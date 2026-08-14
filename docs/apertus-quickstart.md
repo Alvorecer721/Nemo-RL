@@ -3,6 +3,7 @@
 How to reproduce online GRPO post-training for Apertus 1.5 8B on a CSCS GH200 node from a clean checkout.
 This branch runs on the **stock `nvcr.io/nvidia/nemo-rl:v0.7.0` image** via `uv run --locked` — no custom image build.
 For the architecture gotchas behind the gates here, see [apertus-traps-and-invariants.md](apertus-traps-and-invariants.md); for Slurm submission details, see `infra/slurm/cscs/README.md` in the repo.
+The faster vLLM 0.25.1 stack is also clone-and-run: a certified prebuilt image is shared under `MLLM/containers/` and the checkout ships its EDF (`docker/nemo_rl_vllm0251.toml`) — see the "Custom vLLM 0.25.1 GH200 image" section of the Slurm README.
 
 ## Prerequisites
 
