@@ -31,7 +31,12 @@ from unittest.mock import patch
 import pytest
 
 import nemo_rl.utils.venvs as venvs_module
-from nemo_rl.utils.venvs import VENV_READY_MARKER, create_local_venv
+from nemo_rl.utils.venvs import (
+    VENV_READY_MARKER,
+    create_local_venv,
+    make_actor_runtime_env,
+    pin_uv_to_path,
+)
 
 # The protocol under test lives in the task body, not in Ray scheduling.
 _env_builder_fn = venvs_module._env_builder._function
@@ -107,6 +112,49 @@ def test_non_uv_worker_keeps_exact_base_sync(tmp_path):
         "echo",
         f"Finished creating venv {tmp_path}/demo.Worker",
     ]
+
+
+def test_actor_runtime_env_prepends_pinned_uv_to_path(monkeypatch, tmp_path):
+    uv_executable = tmp_path / "uv"
+    uv_executable.touch(mode=0o755)
+    monkeypatch.setenv("UV", str(uv_executable))
+    monkeypatch.setenv("PATH", "/users/example/.local/bin:/usr/bin")
+
+    with patch(
+        "nemo_rl.distributed.ray_actor_environment_registry.get_actor_python_env",
+        return_value="/opt/actor-venv/bin/python",
+    ):
+        runtime_env = make_actor_runtime_env("demo.Worker")
+
+    assert runtime_env["py_executable"] == "/opt/actor-venv/bin/python"
+    assert runtime_env["env_vars"]["UV"] == str(uv_executable)
+    assert runtime_env["env_vars"]["PATH"].split(os.pathsep) == [
+        str(tmp_path),
+        "/users/example/.local/bin",
+        "/usr/bin",
+    ]
+    assert runtime_env["env_vars"]["VIRTUAL_ENV"] == "/opt/actor-venv"
+    assert runtime_env["env_vars"]["UV_PROJECT_ENVIRONMENT"] == "/opt/actor-venv"
+
+    # Ray prepends the actor venv after applying runtime_env. Gym calls the
+    # helper again inside its actor before spawning component subprocesses.
+    monkeypatch.setenv("PATH", "/opt/actor-venv/bin:/users/example/.local/bin")
+    pin_uv_to_path()
+    assert os.environ["PATH"].split(os.pathsep) == [
+        str(tmp_path),
+        "/opt/actor-venv/bin",
+        "/users/example/.local/bin",
+    ]
+
+
+def test_pin_uv_to_path_rejects_missing_explicit_uv(tmp_path):
+    env_vars = {
+        "UV": str(tmp_path / "missing-uv"),
+        "PATH": "/usr/bin",
+    }
+
+    with pytest.raises(FileNotFoundError, match="UV executable"):
+        pin_uv_to_path(env_vars)
 
 
 def test_create_local_venv_failure_leaves_no_marker(tmp_path):

@@ -447,6 +447,19 @@ if [[ "\${RAY_SUB_DEBUG_ENV:-0}" == "1" ]]; then
   env | grep -viE '(WANDB_API_KEY|HF_TOKEN|API_KEY|TOKEN|SECRET|PASSWORD)=' || true
 fi
 
+# Pyxis may propagate the submit host's PATH ahead of the image PATH. Prefer
+# the uv location owned by either supported image, then restore it after Ray's
+# runtime environment prepends actor venvs.
+if [[ -x /usr/local/bin/uv ]]; then
+  export UV=/usr/local/bin/uv
+elif [[ -x /root/.local/bin/uv ]]; then
+  export UV=/root/.local/bin/uv
+elif [[ -z "\${UV:-}" || ! -x "\$UV" ]]; then
+  echo "[ERROR] No executable uv found in the container image." >&2
+  exit 1
+fi
+export PATH="\$(dirname "\$UV"):\$PATH"
+
 # Turn on pipefail here; it does not carry into this 'bash -c' subshell from the
 # submit host. Without it, 'ray status | grep worker_units | awk ...' exits 0 even
 # when grep matches nothing (awk's status wins), so the '|| echo 0' fallback never
@@ -665,6 +678,17 @@ worker_cmd=$(cat <<EOF
 if [[ "\${RAY_SUB_DEBUG_ENV:-0}" == "1" ]]; then
   env | grep -viE '(WANDB_API_KEY|HF_TOKEN|API_KEY|TOKEN|SECRET|PASSWORD)=' || true
 fi
+
+if [[ -x /usr/local/bin/uv ]]; then
+  export UV=/usr/local/bin/uv
+elif [[ -x /root/.local/bin/uv ]]; then
+  export UV=/root/.local/bin/uv
+elif [[ -z "\${UV:-}" || ! -x "\$UV" ]]; then
+  echo "[ERROR] No executable uv found in the container image." >&2
+  exit 1
+fi
+export PATH="\$(dirname "\$UV"):\$PATH"
+
 echo "[INFO] Worker \$SLURM_PROCID on node \$SLURMD_NODENAME"
 
 # Fail fast if LOG_DIR is not actually shared with the submit host -- the worker

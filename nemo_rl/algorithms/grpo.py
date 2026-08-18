@@ -109,7 +109,10 @@ from nemo_rl.utils.logger import (
 from nemo_rl.utils.memory_tracker import MemoryTracker
 from nemo_rl.utils.nsys import maybe_gpu_profile_step
 from nemo_rl.utils.timer import TimeoutChecker, Timer
-from nemo_rl.utils.venvs import create_local_venv_on_each_node
+from nemo_rl.utils.venvs import (
+    create_local_venv_on_each_node,
+    make_actor_runtime_env,
+)
 
 # ===============================================================================
 # Configuration
@@ -479,11 +482,9 @@ def setup(
     def _spinup_nemo_gym(base_urls, model_name):
         """Spin up the NeMo Gym actor against the given generation server URLs."""
         t0 = time.perf_counter()
-        nemo_gym_py_exec = get_actor_python_env("nemo_rl.environments.nemo_gym.NemoGym")
-        if nemo_gym_py_exec.startswith("uv"):
-            nemo_gym_py_exec = create_local_venv_on_each_node(
-                nemo_gym_py_exec, "nemo_rl.environments.nemo_gym.NemoGym"
-            )
+        nemo_gym_runtime_env = make_actor_runtime_env(
+            "nemo_rl.environments.nemo_gym.NemoGym"
+        )
         nemo_gym_dict = env_configs["nemo_gym"]
         # NeMo-RL-side detection knobs are top-level NemoGymConfig fields
         # (where the detector reads them), not part of Gym's global config.
@@ -513,14 +514,7 @@ def setup(
                 node_id=ray_cur_node_id,
                 soft=True,
             )
-        nemo_gym_opts["runtime_env"] = {
-            "py_executable": nemo_gym_py_exec,
-            "env_vars": {
-                **os.environ,
-                "VIRTUAL_ENV": nemo_gym_py_exec,
-                "UV_PROJECT_ENVIRONMENT": nemo_gym_py_exec,
-            },
-        }
+        nemo_gym_opts["runtime_env"] = nemo_gym_runtime_env
         actor = NemoGym.options(**nemo_gym_opts).remote(nemo_gym_cfg)
         ray.get(actor._spinup.remote())
         return actor, time.perf_counter() - t0
