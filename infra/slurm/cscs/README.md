@@ -34,6 +34,16 @@ CONTAINER_ENV=$HOME/.edf/nemo_rl.toml sbatch infra/slurm/cscs/probe_grpo_fixgate
 RECIPE=examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml sbatch infra/slurm/cscs/submit_nemo_rl_dpo.slurm
 ```
 
+The DPO launcher chains itself across the 12 h wall-clock limit: at
+`CHECKPOINT_MUST_SAVE_BY` (default 11 h 30 m) the run saves a checkpoint and
+exits `75` (`EX_TEMPFAIL`), and the launcher queues exactly one
+`--dependency=singleton` successor that resumes from that checkpoint in a fresh
+window; a run that finishes exits `0` and queues nothing, so the chain
+terminates by itself. In the queue this looks like one `ap1p5-train` job at a
+time, reappearing until the run completes. Set `AUTO_REQUEUE=false` to disable
+the chaining, or `CHECKPOINT_MUST_SAVE_BY` to move the save deadline. A run
+that completes exactly at the deadline exits `0`, not `75` — completion wins.
+
 ## Submit from inside a compute node (coding agents)
 
 This subsection is specifically for a **coding agent** (e.g. Claude Code / VS Code) running **inside a compute-node Container Engine (CE) session** — it cannot reach a login node, and its CE container ships only `libjson-c.so.3`.
