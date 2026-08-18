@@ -1,9 +1,9 @@
 #!/bin/bash
 # Apertus recipe (CSCS Clariden, GH200 4-GPU nodes). Listed in disabled.txt:
 # model/tokenizer paths and the container EDF are CSCS-specific, so nightly
-# automation cannot run it. The certified launch path is the Slurm wrapper in
-# infra/slurm/cscs/ (see docs/apertus-quickstart.md); this driver mirrors that
-# invocation for accounting and dry-run coverage.
+# automation cannot run it. Operational Slurm launchers live in
+# infra/slurm/cscs/, but this driver only preserves recipe accounting and is
+# not evidence that the named recipe or topology has been certified.
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)
 source $SCRIPT_DIR/common.env
 

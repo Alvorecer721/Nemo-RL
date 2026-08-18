@@ -12,8 +12,8 @@
 #SBATCH --export=NONE
 #SBATCH --no-requeue
 
-# Multi-step GRPO probe: characterize the Generation-KL-Error gauge across
-# steps/batches (is 0.79 constant, length-correlated, or content-correlated?).
+# Multi-step GRPO correctness gate: require low train/generation KL on every
+# requested training step.
 # Memory fix vs the first probe: vllm gpu_memory_utilization 0.55 -> 0.40.
 set -euo pipefail
 # Run from the repo root (`cd <repo> && sbatch <this>`) or anywhere with `sbatch --chdir=<repo> <this>`.
@@ -31,6 +31,9 @@ RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-
 # gym actor); everything else uses the stock GRPO entry point.
 RUN_SCRIPT=${RUN_SCRIPT:-examples/run_grpo.py}
 MAX_STEPS=${MAX_STEPS:-3}
+GEN_KL_MAX=${GEN_KL_MAX:-0.002}
+MIN_GEN_KL_SAMPLES=${MIN_GEN_KL_SAMPLES:-$MAX_STEPS}
+RUN_LOG=${RUN_LOG:-$REPO_DIR/logs/grpo_fixgate_${SLURM_JOB_ID:-manual}.run.log}
 # Call the uv shipped in the image: uv cache buckets are version-specific, so a personal uv
 # earlier on PATH misses the seeded cache and rebuilds from source. Expanded by this shell
 # into the srun command (the body below is double-quoted), so it must be set out here.
@@ -44,6 +47,7 @@ for sm in 3rdparty/Megatron-Bridge-workspace/Megatron-Bridge 3rdparty/Gym-worksp
   fi
 done
 
+mkdir -p "$(dirname "$RUN_LOG")"
 unset LD_PRELOAD
 srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
   --gpus-per-task=4 --cpus-per-task="$SLURM_CPUS_PER_TASK" bash -c "
@@ -72,18 +76,46 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     "$UV" run --locked --extra mcore python $RUN_SCRIPT --config $RECIPE \
       grpo.max_num_steps=$MAX_STEPS \
       policy.generation.vllm_cfg.gpu_memory_utilization=0.40 ${VLLM_XIELU_SITE:+policy.generation.vllm_cfg.env_vars.PYTHONPATH=$VLLM_XIELU_SITE}
-  " || probe_rc=$?
+  " 2>&1 | tee "$RUN_LOG" || probe_rc=$?
+probe_rc=${probe_rc:-0}
 
-# Persist the KL gate evidence outside wipeable logs/: one TSV row per run so a
-# probe's pass/fail survives log cleanup (sacct alone cannot prove steps ran).
+# A successful process exit is insufficient for this probe: a broken Apertus
+# refit can train normally while generation uses different weights. Require a
+# metric for every requested step and fail on any train/generation mismatch.
+if (( probe_rc == 0 )); then
+  if ! awk -v threshold="$GEN_KL_MAX" -v minimum="$MIN_GEN_KL_SAMPLES" '
+    match($0, /Generation KL Error: [0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?/) {
+      value = substr($0, RSTART, RLENGTH)
+      sub(/^Generation KL Error: /, "", value)
+      count++
+      if ((value + 0) >= threshold) {
+        printf("[FATAL] Generation KL Error %.8g is not below %.8g\n", value, threshold) > "/dev/stderr"
+        failed = 1
+      }
+    }
+    END {
+      if (count < minimum) {
+        printf("[FATAL] found %d Generation KL samples; expected at least %d\n", count, minimum) > "/dev/stderr"
+        failed = 1
+      }
+      exit failed
+    }
+  ' "$RUN_LOG"; then
+    probe_rc=1
+  else
+    echo "Generation KL gate passed: at least $MIN_GEN_KL_SAMPLES samples below $GEN_KL_MAX"
+  fi
+fi
+
+# Persist the probe evidence outside wipeable logs/: one TSV row per run so a
+# pass/fail survives log cleanup (sacct alone cannot prove that steps ran).
 {
-  out_file=$(scontrol show job "$SLURM_JOB_ID" -o 2>/dev/null | grep -oP 'StdOut=\K\S+')
-  kl_values=$(grep -h "Generation KL Error" "$out_file" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | paste -sd, -)
+  kl_values=$(grep -h "Generation KL Error" "$RUN_LOG" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | paste -sd, -)
   mkdir -p "$REPO_DIR/results"
   printf '%s\t%s\t%s\t%s\trc=%s\tkl=[%s]\n' \
     "$(date +%F_%T)" "$SLURM_JOB_ID" "$SLURM_JOB_NAME" "$(basename "$RECIPE")" \
-    "${probe_rc:-0}" "${kl_values:-NONE}" >> "$REPO_DIR/results/probe_ledger.tsv"
+    "$probe_rc" "${kl_values:-NONE}" >> "$REPO_DIR/results/probe_ledger.tsv"
 } || true
 
 echo "END TIME: $(date)"
-exit "${probe_rc:-0}"
+exit "$probe_rc"

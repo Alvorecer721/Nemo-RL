@@ -27,11 +27,14 @@ sbatch infra/slurm/cscs/probe_nemo_rl_dpo_megatron_apertus.slurm  # DPO probe + 
 sbatch infra/slurm/cscs/submit_nemo_rl_dpo.slurm                # full MaxMin DPO run
 ```
 
-Useful overrides:
+Useful overrides below pass an explicit export list, overriding the scripts'
+`#SBATCH --export=NONE` directive without importing the rest of the interactive
+environment. Do not combine `NONE` with named variables; Slurm rejects that
+form.
 
 ```bash
-CONTAINER_ENV=$HOME/.edf/nemo_rl.toml sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm
-RECIPE=examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml sbatch infra/slurm/cscs/submit_nemo_rl_dpo.slurm
+sbatch --export=CONTAINER_ENV=$HOME/.edf/nemo_rl.toml infra/slurm/cscs/probe_grpo_fixgate.slurm
+sbatch --export=RECIPE=$PWD/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml infra/slurm/cscs/submit_nemo_rl_dpo.slurm
 ```
 
 The DPO launcher chains itself across the 12 h wall-clock limit: at

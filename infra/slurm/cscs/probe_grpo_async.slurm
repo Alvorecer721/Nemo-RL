@@ -14,7 +14,7 @@
 
 # Async-GRPO variant of the fixgate probe: non-colocated 2+2 GPU split,
 # AsyncLLM engine, lag-1 trajectories with importance-sampling correction.
-# Same gate: Generation KL Error ~0.0003 per step. Thin wrapper so the two
+# Same gate: Generation KL Error <0.002 per step (normally ~0.0003). Thin wrapper so the two
 # probes cannot drift: RECIPE is the only delta, sourced into the fixgate
 # launcher (its #SBATCH headers are inert comments when sourced).
 REPO_DIR=${REPO_DIR:-$PWD}

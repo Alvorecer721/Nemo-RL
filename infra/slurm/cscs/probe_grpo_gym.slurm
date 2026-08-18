@@ -14,7 +14,7 @@
 
 # NeMo-Gym variant of the fixgate probe: rollouts go through Gym's HTTP-served
 # agent (math_with_judge_simple_agent) against the async vLLM engine instead of
-# the in-process generation path. Same gate: Generation KL Error ~0.0003 per
+# the in-process generation path. Same gate: Generation KL Error <0.002 per
 # step. Thin wrapper so the probes cannot drift: RECIPE is the only delta,
 # sourced into the fixgate launcher (its #SBATCH headers are inert comments
 # when sourced).
