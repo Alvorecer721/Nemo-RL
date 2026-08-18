@@ -18,7 +18,13 @@ import pprint
 
 from omegaconf import OmegaConf
 
-from nemo_rl.algorithms.dpo import MasterConfig, dpo_train, setup
+from nemo_rl.algorithms.dpo import (
+    DPO_TIMEOUT_EXIT_CODE,
+    DPOTrainStatus,
+    MasterConfig,
+    dpo_train,
+    setup,
+)
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_preference_data
 from nemo_rl.distributed.virtual_cluster import init_ray
@@ -134,18 +140,24 @@ def main():
         and master_config.policy["megatron_cfg"]["use_linear_ce_fusion_loss"],
     )
 
-    dpo_train(
-        policy,
-        train_dataloader,
-        val_dataloader,
-        tokenizer,
-        loss_fn,
-        master_config,
-        logger,
-        checkpointer,
-        dpo_save_state,
-    )
+    # The checkpointer owns background async-checkpoint finalization threads;
+    # the context manager guarantees they are flushed (rename + delete) on exit.
+    with checkpointer:
+        train_status = dpo_train(
+            policy,
+            train_dataloader,
+            val_dataloader,
+            tokenizer,
+            loss_fn,
+            master_config,
+            logger,
+            checkpointer,
+            dpo_save_state,
+        )
+    if train_status is DPOTrainStatus.TIMED_OUT:
+        return DPO_TIMEOUT_EXIT_CODE
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

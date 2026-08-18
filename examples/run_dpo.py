@@ -18,14 +18,18 @@ import pprint
 
 from omegaconf import OmegaConf
 
-from nemo_rl.algorithms.dpo import DPOTrainStatus, MasterConfig, dpo_train, setup
+from nemo_rl.algorithms.dpo import (
+    DPO_TIMEOUT_EXIT_CODE,
+    DPOTrainStatus,
+    MasterConfig,
+    dpo_train,
+    setup,
+)
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_preference_data
 from nemo_rl.distributed.virtual_cluster import init_ray
 from nemo_rl.utils.config import load_config, parse_hydra_overrides
 from nemo_rl.utils.logger import get_next_experiment_dir
-
-DPO_TIMEOUT_EXIT_CODE = os.EX_TEMPFAIL
 
 
 def parse_args():
