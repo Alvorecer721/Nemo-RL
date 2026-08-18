@@ -14,17 +14,18 @@
 
 r"""Single-turn verifier environment that grades rollouts against a gold set.
 
-Grades each rollout by extracting its final answer (``\\boxed{}`` first, then an
-``Answer:`` line) and matching it against ``{ground_truth} U answer_variants`` with a
-layered comparator: symbolic (math_verify) -> numeric (epsilon) -> normalized string.
-Reward is 1.0 on any match else 0.0; episodes are single-turn (terminate immediately).
+Grades each rollout by extracting its final answer (last ``\\boxed{}``, last
+``Answer:`` line, last ``<answer>`` block, then last non-empty line) and matching
+it against ``{ground_truth} U answer_variants`` with a layered comparator:
+symbolic (math_verify) -> numeric (epsilon) -> normalized string. Reward is 1.0
+on any match else 0.0; episodes are single-turn (terminate immediately).
 """
 
 import contextlib
 import io
 import logging
 import re
-from typing import Any, NotRequired, Optional, TypedDict, Union
+from typing import Any, Optional, TypedDict, Union
 
 import ray
 import torch
@@ -46,7 +47,7 @@ from nemo_rl.environments.utils import chunk_list_to_workers
 
 class SingleTurnVerifierConfig(TypedDict):
     num_workers: int
-    math_verify_impl: NotRequired[str | None]
+    math_verify_impl: str | None
 
 
 class SingleTurnVerifierMetadata(TypedDict):
@@ -85,11 +86,39 @@ def _extract_boxed_answer(text: str) -> Optional[str]:
 
 
 def _extract_answer_line(text: str) -> Optional[str]:
-    """Extract answer from 'Answer: ...' pattern (case-insensitive)."""
-    match = re.search(r"(?i)Answer\s*:\s*([^\n]+)", text)
-    if match:
-        return match.group(1).strip()
+    """Extract the last non-empty ``Answer: ...`` value."""
+    matches = re.findall(r"(?i)\bAnswer\s*:\s*([^\r\n]+)", text)
+    for match in reversed(matches):
+        if answer := match.strip():
+            return answer
     return None
+
+
+def _extract_tagged_answer(text: str) -> Optional[str]:
+    """Extract the last non-empty ``<answer>...</answer>`` block."""
+    matches = re.findall(r"(?is)<answer>\s*(.*?)\s*</answer>", text)
+    for match in reversed(matches):
+        if answer := match.strip():
+            return answer
+    return None
+
+
+def _extract_last_nonempty_line(text: str) -> Optional[str]:
+    """Extract the final non-empty response line."""
+    for line in reversed(text.splitlines()):
+        if answer := line.strip():
+            return answer
+    return None
+
+
+def extract_final_answer(text: str) -> Optional[str]:
+    """Extract a response's final answer using the public verifier contract."""
+    return (
+        _extract_boxed_answer(text)
+        or _extract_answer_line(text)
+        or _extract_tagged_answer(text)
+        or _extract_last_nonempty_line(text)
+    )
 
 
 def _normalize_string(s: str) -> str:
@@ -131,18 +160,10 @@ class SingleTurnVerifyWorker:
 
         for response, metadata in zip(pred_responses, metadata_list):
             ground_truth = metadata["ground_truth"]
-            answer_variants = metadata.get("answer_variants", [])
+            answer_variants = metadata["answer_variants"]
 
-            extracted_answer = None
+            extracted_answer = extract_final_answer(response)
             score = 0.0
-
-            boxed = _extract_boxed_answer(response)
-            if boxed is not None:
-                extracted_answer = boxed
-            else:
-                answer_line = _extract_answer_line(response)
-                if answer_line is not None:
-                    extracted_answer = answer_line
 
             if extracted_answer is not None:
                 gold_set = {ground_truth} | set(answer_variants)
@@ -243,7 +264,7 @@ class SingleTurnVerifierEnvironment(EnvironmentInterface[SingleTurnVerifierMetad
                 resp_chunk,
                 meta_chunk,
                 return_extracted_answer,
-                math_verify_impl=self.cfg.get("math_verify_impl", "hf_math_verify"),
+                math_verify_impl=self.cfg["math_verify_impl"],
             )
             for i, (resp_chunk, meta_chunk) in enumerate(
                 zip(chunked_responses, chunked_metadata)

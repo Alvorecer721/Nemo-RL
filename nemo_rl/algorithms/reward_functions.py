@@ -54,19 +54,6 @@ class RewardShapingConfig(TypedDict):
     # are penalized less. Mutually exclusive with the DAPO overlong / stop-properly penalties.
     alp_coef: NotRequired[float | None]
 
-    # N-gram repetition penalty: reward -= ngram_penalty_coef * max(0, distinct-n rate - threshold).
-    # Additive with whichever length penalty runs (applied before the early-returning branches).
-    ngram_penalty_coef: NotRequired[float | None]
-
-    # Repetition rate at or below this threshold incurs no penalty (clean responses,
-    # including long-but-clean CoT, are untouched); the penalty scales with the excess.
-    ngram_penalty_threshold: NotRequired[float]
-
-
-def assistant_token_parts(message_log) -> list[torch.Tensor]:
-    """All assistant-turn token tensors of one sample's message log."""
-    return [m["token_ids"] for m in message_log if m["role"] == "assistant"]
-
 
 def ngram_rate(gen_ids: torch.Tensor, ngram_size: int) -> float:
     """Distinct-n-gram repetition rate of one sample's generated tokens."""
@@ -74,25 +61,6 @@ def ngram_rate(gen_ids: torch.Tensor, ngram_size: int) -> float:
         return 0.0
     windows = gen_ids.unfold(0, ngram_size, 1)
     return 1.0 - torch.unique(windows, dim=0).shape[0] / windows.shape[0]
-
-
-def ngram_repetition_rates(
-    per_sample_token_parts: list[list[torch.Tensor]],
-    ngram_size: int = 4,
-) -> torch.Tensor:
-    """Per-sample distinct-n-gram repetition rate of the generated tokens.
-
-    Single source of truth for the rate definition — used by the rollout
-    quality metrics and as the reward-shaping fallback when a batch carries
-    message_log but no precomputed ngram_repetition_rate tensor.
-    """
-    rates = torch.zeros(len(per_sample_token_parts))
-    for idx, parts in enumerate(per_sample_token_parts):
-        if not parts:
-            continue
-        gen_ids = torch.cat([torch.as_tensor(p).flatten() for p in parts])
-        rates[idx] = ngram_rate(gen_ids, ngram_size)
-    return rates
 
 
 def _response_lengths(batch: BatchedDataDict) -> list[int]:
@@ -136,36 +104,20 @@ def apply_reward_shaping(
     # dynamic sampling) can filter prompt groups on the raw task metric
     # rather than on length-dependent shaped rewards.
     batch["unshaped_total_reward"] = rewards.clone()
-    # N-gram repetition penalty applied first so it composes additively with whichever
-    # length penalty (ALP / stop-properly / DAPO) returns early below.
-    ngram_penalty_coef = cfg.get("ngram_penalty_coef")
-    if ngram_penalty_coef is not None:
-        ngram_rates = batch.get("ngram_repetition_rate")
-        if ngram_rates is None and "message_log" in batch:
-            ngram_rates = ngram_repetition_rates(
-                [assistant_token_parts(ml) for ml in batch["message_log"]]
-            )
-        if ngram_rates is None:
-            raise ValueError(
-                "reward_shaping.ngram_penalty_coef is set but the batch carries "
-                "neither ngram_repetition_rate nor message_log to derive it from"
-            )
-        threshold = cfg.get("ngram_penalty_threshold", 0.0)
-        excess = (
-            ngram_rates.to(device=rewards.device, dtype=rewards.dtype) - threshold
-        ).clamp(min=0.0)
-        rewards = rewards - ngram_penalty_coef * excess
-        batch["total_reward"] = rewards
-
     # Adaptive Length Penalty (Xiang et al. 2025): difficulty-aware length penalty.
     alp_coef = cfg.get("alp_coef", None)
     if alp_coef is not None:
+        if alp_coef < 0:
+            raise ValueError(f"reward_shaping.alp_coef must be >= 0, got {alp_coef}")
         assert pass_rate is not None, (
             "reward_shaping.alp_coef is set but pass_rate was not provided"
         )
-        assert cfg.get("max_response_length"), (
-            "reward_shaping.alp_coef is set but max_response_length is not configured (must be > 0)"
-        )
+        ell_max = cfg.get("max_response_length")
+        if ell_max is None or ell_max <= 0:
+            raise ValueError(
+                "reward_shaping.alp_coef is set but max_response_length must be > 0, "
+                f"got {ell_max}"
+            )
         shadowed = [
             k
             for k in (
@@ -180,7 +132,6 @@ def apply_reward_shaping(
                 f"[WARN] alp_coef is set, so the following penalties are ignored: {', '.join(shadowed)}.",
                 flush=True,
             )
-        ell_max = cfg["max_response_length"]
         resp_lengths = torch.tensor(
             _response_lengths(batch),
             dtype=rewards.dtype,
@@ -249,12 +200,6 @@ def apply_reward_shaping(
         cfg.get("max_response_length"),
     )
     if any(field is None for field in dapo_fields):
-        # A repetition-only config (ngram penalty, no length penalty at all) is
-        # valid and already applied above; a partial DAPO trio stays an error.
-        if ngram_penalty_coef is not None and all(
-            field is None for field in dapo_fields
-        ):
-            return batch
         raise ValueError(
             "Reward function is enabled but only DAPO reward shaping is currently supported. Please ensure overlong_buffer_length, overlong_buffer_penalty, and max_response_length are properly configured."
         )

@@ -209,6 +209,7 @@ policy: &POLICY_BASE
             pipeline_parallel_size: 1
             expert_parallel_size: 1  # When EP > 1, EP must be a multiple of TP since vLLM's EP = DP * TP
             gpu_memory_utilization: 0.6
+            sleep_level: 1  # vLLM sleep mode used between generation phases.
             max_model_len: ${...max_total_sequence_length} # refer to local policy/teacher config
             enforce_eager: False
             use_deep_gemm: False

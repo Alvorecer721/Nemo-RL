@@ -351,7 +351,6 @@ class SyncRolloutActor:
             # Computed by decompose_message_log above; feeds
             # apply_reward_shaping on the driver without a TQ fetch.
             "response_token_lengths": decomposed["response_token_lengths"],
-            "ngram_repetition_rate": fb["ngram_repetition_rate"],
         }
         # GDPO multi-reward components: scale_rewards iterates these
         # keys driver-side and the GDPO advantage estimator reads them
