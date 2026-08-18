@@ -150,8 +150,9 @@ def main() -> None:
     print(f"generated_text={generated.text!r}")
 
     # Validate the plugin against vLLM 0.25.1 protocol objects in this runtime.
-    from nemo_rl.models.generation.vllm.apertus_tool_parser import ApertusToolParser
     from vllm.tool_parsers.abstract_tool_parser import ToolParserManager
+
+    from nemo_rl.models.generation.vllm.apertus_tool_parser import ApertusToolParser
 
     class StubTokenizer:
         def __bool__(self):
