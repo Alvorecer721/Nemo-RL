@@ -28,6 +28,26 @@ from nemo_rl.models.policy import PolicyConfig
 from nemo_rl.models.policy.lm_policy import Policy
 
 
+@patch("nemo_rl.models.policy.lm_policy.ray.get")
+def test_async_save_finalization_submits_before_wait(mock_ray_get):
+    """All worker RPCs are submitted before background waiting can begin."""
+    policy = Policy.__new__(Policy)
+    policy.worker_group = MagicMock()
+    futures = [object(), object()]
+    policy.worker_group.run_all_workers_single_data.return_value = futures
+
+    wait_fn = policy.submit_async_save_finalization()
+
+    policy.worker_group.run_all_workers_single_data.assert_called_once_with(
+        "finalize_async_save"
+    )
+    mock_ray_get.assert_not_called()
+
+    wait_fn()
+
+    mock_ray_get.assert_called_once_with(futures)
+
+
 def create_mock_cluster(world_size: int):
     """Create a mock cluster with the specified world size."""
     cluster = MagicMock()
