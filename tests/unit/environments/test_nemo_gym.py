@@ -16,6 +16,7 @@ import json
 import time
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import ray
@@ -26,19 +27,18 @@ from yaml import safe_load
 
 from nemo_rl.algorithms.grpo import MasterConfig
 from nemo_rl.data.multimodal_utils import PackedTensor, image_to_data_url
-from nemo_rl.distributed.ray_actor_environment_registry import (
-    get_actor_python_env,
-)
 from nemo_rl.environments.nemo_gym import (
     NemoGym,
     NemoGymConfig,
     build_reward_component_columns,
     extract_reward_components,
+    get_nemo_gym_uv_cache_dir,
     setup_nemo_gym_config,
     validate_reward_components_match_scalar,
 )
 from nemo_rl.experience.rollouts import _reattach_original_multimodal_payloads
 from nemo_rl.models.generation.vllm import VllmGeneration
+from nemo_rl.utils.venvs import make_actor_runtime_env
 
 # cluster and tokenizer are fixture imports
 from tests.unit.models.generation.test_vllm_generation import (
@@ -202,11 +202,7 @@ openai_model:
         initial_global_config_dict=safe_load(yaml_str),
     )
     env = NemoGym.options(
-        runtime_env={
-            "py_executable": get_actor_python_env(
-                "nemo_rl.environments.nemo_gym.NemoGym"
-            ),
-        }
+        runtime_env=make_actor_runtime_env("nemo_rl.environments.nemo_gym.NemoGym")
     ).remote(config)
 
     # Blocking wait for NeMo-Gym to spin up
@@ -230,6 +226,17 @@ def nemo_gym_sanity_test_data():
     with open(fpath) as f:
         data = json.load(f)
     return data
+
+
+def test_nemo_gym_uv_cache_uses_pinned_uv(monkeypatch):
+    monkeypatch.setenv("NRL_CONTAINER", "1")
+    monkeypatch.setenv("UV", "/root/.local/bin/uv")
+    with patch(
+        "nemo_rl.environments.nemo_gym.subprocess.check_output",
+        return_value=b"/root/.cache/uv\n",
+    ) as check_output:
+        assert get_nemo_gym_uv_cache_dir() == "/root/.cache/uv"
+    check_output.assert_called_once_with(["/root/.local/bin/uv", "cache", "dir"])
 
 
 def _write_actual_test_data(original_input: list, actual_result: list):

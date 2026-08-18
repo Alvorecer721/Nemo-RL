@@ -20,6 +20,7 @@ import subprocess
 import time
 from functools import lru_cache
 from pathlib import Path
+from typing import MutableMapping
 
 import ray
 from ray.util import placement_group
@@ -39,6 +40,39 @@ DEFAULT_VENV_DIR = os.path.join(git_root, "venvs")
 VENV_READY_MARKER = "NEMO_RL_VENV_READY"
 
 logger = logging.getLogger(__name__)
+
+
+def pin_uv_to_path(
+    env_vars: MutableMapping[str, str] | None = None,
+) -> MutableMapping[str, str]:
+    """Make bare ``uv`` resolve to the executable explicitly selected by ``$UV``.
+
+    Ray prepends an actor venv to ``PATH`` after applying ``runtime_env``. Callers
+    that spawn nested processes can call this again inside the actor to restore
+    the pin before those children are launched.
+    """
+    if env_vars is None:
+        env_vars = os.environ
+    uv_executable = env_vars.get("UV")
+    if not uv_executable:
+        return env_vars
+
+    resolved_uv = shutil.which(uv_executable, path=env_vars.get("PATH"))
+    if resolved_uv is None:
+        raise FileNotFoundError(
+            f"UV executable {uv_executable!r} was not found or is not executable"
+        )
+
+    resolved_uv = os.path.realpath(resolved_uv)
+    uv_bin_dir = os.path.dirname(resolved_uv)
+    path_entries = [
+        entry
+        for entry in env_vars.get("PATH", "").split(os.pathsep)
+        if entry and os.path.realpath(entry) != uv_bin_dir
+    ]
+    env_vars["UV"] = resolved_uv
+    env_vars["PATH"] = os.pathsep.join([uv_bin_dir, *path_entries])
+    return env_vars
 
 
 def _normalized_worker_command(py_executable: str) -> str:
@@ -366,9 +400,10 @@ def make_actor_runtime_env(actor_class_fqn: str) -> dict:
     ``VIRTUAL_ENV`` / ``UV_PROJECT_ENVIRONMENT`` env vars so workers see
     the same interpreter as the driver.
 
-    Used by ReplayBuffer, AsyncTrajectoryCollector, and SyncRolloutActor
-    — three actors that need the VLLM tier's venv on every node. Also
-    used by the SGLang router and SGLang generation engines (SGLANG tier).
+    Used by ReplayBuffer, AsyncTrajectoryCollector, SyncRolloutActor, and
+    NeMo Gym. It also pins the directory containing ``$UV`` at the front of
+    ``PATH`` so nested services that invoke bare ``uv`` use the same binary as
+    NeMo-RL's venv builder.
     """
     # Local import — venvs.py is dep-light; the registry imports
     # PY_EXECUTABLES which transitively pulls heavier deps.
@@ -380,11 +415,14 @@ def make_actor_runtime_env(actor_class_fqn: str) -> dict:
     if py_exec.startswith("uv"):
         py_exec = create_local_venv_on_each_node(py_exec, actor_class_fqn)
     venv = os.path.dirname(os.path.dirname(py_exec))  # strip bin/python
-    return {
-        "py_executable": py_exec,
-        "env_vars": {
-            **os.environ,
+    env_vars = pin_uv_to_path(os.environ.copy())
+    env_vars.update(
+        {
             "VIRTUAL_ENV": venv,
             "UV_PROJECT_ENVIRONMENT": venv,
-        },
+        }
+    )
+    return {
+        "py_executable": py_exec,
+        "env_vars": env_vars,
     }

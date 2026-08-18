@@ -110,9 +110,11 @@ RUN GITHUB_ARTIFACTORY=github.com \
 # Install uv and python
 ARG UV_VERSION=0.11.28
 ARG PYTHON_VERSION=3.13.14
+ENV UV="/root/.local/bin/uv"
 ENV PATH="/root/.local/bin:$PATH"
 RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh && \
-    uv python install ${PYTHON_VERSION}
+    [ "$("$UV" --version)" = "uv ${UV_VERSION}" ] && \
+    "$UV" python install ${PYTHON_VERSION}
 
 # Disable usage stats by default for users who are sensitive to sharing usage.
 # Users are encouraged to enable if the wish.
