@@ -526,6 +526,8 @@ jobs:
         always() &&
         needs.pre-flight.result == 'success' &&
         needs.org-member-pre-flight.result == 'success' &&
+        needs.org-member-pre-flight.outputs.runner_prefix != '' &&
+        needs.org-member-pre-flight.outputs.registry != '' &&
         needs.pre-flight.outputs.test_level != 'none' &&
         needs.pre-flight.outputs.image_tag == '' &&
         (needs.prepare-megatron-lock.result == 'success' || needs.prepare-megatron-lock.result == 'skipped') &&
@@ -690,6 +692,8 @@ jobs:
           needs.pre-flight.outputs.test_script_pattern == '' &&
           needs.pre-flight.result == 'success' &&
           needs.org-member-pre-flight.result == 'success' &&
+          needs.org-member-pre-flight.outputs.runner_prefix != '' &&
+          needs.org-member-pre-flight.outputs.registry != '' &&
           (
             needs.cicd-wait-in-queue.result == 'success' ||
             needs.pre-flight.outputs.test_level == 'docs' ||
@@ -732,6 +736,8 @@ jobs:
           needs.pre-flight.result == 'success' &&
           needs.org-member-pre-flight.result == 'success' &&
           (needs.prepare-megatron-lock.result == 'success' || needs.prepare-megatron-lock.result == 'skipped') &&
+          needs.org-member-pre-flight.outputs.runner_prefix != '' &&
+          needs.org-member-pre-flight.outputs.registry != '' &&
           (
             needs.cicd-wait-in-queue.result == 'success' ||
             !startsWith(github.ref, 'refs/heads/pull-request/')
@@ -871,6 +877,8 @@ jobs:
         needs.pre-flight.result == 'success' &&
         needs.org-member-pre-flight.result == 'success' &&
         (needs.prepare-megatron-lock.result == 'success' || needs.prepare-megatron-lock.result == 'skipped') &&
+        needs.org-member-pre-flight.outputs.runner_prefix != '' &&
+        needs.org-member-pre-flight.outputs.registry != '' &&
         (
           needs.cicd-wait-in-queue.result == 'success' ||
           !startsWith(github.ref, 'refs/heads/pull-request/')
@@ -972,6 +980,8 @@ jobs:
         needs.pre-flight.result == 'success' &&
         needs.org-member-pre-flight.result == 'success' &&
         (needs.prepare-megatron-lock.result == 'success' || needs.prepare-megatron-lock.result == 'skipped') &&
+        needs.org-member-pre-flight.outputs.runner_prefix != '' &&
+        needs.org-member-pre-flight.outputs.registry != '' &&
         (
           needs.cicd-wait-in-queue.result == 'success' ||
           !startsWith(github.ref, 'refs/heads/pull-request/')
@@ -1088,10 +1098,37 @@ jobs:
 
 
           CI_SKIP: ${{ needs.pre-flight.outputs.has_skip_cicd }}
+          FORK_HOSTED_ONLY: >-
+            ${{
+              github.repository != 'NVIDIA-NeMo/RL' &&
+              (needs.org-member-pre-flight.outputs.runner_prefix == '' ||
+                needs.org-member-pre-flight.outputs.registry == '')
+            }}
+          HOSTED_CHECKS_SUCCESS: >-
+            ${{
+              needs.pre-flight.result == 'success' &&
+              needs.org-member-pre-flight.result == 'success' &&
+              needs.lint-check.result == 'success' &&
+              (needs.cicd-wait-in-queue.result == 'success' || needs.cicd-wait-in-queue.result == 'skipped') &&
+              (needs.pr-branch-up-to-date-check.result == 'success' || needs.pr-branch-up-to-date-check.result == 'skipped') &&
+              needs.pre-flight.outputs.test_level != 'none' &&
+              needs.sphinx-build.result == 'success' &&
+              needs.build-container.result == 'skipped' &&
+              needs.build-container-gb200.result == 'skipped' &&
+              needs.cicd-doc-tests.result == 'skipped' &&
+              needs.cicd-unit-tests.result == 'skipped' &&
+              needs.cicd-functional-tests.result == 'skipped' &&
+              needs.cicd-functional-tests-gb200.result == 'skipped' &&
+              needs.cicd-fast-functional-tests.result == 'skipped' &&
+              (!contains('L0 L1 L2 Lfast', needs.pre-flight.outputs.test_level) ||
+                needs.unit-test-script-check.result == 'success') &&
+              (!contains('L1 L2 Lfast', needs.pre-flight.outputs.test_level) ||
+                needs.functional-test-script-check.result == 'success')
+            }}
           TEST_LEVEL: ${{ needs.pre-flight.outputs.test_level }}
         run: |
           SUMMARY=$(echo $JOB_RESULTS | jq 'to_entries[] | .key + ": " + .value.result' | tr -d '"')
-          echo '🤖: CICD Result for test level: ${{ needs.pre-flight.outputs.test_level }}' >> $GITHUB_STEP_SUMMARY
+          echo '🤖: Requested CICD test level: ${{ needs.pre-flight.outputs.test_level }}' >> $GITHUB_STEP_SUMMARY
           echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
 
           if [[ "$TEST_LEVEL" == "none" ]]; then
@@ -1111,7 +1148,22 @@ jobs:
             echo "This check will remain failed until a CI label is added." >> $GITHUB_STEP_SUMMARY
           fi
 
-          test "$ALL_SUCCESS" = "true" || test "$CI_SKIP" = "true"
+          if [[ "$FORK_HOSTED_ONLY" == "true" && "$HOSTED_CHECKS_SUCCESS" == "true" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **Fork hosted checks only.** Lint, documentation, and CI script accounting passed." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Container builds and private-runner doc, unit, functional, and GPU jobs were not run because this fork has no configured NVIDIA runner or registry." >> $GITHUB_STEP_SUMMARY
+            echo "This is not a full L0/L1/L2 certification." >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ "$CI_SKIP" == "true" ]]; then
+            exit 0
+          elif [[ "$FORK_HOSTED_ONLY" == "true" ]]; then
+            test "$HOSTED_CHECKS_SUCCESS" = "true"
+          else
+            test "$ALL_SUCCESS" = "true"
+          fi
 
   notify-nightly-failure:
     name: Notify nightly test failure
