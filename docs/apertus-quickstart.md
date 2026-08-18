@@ -37,7 +37,9 @@ sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm
 
 This runs 3 steps of colocated online GRPO on one node (4 GPUs, TP2/PP1) against `examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-probe.yaml`.
 
-**Expected:** every step prints `Generation KL Error: 0.0003` — the train↔generate logprob-agreement gate — and the run completes all 3 steps with no OOM.
+**Expected:** every step prints `Generation KL Error` below `0.002` (typically
+around `0.0003`) and the run completes all three steps with no OOM. The launcher
+exits nonzero if a step is missing the metric or reaches the threshold.
 A KL above ~0.002 means the generation path regressed; start from the traps page.
 
 Submitting from *inside* a compute-node container (e.g. a coding agent that can't reach a login node) needs an extra incantation — see the "Submit from inside a compute node" section of `infra/slurm/cscs/README.md`.
