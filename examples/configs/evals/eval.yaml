@@ -26,6 +26,7 @@ generation:
     pipeline_parallel_size: 1
     expert_parallel_size: 1
     gpu_memory_utilization: 0.9
+    sleep_level: 1  # vLLM sleep mode used when the evaluation engine is suspended.
     max_model_len: 2048
     enforce_eager: False
   colocated:

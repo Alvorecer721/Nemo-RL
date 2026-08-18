@@ -73,6 +73,7 @@ basic_vllm_test_config: VllmConfig = {
     "stop_token_ids": None,
     "stop_strings": None,
     "vllm_cfg": {
+        "sleep_level": 1,
         "precision": "bfloat16",
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
@@ -226,9 +227,9 @@ basic_lora_test_config: LoRAConfig = {
 
 def skip_fp8_known_failures() -> None:
     device_name = torch.cuda.get_device_name()
-    if any(gpu_name in device_name for gpu_name in ("H100", "GB200")):
+    if any(gpu_name in device_name for gpu_name in ("H100", "GH200", "GB200")):
         # TODO(https://github.com/NVIDIA-NeMo/RL/issues/2081): Re-enable these
-        # FP8 vLLM tests once the known H100/GB200 failures are fixed.
+        # FP8 vLLM tests once the known Hopper/Blackwell failures are fixed.
         pytest.skip(
             f"Skipping FP8 vLLM test on {device_name} due to a known failure. "
             "See https://github.com/NVIDIA-NeMo/RL/issues/2081"

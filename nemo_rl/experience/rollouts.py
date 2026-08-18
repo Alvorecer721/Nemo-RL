@@ -806,7 +806,7 @@ def _compute_generation_quality_metrics(
     per_sample_truncated: "torch.Tensor | list[bool]",
     cot_token_ids: tuple[int, int] | None,
     ngram_size: int = 4,
-) -> tuple[dict[str, float], torch.Tensor]:
+) -> dict[str, float]:
     """Type-token ratio + chain-of-thought-length metrics from generated tokens.
 
     Shared across all rollout paths (sync, async, gym) so the metric definitions
@@ -821,8 +821,7 @@ def _compute_generation_quality_metrics(
         ngram_size: n-gram width for the distinct-n repetition rate.
 
     Returns:
-        Tuple of (metric dict to merge into rollout_metrics, per-sample n-gram
-        repetition rate tensor for reward shaping).
+        Metric dictionary to merge into rollout metrics.
     """
     batch_size = len(per_sample_token_parts)
     type_token_ratio = torch.zeros(batch_size)
@@ -867,7 +866,7 @@ def _compute_generation_quality_metrics(
         metrics["eos_while_thinking_rate"] = float(
             (unclosed_think & ~truncated).float().mean().item()
         )
-    return metrics, ngram_repetition_rate
+    return metrics
 
 
 def run_multi_turn_rollout(
@@ -1124,11 +1123,10 @@ def run_multi_turn_rollout(
             sample_env_token_counts.float().mean().item()
         ),
     }
-    metrics, ngram_rate = _compute_generation_quality_metrics(
+    metrics = _compute_generation_quality_metrics(
         sample_assistant_token_ids, sample_truncated, cot_token_ids
     )
     rollout_metrics.update(metrics)
-    current_batch["ngram_repetition_rate"] = ngram_rate
     return current_batch, rollout_metrics
 
 
@@ -1679,7 +1677,7 @@ def run_async_multi_turn_rollout(
         )
     )
     rollout_metrics = _aggregate_multi_turn_rollout_metrics(sample_metrics)
-    quality_metrics, ngram_rate = _compute_generation_quality_metrics(
+    quality_metrics = _compute_generation_quality_metrics(
         [
             [message["token_ids"] for message in log if message["role"] == "assistant"]
             for log in final_batch["message_log"]
@@ -1688,7 +1686,6 @@ def run_async_multi_turn_rollout(
         cot_token_ids,
     )
     rollout_metrics.update(quality_metrics)
-    final_batch["ngram_repetition_rate"] = ngram_rate
     return final_batch, rollout_metrics
 
 
@@ -2771,7 +2768,7 @@ def _postprocess_single_nemo_gym_group(
             # )
             # / batch_size,
         }
-        metrics, ngram_rate = _compute_generation_quality_metrics(
+        metrics = _compute_generation_quality_metrics(
             [
                 [
                     m["token_ids"]
@@ -2857,7 +2854,6 @@ def _postprocess_single_nemo_gym_group(
             "truncated": torch.tensor(
                 [m["hit_max_tokens"] for m in all_sample_metrics], dtype=torch.bool
             ),
-            "ngram_repetition_rate": ngram_rate,
         }
     )
     # Env/agent mask flag: flagged samples are dropped from the loss but still

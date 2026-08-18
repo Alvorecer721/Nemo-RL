@@ -1113,6 +1113,7 @@ base_vllm_test_config: VllmConfig = {
     "stop_token_ids": None,
     "stop_strings": None,
     "vllm_cfg": {
+        "sleep_level": 1,
         "async_engine": False,
         "precision": "bfloat16",
         "tensor_parallel_size": 1,
@@ -2509,7 +2510,7 @@ class TestComputeGenerationQualityMetrics:
             [torch.tensor([5, 6, 7, 8])],
         ]
         truncated = [False, True, False, False]
-        metrics, _ = _compute_generation_quality_metrics(
+        metrics = _compute_generation_quality_metrics(
             parts, truncated, cot_token_ids=(32, 33)
         )
         assert metrics["mean_cot_tokens_per_sample"] == pytest.approx(
@@ -2521,19 +2522,18 @@ class TestComputeGenerationQualityMetrics:
         assert metrics["eos_while_thinking_rate"] == pytest.approx(1 / 4)
 
     def test_truncated_accepts_tensor_or_list(self):
-        parts = [[torch.tensor([32, 1, 2, 3])]]
-        tensor_metrics, _ = _compute_generation_quality_metrics(
+        # sync path passes a bool tensor; gym path passes a python list[bool].
+        parts = [[torch.tensor([32, 1, 2, 3])]]  # unclosed think
+        tensor_metrics = _compute_generation_quality_metrics(
             parts, torch.tensor([True]), (32, 33)
         )
-        list_metrics, _ = _compute_generation_quality_metrics(
-            parts, [True], (32, 33)
-        )
+        list_metrics = _compute_generation_quality_metrics(parts, [True], (32, 33))
         assert tensor_metrics["max_tokens_while_thinking_rate"] == pytest.approx(1.0)
         assert list_metrics["max_tokens_while_thinking_rate"] == pytest.approx(1.0)
 
     def test_ttr_and_cot_disabled(self):
         parts = [[torch.tensor([7, 7, 7, 7])], [torch.tensor([1, 2, 3, 4])]]
-        metrics, _ = _compute_generation_quality_metrics(
+        metrics = _compute_generation_quality_metrics(
             parts, [False, False], cot_token_ids=None
         )
         assert metrics["mean_type_token_ratio"] == pytest.approx((0.25 + 1.0) / 2)
@@ -2541,32 +2541,27 @@ class TestComputeGenerationQualityMetrics:
 
     def test_empty_and_multi_part_sample(self):
         parts = [[], [torch.tensor([1, 2]), torch.tensor([2, 3])]]
-        metrics, _ = _compute_generation_quality_metrics(
-            parts, [False, False], (32, 33)
-        )
+        metrics = _compute_generation_quality_metrics(parts, [False, False], (32, 33))
         assert metrics["mean_type_token_ratio"] == pytest.approx((0.0 + 3 / 4) / 2)
         assert metrics["unclosed_think_rate"] == pytest.approx(0.0)
 
     def test_ngram_repetition_rate(self):
-        metrics, repetition_rate = _compute_generation_quality_metrics(
+        # n=3: windows {123,231,312,123} -> unique 3 / total 4 -> rate 0.25.
+        repetition_metrics = _compute_generation_quality_metrics(
             [[torch.tensor([1, 2, 3, 1, 2, 3])]],
             [False],
             cot_token_ids=None,
             ngram_size=3,
         )
-        assert repetition_rate[0] == pytest.approx(0.25)
-        assert "mean_ngram_repetition_rate" in metrics
-
-        _, rate_n4 = _compute_generation_quality_metrics(
-            [[torch.tensor([1, 2, 3, 4, 1, 2, 3, 4])]],
-            [False],
-            cot_token_ids=None,
+        assert repetition_metrics["mean_ngram_repetition_rate"] == pytest.approx(0.25)
+        # n=4 (the default): block 1234 repeated -> windows 1234,2341,3412,4123,1234
+        # -> unique 4 / total 5 -> rate 0.2.
+        n4_metrics = _compute_generation_quality_metrics(
+            [[torch.tensor([1, 2, 3, 4, 1, 2, 3, 4])]], [False], cot_token_ids=None
         )
-        assert rate_n4[0] == pytest.approx(0.2)
-
-        _, distinct_rate = _compute_generation_quality_metrics(
-            [[torch.tensor([1, 2, 3, 4, 5, 6])]],
-            [False],
-            cot_token_ids=None,
+        assert n4_metrics["mean_ngram_repetition_rate"] == pytest.approx(0.2)
+        # all windows distinct -> rate 0.0.
+        distinct_metrics = _compute_generation_quality_metrics(
+            [[torch.tensor([1, 2, 3, 4, 5, 6])]], [False], cot_token_ids=None
         )
-        assert distinct_rate[0] == pytest.approx(0.0)
+        assert distinct_metrics["mean_ngram_repetition_rate"] == pytest.approx(0.0)

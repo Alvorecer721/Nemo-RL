@@ -33,7 +33,7 @@ class VllmSpecificArgs(TypedDict):
     skip_tokenizer_init: bool
     async_engine: bool
     # vLLM sleep level when offloading between generation phases: 1 backs weights up to host RAM, 2 discards them (lower host memory, correct when weights are refit every step).
-    sleep_level: NotRequired[int]
+    sleep_level: int
     load_format: NotRequired[str]
     precision: NotRequired[str]
     # Whether vLLM returns logprobs before or after generation-time logit

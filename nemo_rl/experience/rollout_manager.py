@@ -17,7 +17,7 @@ import copy
 import enum
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import ray.exceptions
 import torch
@@ -25,7 +25,6 @@ from transformers import PreTrainedTokenizerBase
 from wandb import Table
 
 from nemo_rl.algorithms.async_utils.replay_buffer import TQReplayBuffer
-from nemo_rl.algorithms.reward_functions import assistant_token_parts
 from nemo_rl.data.interfaces import DatumSpec, LLMMessageLogType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.environments.interfaces import EnvironmentInterface
@@ -722,8 +721,15 @@ class AsyncRolloutImpl:
             t for m in all_sample_metrics for t in m["turn_total_tokens"]
         ]
 
-        quality_metrics, _ = _compute_generation_quality_metrics(
-            [assistant_token_parts(c.message_log) for c in completions],
+        quality_metrics = _compute_generation_quality_metrics(
+            [
+                [
+                    cast(torch.Tensor, m["token_ids"])
+                    for m in c.message_log
+                    if m["role"] == "assistant"
+                ]
+                for c in completions
+            ],
             truncated,
             self._cot_token_ids,
         )
@@ -1090,8 +1096,15 @@ class AsyncNemoGymRolloutImpl:
             "truncation_rate": sum(truncated) / n,
         }
 
-        quality_metrics, _ = _compute_generation_quality_metrics(
-            [assistant_token_parts(c.message_log) for c in completions],
+        quality_metrics = _compute_generation_quality_metrics(
+            [
+                [
+                    cast(torch.Tensor, m["token_ids"])
+                    for m in c.message_log
+                    if m["role"] == "assistant"
+                ]
+                for c in completions
+            ],
             truncated,
             self._cot_token_ids,
         )
