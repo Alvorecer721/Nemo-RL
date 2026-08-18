@@ -14,34 +14,51 @@
 
 """Tests for the Apertus runtime guard (nemo_rl_apertus/runtime_guard.py).
 
-The guard keys off ``is_apertus_model`` in ``nemo_rl.models.huggingface.common`` (present only in our nemo_rl)
-and the refit-emit override on the Bridge's ``ApertusBridge``.
-All cases drive both signals explicitly via monkeypatch rather than depending on which nemo_rl or Bridge is loaded.
+The guard keys off ``is_apertus_model`` in ``nemo_rl.models.huggingface.common`` (present only in our
+nemo_rl) and a static check that the Bridge's ``apertus_bridge.py`` defines the refit-emit override.
+Cases drive the guard's signals explicitly — the marker via monkeypatch, the Bridge via a temp
+apertus_bridge.py behind the path seam — rather than depending on which nemo_rl or Bridge is loaded.
 """
 
-import sys
-import types
+from pathlib import Path
 
 import pytest
 
+from nemo_rl_apertus import runtime_guard
 from nemo_rl_apertus.runtime_guard import assert_apertus_runtime
 
+BRIDGE_WITH_REFIT_EMIT = """
+class ApertusBridge:
+    def maybe_modify_converted_hf_weight(self):
+        pass
+"""
 
-def _stub_bridge_module(monkeypatch, with_refit_emit: bool):
-    """Install a stub apertus_bridge module whose ApertusBridge optionally defines the refit-emit."""
-    ns = {"maybe_modify_converted_hf_weight": lambda self, *a, **k: None} if with_refit_emit else {}
-    bridge_cls = type("ApertusBridge", (), ns)
-    module = types.ModuleType("megatron.bridge.models.apertus.apertus_bridge")
-    module.ApertusBridge = bridge_cls
-    monkeypatch.setitem(sys.modules, "megatron.bridge.models.apertus.apertus_bridge", module)
+BRIDGE_WITHOUT_REFIT_EMIT = """
+class ApertusBridge:
+    pass
+"""
 
 
-def test_guard_passes_when_deltas_present(monkeypatch):
-    """Marker present and Bridge defines the refit-emit (a healthy checkout) -> no-op."""
+@pytest.fixture
+def marker_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the nemo_rl-side marker look like a healthy Apertus checkout."""
     from nemo_rl.models.huggingface import common
 
     monkeypatch.setattr(common, "is_apertus_model", lambda name: False, raising=False)
-    _stub_bridge_module(monkeypatch, with_refit_emit=True)
+
+
+def _point_guard_at_bridge_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str
+) -> None:
+    """Route the guard's Bridge-path seam at a temp apertus_bridge.py with the given source."""
+    bridge_module = tmp_path / "apertus_bridge.py"
+    bridge_module.write_text(source)
+    monkeypatch.setattr(runtime_guard, "_bridge_apertus_module_path", lambda: bridge_module)
+
+
+def test_guard_passes_when_deltas_present(marker_present, monkeypatch, tmp_path):
+    """Marker present and the Bridge source defines the refit-emit (a healthy checkout) -> no-op."""
+    _point_guard_at_bridge_source(monkeypatch, tmp_path, BRIDGE_WITH_REFIT_EMIT)
     assert_apertus_runtime()  # must not raise
 
 
@@ -54,11 +71,17 @@ def test_guard_raises_when_marker_absent(monkeypatch):
         assert_apertus_runtime()
 
 
-def test_guard_raises_when_bridge_lacks_refit_emit(monkeypatch):
+def test_guard_raises_when_bridge_lacks_refit_emit(marker_present, monkeypatch, tmp_path):
     """Marker present but a stale Bridge without the refit-emit override -> loud RuntimeError."""
-    from nemo_rl.models.huggingface import common
-
-    monkeypatch.setattr(common, "is_apertus_model", lambda name: False, raising=False)
-    _stub_bridge_module(monkeypatch, with_refit_emit=False)
+    _point_guard_at_bridge_source(monkeypatch, tmp_path, BRIDGE_WITHOUT_REFIT_EMIT)
     with pytest.raises(RuntimeError, match="refit-emit"):
+        assert_apertus_runtime()
+
+
+def test_guard_raises_when_bridge_module_missing(marker_present, monkeypatch, tmp_path):
+    """Resolved Bridge has no apertus_bridge.py at all (wholly stock Bridge) -> loud RuntimeError."""
+    monkeypatch.setattr(
+        runtime_guard, "_bridge_apertus_module_path", lambda: tmp_path / "apertus_bridge.py"
+    )
+    with pytest.raises(RuntimeError, match="no apertus_bridge module"):
         assert_apertus_runtime()
