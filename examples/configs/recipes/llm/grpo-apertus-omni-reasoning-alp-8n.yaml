@@ -59,6 +59,19 @@ checkpointing:
 logger:
   wandb_enabled: true
   log_dir: logs/grpo-apertus-omni-reasoning-alp-8n
+  metric_denylist:    # drop dead/duplicate plots (same rationale as the gym-reasoning probe list; unmatched patterns warn at run start)
+    - "*/natural_termination_rate"
+    - "*/mean_gen_tokens_per_sample"
+    - "*/num_valid_samples"
+    - "*/turns_per_sample/*"
+    - "*_per_sec"
+    - "*_per_sec_per_gpu"
+    - train/kl_penalty
+    - "train/vllm/spec_*"
+    - train/num_masked_seqs_by_logprob_error
+    - train/masked_correct_pct
+    - "train/probs_ratio_clamped*"
+    - train/wd
   wandb:
     project: grpo-apertus
     name: omni-reasoning-alp-8n
