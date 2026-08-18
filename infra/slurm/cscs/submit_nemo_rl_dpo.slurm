@@ -19,7 +19,9 @@ echo "START TIME: $(date)"
 # checkpoint, then queue one successor only when training reports that timeout.
 AUTO_REQUEUE=${AUTO_REQUEUE:-true}
 CHECKPOINT_MUST_SAVE_BY=${CHECKPOINT_MUST_SAVE_BY:-00:11:30:00}
-DPO_TIMEOUT_EXIT_CODE=75  # EX_TEMPFAIL; propagated through the single-task srun.
+# EX_TEMPFAIL, propagated through the single-task srun; the Python side of this
+# contract is DPO_TIMEOUT_EXIT_CODE in nemo_rl/algorithms/dpo.py.
+DPO_TIMEOUT_EXIT_CODE=75
 
 ###############################################################################
 # Apertus-1.5 8B DPO — MaxMin full set, reference-identical hyperparameters.
