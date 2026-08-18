@@ -225,6 +225,7 @@ policy:
     stop_token_ids: null
     stop_strings: null
     vllm_cfg:
+      sleep_level: 1
       async_engine: true
       precision: ${policy.precision}
       tensor_parallel_size: 1
