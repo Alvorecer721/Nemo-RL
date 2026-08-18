@@ -299,7 +299,8 @@ class CheckpointManager:
         Args:
             checkpoint_path: Path to tmp_step_N directory from init_tmp_checkpoint().
             wait_fn: Callable that blocks until all async writes are complete.
-                For Megatron async save: policy.finalize_async_save.
+                For Megatron async save: the waiter returned by
+                policy.submit_async_save_finalization().
                 For sync saves: None (rename immediately).
         """
         self.finalize_pending()

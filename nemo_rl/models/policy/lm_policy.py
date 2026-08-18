@@ -15,7 +15,7 @@ import os
 import warnings
 from collections import defaultdict
 from contextlib import nullcontext
-from typing import Any, Iterable, Optional, Union
+from typing import Any, Callable, Iterable, Optional, Union
 
 import numpy as np
 import ray
@@ -1095,14 +1095,24 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             )
         ray.get(futures)
 
-    def finalize_async_save(self) -> None:
-        """Block until all workers' in-flight async checkpoint writes complete.
+    def submit_async_save_finalization(self) -> Callable[[], None]:
+        """Submit finalization to every worker and return a blocking waiter.
 
-        No-op when async_save is disabled. Must be called before the checkpoint
-        directory is renamed from tmp_step_N/ to step_N/.
+        Submitting every rank from the caller thread preserves collective order
+        relative to the next training RPC. The returned callable only waits for
+        the already-submitted work, so it is safe to run in the checkpoint
+        manager's background finalization thread.
         """
         futures = self.worker_group.run_all_workers_single_data("finalize_async_save")
-        ray.get(futures)
+
+        def wait_for_finalization() -> None:
+            ray.get(futures)
+
+        return wait_for_finalization
+
+    def finalize_async_save(self) -> None:
+        """Synchronously finalize every worker's in-flight checkpoint write."""
+        self.submit_async_save_finalization()()
 
     def shutdown(self) -> bool:
         """Shut down all HF workers and clean up resources."""

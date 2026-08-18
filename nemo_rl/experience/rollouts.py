@@ -1073,8 +1073,9 @@ async def run_sample_multi_turn_rollout(
                 )
 
         except Exception as e:
-            print(f"Error generating response for sample {sample_idx}: {e}")
-            break
+            raise RuntimeError(
+                f"Generation failed for sample {sample_idx} on turn {turn + 1}"
+            ) from e
 
         # Create single-sample batch for environment interaction
         sample_batch = BatchedDataDict[DatumSpec](
@@ -1638,11 +1639,7 @@ def run_async_nemo_gym_rollout(
         }
         metrics, ngram_rate = _compute_generation_quality_metrics(
             [
-                [
-                    m["token_ids"]
-                    for m in r["message_log"]
-                    if m["role"] == "assistant"
-                ]
+                [m["token_ids"] for m in r["message_log"] if m["role"] == "assistant"]
                 for r in results
             ],
             [bool(m["hit_max_tokens"]) for m in all_sample_metrics],

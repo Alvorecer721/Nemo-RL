@@ -3008,7 +3008,7 @@ def grpo_train(
                         # (shutdown).
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
             # Logging
@@ -3399,6 +3399,26 @@ def aggregate_rollout_metrics(
     return aggregated
 
 
+def _start_async_trajectory_collection(
+    trajectory_collector: Any, dataloader: StatefulDataLoader
+) -> None:
+    """Start collection and surface actor-side startup failures immediately."""
+    ray.get(trajectory_collector.start_collection.remote(dataloader))
+
+
+def _raise_for_collector_error(
+    collector_status: dict[str, Any], *, context: str
+) -> None:
+    """Raise a collector's original background-loop failure, if present."""
+    if not collector_status.get("errored", False):
+        return
+
+    error = collector_status.get("error") or "original collector error unavailable"
+    raise RuntimeError(
+        f"Trajectory collector failed {context}. Original collector error:\n{error}"
+    )
+
+
 def async_grpo_train(
     policy: ColocatablePolicyInterface,
     policy_generation: Optional[GenerationInterface],
@@ -3615,7 +3635,7 @@ def async_grpo_train(
     )
 
     # Start trajectory collection in background
-    collection_task = trajectory_collector.start_collection.remote(dataloader)
+    _start_async_trajectory_collection(trajectory_collector, dataloader)
 
     # Ensure collector knows initial weight version
     trajectory_collector.set_weight_version.remote(weight_version)
@@ -3796,11 +3816,12 @@ def async_grpo_train(
                 )
 
             collector_status = ray.get(trajectory_collector.get_status.remote())
+            _raise_for_collector_error(
+                collector_status,
+                context=f"while waiting for initial buffer fill at step={step}",
+            )
             if (
-                (
-                    collector_status["data_exhausted"]
-                    or collector_status.get("errored", False)
-                )
+                collector_status["data_exhausted"]
                 and not collector_status["running"]
                 and collector_status["inflight_workers"] == 0
             ):
@@ -3903,11 +3924,12 @@ def async_grpo_train(
                         collector_status = ray.get(
                             trajectory_collector.get_status.remote()
                         )
+                        _raise_for_collector_error(
+                            collector_status,
+                            context=f"during replay-buffer starvation at training_step={step}",
+                        )
                         if (
-                            (
-                                collector_status["data_exhausted"]
-                                or collector_status.get("errored", False)
-                            )
+                            collector_status["data_exhausted"]
                             and not collector_status["running"]
                             and collector_status["inflight_workers"] == 0
                         ):
@@ -4430,7 +4452,7 @@ def async_grpo_train(
                         # completes; flushed at the next save or on training exit.
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
             # Logging

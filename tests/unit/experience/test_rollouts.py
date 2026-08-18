@@ -37,6 +37,7 @@ from nemo_rl.environments.games.sliding_puzzle import (
     SlidingPuzzleGameLogic,
     SlidingPuzzleMetadata,
 )
+from nemo_rl.experience import rollouts as rollouts_module
 from nemo_rl.experience.interfaces import Completion, PromptGroupRecord
 from nemo_rl.experience.rollout_manager import RolloutManager
 from nemo_rl.experience.rollouts import (
@@ -67,6 +68,40 @@ from tests.unit.test_envs import (
 )
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_async_rollout_propagates_generation_failure(monkeypatch):
+    """Generation RPC failures must reach the collector instead of becoming samples."""
+
+    async def _fail_generation(*args, **kwargs):
+        raise RuntimeError("generation RPC failed")
+
+    monkeypatch.setattr(
+        rollouts_module,
+        "async_generate_response_for_sample_turn",
+        _fail_generation,
+    )
+    input_batch = BatchedDataDict[DatumSpec](
+        {
+            "message_log": [[{"role": "user", "content": "prompt"}]],
+            "extra_env_info": [{}],
+            "task_name": ["test"],
+            "loss_multiplier": torch.ones(1),
+        }
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Error in sample 0 rollout: Generation failed for sample 0 on turn 1",
+    ):
+        run_async_multi_turn_rollout(
+            policy_generation=object(),
+            input_batch=input_batch,
+            tokenizer=object(),
+            task_to_env={},
+            max_seq_len=128,
+            max_rollout_turns=1,
+        )
 
 
 class TestCalculateSingleMetric:
