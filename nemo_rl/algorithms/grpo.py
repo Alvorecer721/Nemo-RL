@@ -13,6 +13,7 @@
 # limitations under the License.
 import gc
 import os
+import sys
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -3628,11 +3629,19 @@ def async_grpo_train(
     )
 
     def shutdown_async_resources() -> None:
-        """Finalize async work and stop resources owned by this training run."""
+        """Finalize async work and stop resources owned by this training run.
+
+        Resource teardown always runs to completion. A failed checkpoint
+        finalization is re-raised afterwards on a clean exit so a lost final
+        checkpoint is not silently dropped, and demoted to a warning when an
+        exception is already propagating — the same rule
+        ``CheckpointManager.__exit__`` applies.
+        """
+        finalize_error: Optional[BaseException] = None
         try:
             checkpointer.shutdown()
         except Exception as e:
-            print(f"Error finalizing pending checkpoint: {e}")
+            finalize_error = e
 
         print("🛑 Stopping trajectory collection...")
         try:
@@ -3675,6 +3684,14 @@ def async_grpo_train(
                 print(f"Error shutting down policy workers: {e}")
 
         print("Async GRPO training complete!")
+
+        if finalize_error is not None:
+            if sys.exc_info()[0] is not None:
+                warnings.warn(
+                    f"Checkpoint finalization failed during error teardown: {finalize_error}"
+                )
+            else:
+                raise finalize_error
 
     print("⏳ Preparing policy generation for training...")
     if NEED_REFIT and POLICY_GENERATION_STALE:

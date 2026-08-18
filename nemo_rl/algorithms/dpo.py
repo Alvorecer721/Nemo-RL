@@ -60,6 +60,11 @@ class DPOTrainStatus(Enum):
     TIMED_OUT = "timed_out"
 
 
+# Exit code an entrypoint returns for TIMED_OUT; launchers key conditional
+# resubmission off it (see infra/slurm/cscs/submit_nemo_rl_dpo.slurm).
+DPO_TIMEOUT_EXIT_CODE = os.EX_TEMPFAIL
+
+
 def _initial_dpo_save_state() -> DPOSaveState:
     return DPOSaveState(
         epoch=0, step=0, total_steps=0, consumed_samples=0, total_valid_tokens=0
