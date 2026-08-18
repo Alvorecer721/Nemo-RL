@@ -245,6 +245,13 @@ four-GH200 DPO step with CUDA xIELU, synchronous and asynchronous four-GH200
 GRPO refit/KL steps, a compiled single-node TP4 vLLM run, and a two-node TP8
 vLLM startup respectively.
 
+The GRPO probes' `RECIPE` defaults use the post-rename recipe names and
+therefore match any image built from current `main`. The currently published
+image predates the rename: to certify it, override the recipe to the old
+in-image name, e.g.
+`RECIPE=/opt/nemo-rl/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron-async.yaml`
+(and `.../probe-grpo-apertus1p5-8b-1n4g-megatron.yaml` for the sync probe).
+
 The baked TP2 async probe passed on job `3077837` in 4:48. It ran one compiled
 TP2 AsyncLLM engine on two GH200s and TP2 Megatron training on the other two,
 rejected the invalid MNNVL workspace, captured CUDA graphs, completed two GRPO
