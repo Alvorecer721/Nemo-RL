@@ -1586,11 +1586,7 @@ def run_async_nemo_gym_rollout(
         }
         metrics, ngram_rate = _compute_generation_quality_metrics(
             [
-                [
-                    m["token_ids"]
-                    for m in r["message_log"]
-                    if m["role"] == "assistant"
-                ]
+                [m["token_ids"] for m in r["message_log"] if m["role"] == "assistant"]
                 for r in results
             ],
             [bool(m["hit_max_tokens"]) for m in all_sample_metrics],

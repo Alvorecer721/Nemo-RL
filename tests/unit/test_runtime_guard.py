@@ -53,7 +53,9 @@ def _point_guard_at_bridge_source(
     """Route the guard's Bridge-path seam at a temp apertus_bridge.py with the given source."""
     bridge_module = tmp_path / "apertus_bridge.py"
     bridge_module.write_text(source)
-    monkeypatch.setattr(runtime_guard, "_bridge_apertus_module_path", lambda: bridge_module)
+    monkeypatch.setattr(
+        runtime_guard, "_bridge_apertus_module_path", lambda: bridge_module
+    )
 
 
 def test_guard_passes_when_deltas_present(marker_present, monkeypatch, tmp_path):
@@ -71,7 +73,9 @@ def test_guard_raises_when_marker_absent(monkeypatch):
         assert_apertus_runtime()
 
 
-def test_guard_raises_when_bridge_lacks_refit_emit(marker_present, monkeypatch, tmp_path):
+def test_guard_raises_when_bridge_lacks_refit_emit(
+    marker_present, monkeypatch, tmp_path
+):
     """Marker present but a stale Bridge without the refit-emit override -> loud RuntimeError."""
     _point_guard_at_bridge_source(monkeypatch, tmp_path, BRIDGE_WITHOUT_REFIT_EMIT)
     with pytest.raises(RuntimeError, match="refit-emit"):
@@ -81,7 +85,9 @@ def test_guard_raises_when_bridge_lacks_refit_emit(marker_present, monkeypatch, 
 def test_guard_raises_when_bridge_module_missing(marker_present, monkeypatch, tmp_path):
     """Resolved Bridge has no apertus_bridge.py at all (wholly stock Bridge) -> loud RuntimeError."""
     monkeypatch.setattr(
-        runtime_guard, "_bridge_apertus_module_path", lambda: tmp_path / "apertus_bridge.py"
+        runtime_guard,
+        "_bridge_apertus_module_path",
+        lambda: tmp_path / "apertus_bridge.py",
     )
     with pytest.raises(RuntimeError, match="no apertus_bridge module"):
         assert_apertus_runtime()
