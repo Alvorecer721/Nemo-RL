@@ -30,6 +30,4 @@ class Math500Dataset(RawDataset):
     def __init__(self, **kwargs) -> None:
         self.task_name = "math"
         rekeyed = MathDataset(variant="math_500_test").rekeyed_ds
-        self.dataset = rekeyed.add_column(
-            "task_name", [self.task_name] * len(rekeyed)
-        )
+        self.dataset = rekeyed.add_column("task_name", [self.task_name] * len(rekeyed))

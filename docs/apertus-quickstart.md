@@ -1,8 +1,9 @@
 # Apertus 1.5 8B on NeMo-RL: clone-and-run (CSCS GH200)
 
 How to reproduce online GRPO post-training for Apertus 1.5 8B on a CSCS GH200 node from a clean checkout.
-This branch runs on the **stock `nvcr.io/nvidia/nemo-rl:v0.7.0` image** via `uv run --locked` — no custom image build.
+The default path runs on the **stock `nvcr.io/nvidia/nemo-rl:v0.7.0` image** via `uv run --locked` — no custom image build. Since the vLLM 0.25.1 bump, the lock installs vLLM 0.25.1 (official prebuilt aarch64 wheel) into the checkout venvs; the stock image supplies the host runtime, not the Python stack.
 For the architecture gotchas behind the gates here, see [apertus-traps-and-invariants.md](apertus-traps-and-invariants.md); for Slurm submission details, see `infra/slurm/cscs/README.md` in the repo.
+The faster vLLM 0.25.1 stack is also clone-and-run: a certified prebuilt image is shared under `MLLM/containers/` and the checkout ships its EDF (`docker/nemo_rl_vllm0251.toml`) — see the "Custom vLLM 0.25.1 GH200 image" section of the Slurm README.
 
 ## Prerequisites
 
@@ -34,7 +35,7 @@ sbatch infra/slurm/cscs/probe_grpo_fixgate.slurm
 > Subsequent submissions start in minutes and may run concurrently.
 > The async variant is `sbatch infra/slurm/cscs/probe_grpo_async.slurm` (same KL gate, 2+2 GPU split).
 
-This runs 3 steps of colocated online GRPO on one node (4 GPUs, TP2/PP1) against `examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron.yaml`.
+This runs 3 steps of colocated online GRPO on one node (4 GPUs, TP2/PP1) against `examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-probe.yaml`.
 
 **Expected:** every step prints `Generation KL Error: 0.0003` — the train↔generate logprob-agreement gate — and the run completes all 3 steps with no OOM.
 A KL above ~0.002 means the generation path regressed; start from the traps page.
@@ -65,5 +66,6 @@ Submitting from *inside* a compute-node container (e.g. a coding agent that can'
 
 ## Why the stock-release base
 
-The Apertus branch always sits on a release tag whose `uv.lock` matches the corresponding stock NGC image, so `uv run --locked` works with zero rebuild.
-This checkout tracks `v0.7.0`; the Megatron-Bridge submodule points at the Apertus fork rebased onto the same bridge pin the release ships.
+The tree is rooted on the `v0.7.0` release whose stock NGC image supplies the host runtime (CUDA, drivers, system libraries); the Megatron-Bridge submodule points at the Apertus fork rebased onto the same bridge pin the release ships.
+The Python stack comes from `uv.lock`, which has deliberately moved ahead of the image's baked packages — most notably vLLM 0.20.0 -> 0.25.1 — and still resolves with zero source builds: the vLLM pin is an official prebuilt aarch64 wheel and everything else comes from the team uv cache.
+Prefer the certified baked image (see the header note) when you want the 0.25.1 stack preinstalled instead of venv-resolved.

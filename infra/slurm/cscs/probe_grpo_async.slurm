@@ -18,5 +18,5 @@
 # probes cannot drift: RECIPE is the only delta, sourced into the fixgate
 # launcher (its #SBATCH headers are inert comments when sourced).
 REPO_DIR=${REPO_DIR:-$PWD}
-export RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron-async.yaml}
+export RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-async.yaml}
 source "$REPO_DIR/infra/slurm/cscs/probe_grpo_fixgate.slurm"

@@ -113,7 +113,7 @@ snapshot lines across runs; use the per-step `generation:` phase timers.
   visible in production (traps page, item 1).
 - **Re-enabling** (should a future measured regime justify it): the kernel-free
   default lives as `policy.generation.vllm_cfg.env_vars.PYTHONPATH: ""` in the recipe
-  family root (`probe-grpo-apertus1p5-8b-1n4g-megatron.yaml`), so it holds on every
+  family root (`grpo-apertus1p5-8b-1n4g-megatron-probe.yaml`), so it holds on every
   launcher; override it per-run by exporting `VLLM_XIELU_SITE=<site>` to the fixgate
   (what `bench/xielu_ab.slurm`'s kernel arm does), purge compile caches, and re-run
   the paired same-node A/B before believing any number.

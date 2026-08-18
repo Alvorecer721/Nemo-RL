@@ -19,6 +19,6 @@
 # sourced into the fixgate launcher (its #SBATCH headers are inert comments
 # when sourced).
 REPO_DIR=${REPO_DIR:-$PWD}
-export RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron-gym.yaml}
+export RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-gym.yaml}
 export RUN_SCRIPT=${RUN_SCRIPT:-examples/nemo_gym/run_grpo_nemo_gym.py}
 source "$REPO_DIR/infra/slurm/cscs/probe_grpo_fixgate.slurm"

@@ -41,8 +41,8 @@ from nemo_rl.experience.interfaces import Completion, PromptGroupRecord
 from nemo_rl.experience.rollout_manager import RolloutManager
 from nemo_rl.experience.rollouts import (
     _calculate_single_metric,
-    generate_responses_async,
     _compute_generation_quality_metrics,
+    generate_responses_async,
     run_async_multi_turn_rollout,
     run_async_nemo_gym_rollout,
     run_multi_turn_rollout,
@@ -1581,6 +1581,8 @@ def test_async_nemo_gym_rollout_manager_matches_original(
         assert orig_val == pytest.approx(new_val), (
             f"rollout_metrics[{key!r}] mismatch — original {orig_val}, manager {new_val}"
         )
+
+
 class TestComputeGenerationQualityMetrics:
     """Unit tests for the shared TTR + CoT-length metric helper."""
 
@@ -1588,7 +1590,9 @@ class TestComputeGenerationQualityMetrics:
         # ids: <think>=32, </think>=33
         parts = [
             [torch.tensor([5, 32, 10, 11, 12, 33, 40, 41])],  # closed think, content=3
-            [torch.tensor([5, 32, 10, 11, 12, 13, 14])],  # unclosed, ran to EOD (tail=5)
+            [
+                torch.tensor([5, 32, 10, 11, 12, 13, 14])
+            ],  # unclosed, ran to EOD (tail=5)
             [torch.tensor([5, 32, 10, 11])],  # unclosed (tail=2)
             [torch.tensor([5, 6, 7, 8])],  # no think
         ]
