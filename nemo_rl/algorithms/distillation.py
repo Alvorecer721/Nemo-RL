@@ -1076,7 +1076,7 @@ def distillation_train(
                         )
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=student_policy.finalize_async_save,
+                            wait_fn=student_policy.submit_async_save_finalization(),
                         )
 
             # Logging

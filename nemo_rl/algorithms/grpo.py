@@ -14,6 +14,7 @@
 import gc
 import json
 import os
+import sys
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -3721,7 +3722,7 @@ def grpo_train(
                         # (shutdown).
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
                         # Record last-successful-checkpoint time/step for external
@@ -4181,6 +4182,26 @@ def aggregate_rollout_metrics(
     return aggregated
 
 
+def _start_async_trajectory_collection(
+    trajectory_collector: Any, dataloader: StatefulDataLoader
+) -> None:
+    """Start collection and surface actor-side startup failures immediately."""
+    ray.get(trajectory_collector.start_collection.remote(dataloader))
+
+
+def _raise_for_collector_error(
+    collector_status: dict[str, Any], *, context: str
+) -> None:
+    """Raise a collector's original background-loop failure, if present."""
+    if not collector_status.get("errored", False):
+        return
+
+    error = collector_status.get("error") or "original collector error unavailable"
+    raise RuntimeError(
+        f"Trajectory collector failed {context}. Original collector error:\n{error}"
+    )
+
+
 def async_grpo_train(
     policy: ColocatablePolicyInterface,
     policy_generation: Optional[GenerationInterface],
@@ -4425,6 +4446,59 @@ def async_grpo_train(
         f"max_generation_failures={max_generation_failures}"
     )
 
+    async_resources_shutdown = False
+
+    def shutdown_async_resources() -> None:
+        """Finalize async work and stop resources owned by this training run."""
+        nonlocal async_resources_shutdown
+        if async_resources_shutdown:
+            return
+        async_resources_shutdown = True
+
+        finalize_error: BaseException | None = None
+        try:
+            checkpointer.shutdown()
+        except Exception as error:
+            finalize_error = error
+
+        print("🛑 Stopping trajectory collection...")
+        try:
+            ray.kill(trajectory_collector)
+        except Exception as error:
+            print(f"Error stopping trajectory collector: {error}")
+
+        try:
+            ray.kill(replay_buffer)
+        except Exception as error:
+            print(f"Error stopping replay buffer: {error}")
+
+        shutdown_environments(task_to_env, val_task_to_env)
+
+        print("🛑 Shutting down generation workers...")
+        try:
+            policy_generation.shutdown()
+        except Exception as error:
+            print(f"Error shutting down generation workers: {error}")
+
+        if policy is not policy_generation:
+            print("🛑 Shutting down policy workers...")
+            try:
+                policy.shutdown()
+            except Exception as error:
+                print(f"Error shutting down policy workers: {error}")
+
+        print("Async GRPO training complete!")
+
+        if finalize_error is not None:
+            if sys.exc_info()[0] is not None:
+                warnings.warn(
+                    "Checkpoint finalization failed during error teardown: "
+                    f"{finalize_error}",
+                    stacklevel=2,
+                )
+            else:
+                raise finalize_error
+
     print("⏳ Preparing policy generation for training...", flush=True)
     if NEED_REFIT and POLICY_GENERATION_STALE:
         print("🔄 Refitting policy generation with actual model weights...", flush=True)
@@ -4460,7 +4534,11 @@ def async_grpo_train(
     # collecting. In particular, vLLM and Dynamo start with dummy weights when
     # the first refit supplies model parameters.
     ray.get(trajectory_collector.set_weight_version.remote(weight_version))
-    trajectory_collector.start_collection.remote(dataloader)
+    try:
+        _start_async_trajectory_collection(trajectory_collector, dataloader)
+    except Exception:
+        shutdown_async_resources()
+        raise
     print("📦 Started continuous background trajectory collection")
 
     print("✅ Policy generation setup complete, proceeding to validation...")
@@ -4518,18 +4596,7 @@ def async_grpo_train(
         )
         if stop_message is not None:
             print(stop_message, flush=True)
-            # Flush pending checkpoint finalization and stop rollout
-            # generation; the remaining actors are reaped when the driver
-            # exits right after this return.
-            checkpointer.shutdown()
-            try:
-                ray.kill(trajectory_collector)
-            except Exception as e:
-                print(f"Error stopping trajectory collector: {e}")
-            try:
-                ray.kill(replay_buffer)
-            except Exception as e:
-                print(f"Error stopping replay buffer: {e}")
+            shutdown_async_resources()
             return
 
     print("✅ All setup complete, starting buffer wait...")
@@ -4596,20 +4663,29 @@ def async_grpo_train(
             )
 
         collector_status = ray.get(trajectory_collector.get_status.remote())
-        if (
-            (
-                collector_status["data_exhausted"]
-                or collector_status.get("errored", False)
+        try:
+            _raise_for_collector_error(
+                collector_status,
+                context=f"while waiting for initial buffer fill at step={step}",
             )
+        except Exception:
+            shutdown_async_resources()
+            raise
+        if (
+            collector_status["data_exhausted"]
             and not collector_status["running"]
             and collector_status["inflight_workers"] == 0
         ):
-            raise RuntimeError(
-                f"Trajectory collector stopped: dataloader exhausted while waiting for initial buffer fill at step={step}. "
-                f"The dataset ran out of data before training could start. "
-                f"Collector status: {collector_status}. "
-                f"Increase data.train.max_num_epochs or use a larger dataset."
-            )
+            try:
+                raise RuntimeError(
+                    f"Trajectory collector stopped: dataloader exhausted while waiting for initial buffer fill at step={step}. "
+                    f"The dataset ran out of data before training could start. "
+                    f"Collector status: {collector_status}. "
+                    f"Increase data.train.max_num_epochs or use a larger dataset."
+                )
+            except Exception:
+                shutdown_async_resources()
+                raise
 
         wait_iterations += 1
         time.sleep(1.0)
@@ -4712,11 +4788,12 @@ def async_grpo_train(
                         collector_status = ray.get(
                             trajectory_collector.get_status.remote()
                         )
+                        _raise_for_collector_error(
+                            collector_status,
+                            context=f"during replay-buffer starvation at training_step={step}",
+                        )
                         if (
-                            (
-                                collector_status["data_exhausted"]
-                                or collector_status.get("errored", False)
-                            )
+                            collector_status["data_exhausted"]
                             and not collector_status["running"]
                             and collector_status["inflight_workers"] == 0
                         ):
@@ -5302,7 +5379,7 @@ def async_grpo_train(
                         # completes; flushed at the next save or on training exit.
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
                         # Record last-successful-checkpoint time/step for external
@@ -5479,37 +5556,4 @@ def async_grpo_train(
         raise
 
     finally:
-        # Finalize any pending async checkpoint before tearing down workers.
-        try:
-            checkpointer.shutdown()
-        except Exception as e:
-            print(f"Error finalizing pending checkpoint: {e}")
-
-        print("🛑 Stopping trajectory collection...")
-        try:
-            ray.kill(trajectory_collector)
-        except Exception as e:
-            print(f"Error stopping trajectory collector: {e}")
-
-        try:
-            ray.kill(replay_buffer)
-        except Exception as e:
-            print(f"Error stopping replay buffer: {e}")
-
-        # Environments can have in-flight HTTP requests to generation workers.
-        shutdown_environments(task_to_env, val_task_to_env)
-
-        print("🛑 Shutting down generation workers...")
-        try:
-            policy_generation.shutdown()
-        except Exception as e:
-            print(f"Error shutting down generation workers: {e}")
-
-        if policy is not policy_generation:
-            print("🛑 Shutting down policy workers...")
-            try:
-                policy.shutdown()
-            except Exception as e:
-                print(f"Error shutting down policy workers: {e}")
-
-        print("Async GRPO training complete!")
+        shutdown_async_resources()

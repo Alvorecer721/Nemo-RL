@@ -44,12 +44,15 @@ from nemo_rl.algorithms.grpo import (
     _needs_hf_refit_handshake,
     _raise_if_reward_penalties_enabled_without_nemo_gym,
     _resolve_logprob_skip_flags,
+    _default_grpo_save_state,
+    _raise_for_collector_error,
     _resolve_message_level_advantage_penalties,
     _save_async_replay_buffer_checkpoint,
     _should_use_async_rollouts,
     _should_use_nemo_gym,
     _validate_multimodal_dedup_capability,
     _validate_use_kl_in_reward_compat,
+    _start_async_trajectory_collection,
     aggregate_rollout_metrics,
     async_grpo_train,
     compute_and_apply_seq_logprob_error_masking,
@@ -1316,6 +1319,37 @@ def test_async_grpo_propagates_main_loop_collector_failure(mock_grpo_components)
 
     mock_grpo_components["checkpointer"].shutdown.assert_called_once()
     mock_grpo_components["policy"].shutdown.assert_called_once()
+
+
+def test_start_async_trajectory_collection_waits_for_actor_startup():
+    collector = MagicMock()
+    dataloader = MagicMock(spec=StatefulDataLoader)
+    startup_ref = object()
+    collector.start_collection.remote.return_value = startup_ref
+
+    with patch("nemo_rl.algorithms.grpo.ray.get") as mock_get:
+        _start_async_trajectory_collection(collector, dataloader)
+
+    collector.start_collection.remote.assert_called_once_with(dataloader)
+    mock_get.assert_called_once_with(startup_ref)
+
+
+def test_raise_for_collector_error_preserves_original_diagnostics():
+    status = {
+        "running": False,
+        "data_exhausted": False,
+        "errored": True,
+        "error": "collection blew up\nCollection traceback:\ntrace details",
+        "inflight_workers": 0,
+    }
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _raise_for_collector_error(status, context="during buffer fill")
+
+    message = str(exc_info.value)
+    assert "during buffer fill" in message
+    assert "collection blew up" in message
+    assert "trace details" in message
 
 
 @pytest.mark.parametrize(

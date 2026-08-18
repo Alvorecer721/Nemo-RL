@@ -1260,6 +1260,43 @@ class TestAsyncTrajectoryCollector:
         assert metrics["payload_bytes/nemo_gym_return/logical_media"] == 150
         assert metrics["payload_ratio/nemo_gym_return/physical_to_logical"] == 0.2
 
+    def test_collection_loop_drains_inflight_workers_before_natural_stop(self):
+        """The final scheduled prompt group may publish after dataloader EOF."""
+        collector = self.create_local_collector()
+        self._prime_collection_loop(collector)
+        worker_started = threading.Event()
+        allow_worker_to_finish = threading.Event()
+        published = []
+
+        def _process_batch(batch):
+            def _worker():
+                worker_started.set()
+                assert allow_worker_to_finish.wait(timeout=3)
+                if collector.running:
+                    published.append(batch)
+
+            worker = threading.Thread(target=_worker)
+            with collector._threads_lock:
+                collector._inflight_threads.add(worker)
+            worker.start()
+
+        collector._process_batch = _process_batch
+        collector.dataloader = [{"final": True}]
+        collection_thread = threading.Thread(target=collector._collection_loop)
+        collection_thread.start()
+
+        assert worker_started.wait(timeout=3)
+        assert collection_thread.is_alive()
+        assert collector.running is True
+
+        allow_worker_to_finish.set()
+        collection_thread.join(timeout=3)
+
+        assert not collection_thread.is_alive()
+        assert published == [{"final": True}]
+        assert collector.data_exhausted is True
+        assert collector.running is False
+
     def test_collection_loop_marks_errored_on_crash(self):
         """A crash sets errored (not data_exhausted) so driver guards fail fast."""
         collector = self.create_local_collector()
@@ -1279,6 +1316,9 @@ class TestAsyncTrajectoryCollector:
         assert status["errored"] is True
         assert status["data_exhausted"] is False
         assert status["running"] is False
+        assert "collection blew up" in status["error"]
+        with pytest.raises(RuntimeError, match="collection blew up"):
+            collector.check_health()
 
     def test_collection_loop_no_exhaustion_on_manual_stop(self):
         """Breaking out (running=False) must not set data_exhausted/errored."""

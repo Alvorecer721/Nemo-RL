@@ -1872,7 +1872,7 @@ def ppo_train(
                         # policy's async write needs to be awaited before rename.
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
             # Logging

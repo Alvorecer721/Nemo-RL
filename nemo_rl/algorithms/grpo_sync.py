@@ -1233,7 +1233,7 @@ def grpo_train_sync(
                             )
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
             memory_tracker.snapshot_start_of_stage("Logging", dir())

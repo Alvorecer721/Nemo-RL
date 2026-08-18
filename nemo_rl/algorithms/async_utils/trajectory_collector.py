@@ -18,6 +18,7 @@ import asyncio
 import concurrent.futures
 import threading as _threading
 import time
+import traceback
 from collections import defaultdict
 from collections.abc import AsyncGenerator
 from typing import Any, Optional, cast
@@ -100,6 +101,7 @@ class AsyncTrajectoryCollector:
         self.running = False
         self.data_exhausted = False
         self.collection_failed = False
+        self._collection_error_message: str | None = None
 
         self._pg_lock: _threading.Lock = _threading.Lock()
 
@@ -135,8 +137,8 @@ class AsyncTrajectoryCollector:
         # Timer for efficiency metrics
         self._efficiency_timer = ThreadSafeTimer(context={"worker": "collector"})
 
-        # Failure tracking for rollout batch workers. _failure_lock guards both
-        # _failure_count and _fatal_error_message.
+        # Failure tracking for the collection loop and rollout batch workers.
+        # _failure_lock guards every stored error and the consecutive counter.
         self._failure_lock: _threading.Lock = _threading.Lock()
         self._failure_count: int = 0
         self._fatal_error_message: str | None = None
@@ -258,6 +260,10 @@ class AsyncTrajectoryCollector:
     def start_collection(self, dataloader: StatefulDataLoader) -> None:
         """Start collecting trajectories from dataloader."""
         self.running = True
+        self.data_exhausted = False
+        with self._failure_lock:
+            self.collection_failed = False
+            self._collection_error_message = None
         self.dataloader = dataloader
 
         print("Started continuous trajectory collection")
@@ -276,10 +282,13 @@ class AsyncTrajectoryCollector:
         """Return a snapshot of the collector's internal state for driver-side diagnostics."""
         with self._threads_lock:
             inflight_workers = len(self._inflight_threads)
+        with self._failure_lock:
+            error_message = self._fatal_error_message or self._collection_error_message
         return {
             "running": self.running,
             "data_exhausted": self.data_exhausted,
             "errored": self.collection_failed,
+            "error": error_message,
             "inflight_workers": inflight_workers,
         }
 
@@ -345,23 +354,29 @@ class AsyncTrajectoryCollector:
                 # for-loop completed without break → dataloader iterator exhausted
                 dataloader_exhausted = True
 
-        except Exception as e:
-            print(f"❌ Error in trajectory collection: {e}")
-            import traceback
-
-            traceback.print_exc()
-            self.collection_failed = True
+        except Exception as error:
+            failure_traceback = traceback.format_exc()
+            print(f"❌ Error in trajectory collection: {error}\n{failure_traceback}")
+            with self._failure_lock:
+                self.collection_failed = True
+                self._collection_error_message = (
+                    f"AsyncTrajectoryCollector collection loop failed: {error!r}\n"
+                    f"Collection traceback:\n{failure_traceback}"
+                )
         finally:
-            self.running = False
             if dataloader_exhausted:
+                # Keep running=True while workers publish the last batches. Setting
+                # it false first makes their enqueue loop exit and silently drops
+                # every prompt group that was still in flight at natural EOF.
+                self.wait_for_pending_generations()
                 self.data_exhausted = True
                 print(
-                    "❌ Trajectory collection stopped: dataloader exhausted "
-                    "(max_num_epochs reached). No more data available for generation. "
-                    "Increase max_num_epochs or use a larger dataset."
+                    "ℹ️ Trajectory collection drained all in-flight workers after "
+                    "the dataloader reached max_num_epochs."
                 )
             else:
                 print("🛑 Trajectory collection stopped")
+            self.running = False
 
     def _stamp_nemo_gym_task_indices(self, batch: BatchedDataDict[DatumSpec]) -> None:
         """Assign one stable, monotonic task index to every prompt in a batch."""
@@ -516,7 +531,7 @@ class AsyncTrajectoryCollector:
         every time once one is.
         """
         with self._failure_lock:
-            error_message = self._fatal_error_message
+            error_message = self._fatal_error_message or self._collection_error_message
         if error_message is not None:
             raise RuntimeError(error_message)
 
@@ -930,8 +945,6 @@ class AsyncTrajectoryCollector:
                 "wasted/failed_trajectory", time.perf_counter() - worker_start
             )
             backend = "NeMo-Gym" if use_nemo_gym else "native"
-            import traceback
-
             failure_traceback = traceback.format_exc()
             with self._failure_lock:
                 self._failure_count += 1
