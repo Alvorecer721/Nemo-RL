@@ -32,7 +32,7 @@ REPO_DIR=${REPO_DIR:-$PWD}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
 RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nrl_vllm0251_grpo_async_${SLURM_JOB_ID}}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}
-RECIPE=${RECIPE:-/opt/nemo-rl/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron-async.yaml}
+RECIPE=${RECIPE:-/opt/nemo-rl/examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-async.yaml}
 
 [[ -r "$CONTAINER_ENV" ]] || {
   echo "Container EDF not found at CONTAINER_ENV=$CONTAINER_ENV" >&2
