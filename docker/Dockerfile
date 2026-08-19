@@ -94,9 +94,26 @@ ARG UV_VERSION=0.11.18
 ARG PYTHON_VERSION=3.13.13
 ENV UV="/root/.local/bin/uv"
 ENV PATH="/root/.local/bin:$PATH"
-RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh && \
-    [ "$("$UV" --version)" = "uv ${UV_VERSION}" ] && \
-    "$UV" python install ${PYTHON_VERSION}
+RUN set -eu; \
+    uv_installer=/tmp/uv-install.sh; \
+    curl --retry 3 --retry-delay 2 -LsSf -o "$uv_installer" \
+        "https://astral.sh/uv/${UV_VERSION}/install.sh"; \
+    sh "$uv_installer"; \
+    rm -f "$uv_installer"; \
+    uv_version=$("$UV" --version); \
+    case "$uv_version" in \
+        "uv ${UV_VERSION}"|"uv ${UV_VERSION} "*) ;; \
+        *) echo "Expected uv ${UV_VERSION}, found ${uv_version}" >&2; exit 1 ;; \
+    esac; \
+    for attempt in 1 2 3; do \
+        "$UV" python install "${PYTHON_VERSION}" && break; \
+        if [ "$attempt" -eq 3 ]; then \
+            echo "Failed to install Python ${PYTHON_VERSION} after ${attempt} attempts" >&2; \
+            exit 1; \
+        fi; \
+        echo "Retrying Python ${PYTHON_VERSION} download (attempt $((attempt + 1))/3)" >&2; \
+        sleep 5; \
+    done
 
 # Disable usage stats by default for users who are sensitive to sharing usage.
 # Users are encouraged to enable if the wish.
