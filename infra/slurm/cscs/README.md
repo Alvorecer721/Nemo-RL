@@ -164,8 +164,13 @@ For a source-only release, the launcher verifies the current dependency
 fingerprint and resumes from the content-addressed final hermetic cache image.
 This is intentional: Podman models a named source context as a parent image,
 so any source edit otherwise invalidates the earlier dependency COPY layers.
-When dependencies change, run with `HERMETIC_CACHE_TAG=rebuild`, then replace
-the pinned tag and fingerprint with the new completed hermetic-stage values.
+When dependencies change, treat the rebuild as two allocations. First run with
+`HERMETIC_CACHE_TAG=rebuild` to publish the completed hermetic-stage cache, then
+replace the pinned tag, fingerprint, and lock digest and start the release from
+a clean allocation-local Podman store. Do not carry the dependency-stage graph
+into the release build on 334 GiB nodes: rootless Podman briefly needs a second
+copy while committing a layer. Do not move the overlay graph to Lustre either;
+that filesystem does not provide the extended-attribute semantics Podman needs.
 
 ### Failure and recovery ledger
 
