@@ -22,3 +22,5 @@
 
 - `logs/nrl_vllm0251_smoke_3128457.out` - exact-image GH200 vLLM generation smoke passed.
 - `logs/nrl_vllm0251_dpo_3128458.out` - XIELU CUDA forward/backward and four-GPU one-step DPO passed.
+- Bridge commit `535b7aa7` - mechanical Ruff fixes; full Bridge tracked-file check and format-check pass.
+- NeMo-RL tracked-file Ruff check and format-check - 528 Python files pass.

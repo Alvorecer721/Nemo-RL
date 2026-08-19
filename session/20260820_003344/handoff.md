@@ -8,6 +8,7 @@ The Bridge-upgrade candidate image is built and checksum-verified. The exact art
 
 - Run the sync-GRPO refit and async-GRPO probes using `.tmp/nemo_rl_bridge_3b116bb.toml`.
 - Build an exact-head source-only candidate after the builder-safety commit is finalized, then repeat the release gate as appropriate.
+- Publish local Bridge lint-only commit `535b7aa7` before publishing the corresponding NeMo-RL submodule pointer.
 
 ## Watch Outs
 
