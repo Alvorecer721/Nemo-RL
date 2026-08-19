@@ -113,8 +113,19 @@ jobs:
               github_repo="$remote_url"
             fi
 
+            # The fork's v0.7.0 base pins Gym's v0.4.0 release branch, while
+            # upstream NeMo-RL moved back to Gym main. These exact commits
+            # intentionally diverge from a common ancestor; after this one-time
+            # migration, later Gym updates must fast-forward from the new pin.
+            if [[ "$submodule_path" = "3rdparty/Gym-workspace/Gym" \
+                  && "$target_commit" = "d67ad6611cfe21dbaeb301c59e59df32ce22ec50" \
+                  && "$current_commit" = "473f446f71ec7c1243eb1517fe2440a2b37fe68b" ]]; then
+              echo "✅ $submodule_name: approved v0.4.0 release-to-main migration"
+              changed=1
+              success_body+="$submodule_name: ✅ Approved v0.4.0 release-to-main migration"$'\n'
+
             # Case 1: Same commit
-            if [[ "$current_commit" = "$target_commit" ]]; then
+            elif [[ "$current_commit" = "$target_commit" ]]; then
               echo "✅ $submodule_name: PR branch matches ${{ inputs.base_ref }} branch (same commit)"
               # No change, so don't add to changed count or comment
 
