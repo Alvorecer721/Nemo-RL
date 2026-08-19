@@ -165,12 +165,15 @@ fingerprint and resumes from the content-addressed final hermetic cache image.
 This is intentional: Podman models a named source context as a parent image,
 so any source edit otherwise invalidates the earlier dependency COPY layers.
 When dependencies change, treat the rebuild as two allocations. First run with
-`HERMETIC_CACHE_TAG=rebuild` to publish the completed hermetic-stage cache, then
-replace the pinned tag, fingerprint, and lock digest and start the release from
-a clean allocation-local Podman store. Do not carry the dependency-stage graph
-into the release build on 334 GiB nodes: rootless Podman briefly needs a second
-copy while committing a layer. Do not move the overlay graph to Lustre either;
-that filesystem does not provide the extended-attribute semantics Podman needs.
+`HERMETIC_CACHE_TAG=rebuild`. The launcher builds and publishes only the
+hermetic target under its dependency fingerprint, prints the exact tag and
+digests to pin, and exits successfully without entering release assembly.
+Replace the pinned tag, fingerprint, and digests with those values, commit the
+change, and start the release from a clean allocation-local Podman store. Do
+not carry the dependency-stage graph into the release build on 334 GiB nodes:
+rootless Podman briefly needs a second copy while committing a layer. Do not
+move the overlay graph to Lustre either; that filesystem does not provide the
+extended-attribute semantics Podman needs.
 
 ### Failure and recovery ledger
 
@@ -193,6 +196,7 @@ construction.
 | 11 | Retries recovered the vLLM and SGLang environments and crossed four split DTensor layers, but the outer `uv run` auto-synced the already-complete main environment and failed before the Python retry loop | Invoke release helpers with `uv run --no-sync`; their inner worker `uv sync` remains explicit, retried, and fail-closed. |
 | 12 | The first no-sync build invoked the helper by file path, so Python started in `nemo_rl/utils` and could not import `nemo_rl` | Invoke it as `python -m nemo_rl.utils.prefetch_venvs`, preserving the project import root without an outer sync. |
 | 13 | The module-based build recovered two transient direct-wheel failures, committed every worker separately, pushed OCI image `824dff64d3d2`, exported SquashFS, and passed the baked import check | Successful standalone artifact listed above; job `3069254`. |
+| 14 | A dependency-changing build published its hermetic cache but continued into release assembly with the dependency graph still occupying the 334 GiB Podman workspace; release step 34 exhausted `/tmp` | `HERMETIC_CACHE_TAG=rebuild` now targets and publishes only `hermetic`, prints the required cache pin, and exits before release; a fresh job performs release assembly. |
 
 Historical build output is under `logs/nrl-vllm0251-image_*.{out,err}`. Direct
 step-39 recovery was an allocation-specific rescue, not the supported rebuild
