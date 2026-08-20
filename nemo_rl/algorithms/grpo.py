@@ -294,7 +294,7 @@ class GRPOConfig(BaseModel, extra="allow"):
     calculate_advantages_on_gpu: bool = False
     # Sequence-level logprob error masking for training stability. If set, mask sequences with mult_prob_error exceeding this threshold (same scale as token_mult_prob_error metric, e.g., 1.5)
     # Note that this is slightly different than Masked Importance Sampling (MIS) because this uses the absolute value of the difference between the training and generation logprobs, whereas MIS just uses the difference between the training and generation logprobs.
-    seq_logprob_error_threshold: float | None = None
+    seq_logprob_error_threshold: float | None = Field(default=None, ge=1.0)
     # Advantage value to assign to invalid tool call tokens. When set (e.g. -5.0), overwrites the
     # computed advantage for those tokens to penalize them; absent/None disables the penalty.
     invalid_tool_call_advantage: float | None = None
