@@ -48,8 +48,8 @@ BASE_IMAGE=${BASE_IMAGE:-nvcr.io/nvidia/cuda-dl-base:26.03-cuda13.2-devel-ubuntu
 # Podman's named-context identity bug that otherwise invalidates uv.lock when
 # an unrelated application source file changes. Set to "rebuild" only when
 # intentionally changing dependencies.
-HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-ccab8a76e0691e8574aa905e85b58dde68b368df6a883f7f3645822135f6ad34}
-HERMETIC_FINGERPRINT_SHA256=aaf52a1321241894a57c8bc67d65a195437b69eff8370722cfe5d06bb6b32260
+HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-508e7c3083af7ce63ece6885650b95dd70e66cc10f576b3ed8b41de6b7727d26}
+HERMETIC_FINGERPRINT_SHA256=508e7c3083af7ce63ece6885650b95dd70e66cc10f576b3ed8b41de6b7727d26
 # Use an explicit allocation-local store so the launcher does not depend on a
 # login-node containers/storage.conf. Large release layers are bounded in the
 # Dockerfile so they fit this node-local tmpfs.

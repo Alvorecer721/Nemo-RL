@@ -156,6 +156,16 @@ def test_all_config_files_have_required_keys(config_file):
     validate_config_section(config_dict, master_config_class, config_file)
 
 
+def test_grpo_rejects_seq_logprob_error_threshold_below_one():
+    config_file = str(configs_dir / "grpo_math_1B.yaml")
+    config = load_config_with_inheritance(config_file)
+    config.grpo.seq_logprob_error_threshold = 0.02
+    config_dict = OmegaConf.to_container(config, resolve=True)
+
+    with pytest.raises(AssertionError, match="greater than or equal to 1"):
+        validate_config_section(config_dict, GRPOMasterConfig, config_file)
+
+
 @pytest.mark.parametrize("config_file", config_files)
 def test_all_config_no_tp_size_accuracy_issues(config_file):
     """Test that all config files in examples/configs have no TP size >= 4 accuracy issues.

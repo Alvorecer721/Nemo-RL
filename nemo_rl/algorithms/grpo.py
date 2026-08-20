@@ -18,12 +18,21 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from typing import Any, Callable, NotRequired, Optional, TypedDict, TypeVar, cast
+from typing import (
+    Annotated,
+    Any,
+    Callable,
+    NotRequired,
+    Optional,
+    TypedDict,
+    TypeVar,
+    cast,
+)
 
 import numpy as np
 import ray
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoProcessor
@@ -205,7 +214,7 @@ class GRPOConfig(TypedDict):
     calculate_advantages_on_gpu: NotRequired[bool]
     # Sequence-level logprob error masking for training stability. If set, mask sequences with mult_prob_error exceeding this threshold (same scale as token_mult_prob_error metric, e.g., 1.5)
     # Note that this is slightly different than Masked Importance Sampling (MIS) because this uses the absolute value of the difference between the training and generation logprobs, whereas MIS just uses the difference between the training and generation logprobs.
-    seq_logprob_error_threshold: float | None
+    seq_logprob_error_threshold: Annotated[float, Field(ge=1.0)] | None
     # Advantage value to assign to invalid tool call tokens. When set (e.g. -5.0), overwrites the
     # computed advantage for those tokens to penalize them; absent/None disables the penalty.
     invalid_tool_call_advantage: NotRequired[float | None]
