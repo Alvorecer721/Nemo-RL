@@ -348,8 +348,12 @@ echo "TRT-LLM cache state before build:"
 du -sh /root/.cache/uv /root/.cache/trtllm-wheels
 
 TRTLLM_SYNC_LOG=$(mktemp /tmp/trtllm-sync.XXXXXX.log)
+TRTLLM_BUILD_VENV=/tmp/nemo-rl-build-trtllm
+rm -rf "${TRTLLM_BUILD_VENV}"
+uv venv --seed "${TRTLLM_BUILD_VENV}"
 set +e
 UV_CACHE_DIR=/root/.cache/uv \
+    UV_PROJECT_ENVIRONMENT="${TRTLLM_BUILD_VENV}" \
     TRTLLM_WHEEL_CACHE_DIR=/root/.cache/trtllm-wheels \
     uv sync --verbose --link-mode symlink --locked --extra trtllm --no-install-project \
     2>&1 | tee "$TRTLLM_SYNC_LOG" \
@@ -361,18 +365,16 @@ if [[ "${TRTLLM_SYNC_STATUS}" -ne 0 ]]; then
     echo "[ERROR] Last 200 lines of captured uv output:" >&2
     tail -n 200 "$TRTLLM_SYNC_LOG" >&2
     rm -f "$TRTLLM_SYNC_LOG"
+    rm -rf "${TRTLLM_BUILD_VENV}"
     exit "${TRTLLM_SYNC_STATUS}"
 fi
 rm -f "$TRTLLM_SYNC_LOG"
+rm -rf "${TRTLLM_BUILD_VENV}"
 
 echo "TRT-LLM cache state after build:"
 du -sh /root/.cache/uv /root/.cache/trtllm-wheels
 
-# Restore the intended default environment in the same layer so the transient
-# TRT-LLM installation does not add a large intermediate venv layer.
-uv sync --link-mode symlink --locked --all-groups --no-install-project
-
-# The final sync can repopulate the shared uv cache, so repeat the security
+# The TRT-LLM sync can repopulate the shared uv cache, so repeat the security
 # cleanup performed in the preceding dependency layer.
 find /root/.cache/uv -type d -path "*ray/_private/runtime_env/agent/thirdparty_files/aiohttp*" -exec rm -rf {} +
 EOF
