@@ -46,7 +46,9 @@ EOF
 
 # Install uv at /usr/local/bin in case the root home directory is bind mounted
 ARG UV_VERSION=0.11.18
-RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | XDG_BIN_HOME=/usr/local/bin sh
+ENV UV="/usr/local/bin/uv"
+RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | XDG_BIN_HOME=/usr/local/bin sh && \
+    [ "$("$UV" --version)" = "uv ${UV_VERSION}" ]
 
 # Disable usage stats by default for users who are sensitive to sharing usage.
 # Users are encouraged to enable if they wish.

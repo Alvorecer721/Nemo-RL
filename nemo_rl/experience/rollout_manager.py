@@ -558,8 +558,24 @@ class AsyncNemoGymRolloutImpl:
             sum(len(m["token_ids"]) for m in c.message_log if m["role"] == "assistant")
             for c in completions
         ]
+        max_gen_tokens_per_turn = [
+            max(
+                (
+                    len(m["token_ids"])
+                    for m in c.message_log
+                    if m["role"] == "assistant"
+                ),
+                default=0,
+            )
+            for c in completions
+        ]
         # truncated metrics
         truncated = [c.truncated for c in completions]
+
+        def _pct(values: list[int], p: float) -> float:
+            sorted_values = sorted(values)
+            idx = min(int(len(sorted_values) * p / 100), len(sorted_values) - 1)
+            return float(sorted_values[idx])
 
         # Aggregate metrics across all samples.
         n = len(completions)
@@ -567,9 +583,15 @@ class AsyncNemoGymRolloutImpl:
             **_calculate_single_metric(total_reward, n, "total_reward"),
             # turn metrics
             **_calculate_single_metric(turn_count, n, "turns_per_sample"),
+            "turns_per_sample/p95": _pct(turn_count, 95),
+            "turns_per_sample/p99": _pct(turn_count, 99),
             # token metrics
             **_calculate_single_metric(total_tokens, n, "total_tokens_per_sample"),
             **_calculate_single_metric(assistant_tokens, n, "gen_tokens_per_sample"),
+            **_calculate_single_metric(
+                max_gen_tokens_per_turn, n, "max_gen_tokens_per_turn"
+            ),
+            "max_gen_tokens_per_turn/p95": _pct(max_gen_tokens_per_turn, 95),
             # truncated metrics
             "natural_termination_rate": sum(not t for t in truncated) / n,
             "truncation_rate": sum(truncated) / n,

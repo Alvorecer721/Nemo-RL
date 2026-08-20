@@ -28,6 +28,7 @@ from nemo_rl.distributed.virtual_cluster import (
 )
 from nemo_rl.environments.interfaces import EnvironmentInterface
 from nemo_rl.utils.timer import Timer
+from nemo_rl.utils.venvs import pin_uv_to_path
 
 DEFAULT_INVALID_TOOL_CALL_PATTERNS = [
     "<tool_call>",
@@ -48,7 +49,8 @@ def get_nemo_gym_uv_cache_dir() -> str | None:
     """
     if not os.environ.get("NRL_CONTAINER"):
         return None
-    return subprocess.check_output(["uv", "cache", "dir"]).decode().strip()
+    uv = os.environ.get("UV", "uv")
+    return subprocess.check_output([uv, "cache", "dir"]).decode().strip()
 
 
 def get_nemo_gym_venv_dir() -> str | None:
@@ -156,6 +158,9 @@ class NemoGym(EnvironmentInterface):
         scheduled onto reserved nodes) and spun up explicitly once the vLLM
         server URLs are available, overlapping with vLLM model loading.
         """
+        # Ray prepends the actor venv to PATH after applying runtime_env. Re-pin
+        # uv inside the actor before Gym spawns its own component environments.
+        pin_uv_to_path()
         self.node_ip = _get_node_ip_local()
         _gym_port_low = self.cfg.get("port_range_low", DEFAULT_GYM_PORT_RANGE_LOW)
         _gym_port_high = self.cfg.get("port_range_high", DEFAULT_GYM_PORT_RANGE_HIGH)

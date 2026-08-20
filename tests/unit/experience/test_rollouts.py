@@ -39,7 +39,10 @@ from nemo_rl.environments.games.sliding_puzzle import (
 )
 from nemo_rl.experience import rollouts as rollouts_module
 from nemo_rl.experience.interfaces import Completion, PromptGroupRecord
-from nemo_rl.experience.rollout_manager import RolloutManager
+from nemo_rl.experience.rollout_manager import (
+    AsyncNemoGymRolloutImpl,
+    RolloutManager,
+)
 from nemo_rl.experience.rollouts import (
     _calculate_single_metric,
     _compute_generation_quality_metrics,
@@ -979,12 +982,16 @@ def test_run_async_nemo_gym_rollout(
             "timing/rollout/aggregate_metrics": 0.0,
             "timing/rollout/per_agent_misc_metrics": 0.0,
             "mean_gen_tokens_per_sample": None,
+            "mean_type_token_ratio": None,
+            "mean_ngram_repetition_rate": None,
             "turns_per_sample/mean": 2.0,
             "turns_per_sample/max": 2,
             "turns_per_sample/min": 2,
             "turns_per_sample/median": 2.0,
             "turns_per_sample/stddev": 0.0,
             "turns_per_sample/histogram": None,
+            "turns_per_sample/p95": None,
+            "turns_per_sample/p99": None,
             "total_tokens_per_sample/mean": 3843.0,
             "total_tokens_per_sample/max": 3848,
             "total_tokens_per_sample/min": 3838,
@@ -997,6 +1004,13 @@ def test_run_async_nemo_gym_rollout(
             "gen_tokens_per_sample/median": 732.5,
             "gen_tokens_per_sample/stddev": 21.920310216782973,
             "gen_tokens_per_sample/histogram": None,
+            "max_gen_tokens_per_turn/mean": None,
+            "max_gen_tokens_per_turn/max": None,
+            "max_gen_tokens_per_turn/min": None,
+            "max_gen_tokens_per_turn/median": None,
+            "max_gen_tokens_per_turn/stddev": None,
+            "max_gen_tokens_per_turn/histogram": None,
+            "max_gen_tokens_per_turn/p95": None,
             "total_reward/mean": 0.0,
             "total_reward/max": 0.0,
             "total_reward/min": 0.0,
@@ -1387,6 +1401,53 @@ def test_async_rollout_manager_matches_original(
 # ---------------------------------------------------------------------------
 # Tests for AsyncNemoGymRolloutManager
 # ---------------------------------------------------------------------------
+
+
+def test_async_nemo_gym_rollout_metrics_include_turn_diagnostics():
+    manager = AsyncNemoGymRolloutImpl(
+        tokenizer=None,
+        task_to_env={},
+        num_generations_per_prompt=2,
+        max_seq_len=32,
+        generation_config={
+            "stop_strings": [],
+            "stop_token_ids": [],
+            "top_k": None,
+        },
+    )
+    completions = [
+        Completion(
+            message_log=[
+                {"role": "user", "token_ids": torch.tensor([1])},
+                {"role": "assistant", "token_ids": torch.tensor([2, 3])},
+                {"role": "user", "token_ids": torch.tensor([4])},
+                {
+                    "role": "assistant",
+                    "token_ids": torch.tensor([5, 6, 7, 8]),
+                },
+            ],
+            env_extras={"reward": 0.0},
+            truncated=False,
+            reward=0.0,
+        ),
+        Completion(
+            message_log=[
+                {"role": "user", "token_ids": torch.tensor([1])},
+                {"role": "assistant", "token_ids": torch.tensor([2, 3, 4])},
+            ],
+            env_extras={"reward": 1.0},
+            truncated=False,
+            reward=1.0,
+        ),
+    ]
+
+    metrics = manager._compute_rollout_metrics(completions, "test_agent")
+
+    assert metrics["turns_per_sample/p95"] == 2.0
+    assert metrics["turns_per_sample/p99"] == 2.0
+    assert metrics["max_gen_tokens_per_turn/mean"] == 3.5
+    assert metrics["max_gen_tokens_per_turn/max"] == 4
+    assert metrics["max_gen_tokens_per_turn/p95"] == 4.0
 
 
 @pytest.mark.nemo_gym
