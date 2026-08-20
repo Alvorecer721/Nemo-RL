@@ -191,8 +191,17 @@ PY
       test -f "$CHECKPOINT_DIR/step_2/training_info.json"
       metric_step=2
     else
-      printf "=== one-step baked-image DPO smoke ===\n"
-      run_dpo 1 "$RUN_LOG"
+      initial_max_steps=1
+      if [[ "$CHECKPOINT_MODE" == "save" || \
+            "$CHECKPOINT_MODE" == "same_allocation" ]]; then
+        # Use the same two-step scheduler horizon as the restore process. A
+        # one-step save followed by a two-step resume would correctly fail
+        # the Megatron optimizer-scheduler consistency check.
+        initial_max_steps=2
+      fi
+      printf "=== %s-step baked-image DPO smoke ===\n" "$initial_max_steps"
+      run_dpo "$initial_max_steps" "$RUN_LOG"
+      metric_step=$initial_max_steps
     fi
 
     if grep -Fq "Apertus XIELU: using eager fallback" "$RUN_LOG"; then
@@ -204,6 +213,7 @@ PY
 
     if [[ "$CHECKPOINT_MODE" == "save" ]]; then
       test -f "$CHECKPOINT_DIR/step_1/training_info.json"
+      test -f "$CHECKPOINT_DIR/step_2/training_info.json"
       echo "baked_dpo_cross_allocation_save=OK"
     elif [[ "$CHECKPOINT_MODE" == "resume" ]]; then
       /opt/nemo_rl_venv/bin/python - "$CHECKPOINT_DIR/step_2/training_info.json" <<'PY'
@@ -217,6 +227,9 @@ print("baked_dpo_cross_allocation_resume=OK")
 PY
     elif [[ "$CHECKPOINT_MODE" == "same_allocation" ]]; then
       test -f "$CHECKPOINT_DIR/step_1/training_info.json"
+      test -f "$CHECKPOINT_DIR/step_2/training_info.json"
+      test ! -e "$RUN_DIR/initial_step_2"
+      mv "$CHECKPOINT_DIR/step_2" "$RUN_DIR/initial_step_2"
       printf "=== resume baked-image DPO from step 1 to step 2 ===\n"
       run_dpo 2 "$RUN_DIR/resume.log"
       test -f "$CHECKPOINT_DIR/step_2/training_info.json"

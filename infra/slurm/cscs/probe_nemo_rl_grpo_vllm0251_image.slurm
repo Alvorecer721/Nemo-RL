@@ -38,6 +38,7 @@ MAX_STEPS=${MAX_STEPS:-1}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-64}
 NUM_PROMPTS=${NUM_PROMPTS:-4}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
+GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 
 [[ -r "$CONTAINER_ENV" ]] || {
   echo "Container EDF not found at CONTAINER_ENV=$CONTAINER_ENV" >&2
@@ -56,7 +57,7 @@ srun \
   --mpi=pmix \
   --environment="$CONTAINER_ENV" \
   --ntasks=1 \
-  --gpus-per-task=4 \
+  --gpus-per-task="$GPUS_PER_NODE" \
   --cpus-per-task="$SLURM_CPUS_PER_TASK" \
   bash -lc '
     set -euo pipefail
@@ -71,10 +72,21 @@ srun \
     export MAX_NEW_TOKENS='"$MAX_NEW_TOKENS"'
     export NUM_PROMPTS='"$NUM_PROMPTS"'
     export NUM_GENERATIONS='"$NUM_GENERATIONS"'
+    export GPUS_PER_NODE='"$GPUS_PER_NODE"'
     RECIPE='"$RECIPE"'
 
     mkdir -p "$RUN_DIR" "$HF_HOME" "$HF_DATASETS_CACHE"
     cd /opt/nemo-rl
+
+    extra_overrides=()
+    if [[ "$GENERATION_ACTOR" == *SGLangGenerationWorker ]]; then
+      # The upstream text recipe targets a single eight-GPU node. Clariden
+      # GH200 nodes expose four GPUs, so keep TP2 and run two engines on the
+      # GPUs actually allocated to this probe.
+      extra_overrides+=(
+        policy.generation.sglang_cfg.sglang_server_config.num_gpus="$GPUS_PER_NODE"
+      )
+    fi
 
     /opt/nemo_rl_venv/bin/python - <<'"'"'PY'"'"'
 import os
@@ -105,16 +117,22 @@ PY
       policy.generation.max_new_tokens="$MAX_NEW_TOKENS" \
       policy.generation.vllm_cfg.gpu_memory_utilization=0.40 \
       policy.generation.vllm_cfg.enforce_eager=true \
+      "${extra_overrides[@]}" \
       logger.log_dir="$RUN_DIR/tb" \
       logger.wandb_enabled=false \
       checkpointing.enabled=false \
       cluster.num_nodes=1 \
-      cluster.gpus_per_node=4 \
+      cluster.gpus_per_node="$GPUS_PER_NODE" \
       2>&1 | tee "$RUN_DIR/run.log"
 
     if [[ "$GENERATION_ACTOR" == *SGLangGenerationWorker ]]; then
-      grep -Fq "[sglang refit] All SGLang server caches flushed successfully" \
-        "$RUN_DIR/run.log"
+      # SGLang reports the refit contract through its HTTP responses. Require
+      # successful weight updates and cache flushes throughout the run rather
+      # than a NeMo-RL message that is not emitted by this backend version.
+      test "$(grep -Fc "POST /update_weights_from_tensor HTTP/1.1\" 200 OK" \
+        "$RUN_DIR/run.log")" -ge "$MAX_STEPS"
+      test "$(grep -Fc "GET /flush_cache HTTP/1.1\" 200 OK" \
+        "$RUN_DIR/run.log")" -ge "$MAX_STEPS"
     else
       grep -Fq "GPU Memory after refit complete" "$RUN_DIR/run.log"
     fi
