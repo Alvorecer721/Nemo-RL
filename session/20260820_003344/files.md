@@ -33,6 +33,8 @@
 
 - `.tmp/nemo_rl_bridge_3b116bb.toml` - test-only EDF pointing at the new SquashFS.
 - `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-3b116bb38113-723462d5ac40.sqsh` - candidate image.
+- `.tmp/nemo_rl_bridge_0e73bdb.toml` - exact runtime-source image EDF.
+- `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-0e73bdb8367e-f8a605afd716.sqsh` - exact runtime-source image used by the final probe ladder.
 
 ## Evidence
 
@@ -56,3 +58,17 @@
 - `logs/nrl_vllm0251_dpo_3130280.out` and
   `logs/nrl_vllm0251_dpo_3130309.out` - cross-allocation save/restore exposed
   weights-only resume caused by stale DCP optimizer detection.
+- `logs/nrl-vllm0251-image_3130524.*` - exact-source hermetic phase completed
+  and published fingerprinted cache metadata.
+- `logs/nrl-vllm0251-image_3131131.*` - fresh-allocation release phase
+  completed all 47 build steps and baked import checks.
+- `logs/nrl_bridge_exact_tests_3132043.*` - exact-image checkpoint and GRPO
+  focused tests passed.
+- `logs/nrl_vllm0251_grpo_mn_3132023.out` - corrected ten-step two-node/eight-GPU Apertus GRPO and refit gate passed with real signal.
+- `logs/nrl_vllm0251_dpo_3132149.out` and
+  `logs/nrl_vllm0251_dpo_3132165.out` - exact-image optimizer-aware
+  cross-allocation save/restore passed on different GH200 nodes.
+- `logs/nrl_vllm0251_grpo_3132159.out` - DTensor-v2 text-only SGLang GRPO and
+  repeated refit gate passed on four GH200 GPUs.
+- `logs/nrl_vllm0251_grpo_async_3132025.out` - corrected 500-step async
+  Apertus/vLLM endurance passed with Slurm exit `0:0` and real learning signal.

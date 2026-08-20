@@ -4,7 +4,7 @@
 - Repo: /capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0/.tmp/nemo-bridge-sync
 - Branch: codex/sync-megatron-bridge-d9212902
 - Started: 2026-08-20 00:33:44 CEST
-- Updated: 2026-08-20 11:00 CEST
+- Updated: 2026-08-20 15:00 CEST
 
 ## Goal
 
@@ -12,8 +12,8 @@ Upgrade the Apertus NeMo-RL stack to Megatron-Bridge `d9212902`, deliver a repro
 
 ## Current Subtask
 
-Finish publication and production validation: multi-node GRPO, a true
-cross-allocation restore, async endurance, and text-only SGLang.
+Package the completed validation evidence and publish the Bridge-upgrade
+NeMo-RL PR.
 
 ## Loaded Skills
 
@@ -23,9 +23,12 @@ cross-allocation restore, async endurance, and text-only SGLang.
 
 ## Current Status
 
-Image build job 3127636 completed. Artifact:
-`/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-3b116bb38113-723462d5ac40.sqsh`
-(SHA-256 `41e3c8afd68f40bc47f2b2ff2b0ed28525a9642f71f70abcc8d5e080dc3c66ed`).
+The exact runtime-source image completed in release job `3131131`. Artifact:
+`/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-0e73bdb8367e-f8a605afd716.sqsh`
+(SHA-256 `4f4602919f6b982df135abf8dd5c0ae9bc69509e83b90a857b190ce6fb725e3d`).
+Hermetic job `3130524` published cache fingerprint
+`508e7c3083af7ce63ece6885650b95dd70e66cc10f576b3ed8b41de6b7727d26`;
+release assembly then ran on fresh node `nid007066` and completed all 47 steps.
 
 Operational invariant: on 334 GiB nodes, a dependency-changing build must not carry the hermetic build graph into release assembly. The launcher now maps `HERMETIC_CACHE_TAG=rebuild` to `--target=hermetic`, publishes the hermetic image under its dependency fingerprint, prints the exact cache pin and digests, and exits. Release assembly must resume in a fresh allocation-local Podman store.
 
@@ -35,13 +38,16 @@ import-order/format failures in the merged Bridge fork. Signed Bridge commit
 all 1,706 tracked Python files. Bridge PR #3 merged it into the fork's `main`,
 so the NeMo-RL gitlink is now remotely resolvable.
 
-The exact candidate image has now passed all bounded release probes:
+The exact runtime-source image has now passed these bounded release probes:
 
 - sync GRPO refit on four GH200 GPUs, job `3128582`;
 - two-step async GRPO with CUDA graphs and repeated refit, job `3128583`;
 - async DPO checkpoint save followed by a fresh-process resume to step 2, job `3128587`;
-- ten-step, two-node/eight-GPU Apertus DPO with TP2 Megatron workers spanning
-  both hosts, job `3130139` (`train/loss` step 10 = `0.6937193870544434`).
+- ten-step, two-node/eight-GPU Apertus GRPO with repeated vLLM refits and real
+  learning signal, job `3132023`;
+- optimizer-aware DPO save/restore across different allocations and nodes,
+  jobs `3132149` and `3132165`;
+- five-step DTensor-v2 Qwen2.5-Math-1.5B SGLang GRPO/refit, job `3132159`.
 
 The multi-node launch attempt `3130080` failed before NeMo-RL started because
 the Ray head raylet did not register after an over-constrained static port
@@ -60,26 +66,36 @@ ancestors of the candidate-image source commit, and passed 175 focused tests.
 The earlier handoff incorrectly searched only for the pre-merge SHA
 `d0d97df4c`.
 
-Publication status: Gym PR #22 merged as `53cf1c038`. The six unpublished
-Bridge/build/probe commits were cleanly rebased onto that new `main`.
-Multi-node GRPO job `3130301` completed ten steps across two nodes/eight GPUs;
-all ten generation-KL checks were `0.0000` and the final refit gate passed.
+Publication status: Gym PR #22 merged as `53cf1c038`. The Bridge/build/probe
+commits were rebased onto that mainline. The old multi-node GRPO and endurance
+jobs `3130301` and `3130279` completed operationally but used an incorrect
+absolute `0.02` GRPO threshold that masked every valid nonzero batch; they are
+not learning-signal evidence. The corrected multiplicative threshold is
+validated by unit coverage and the replacement jobs.
 
-Cross-allocation save `3130280` completed on `nid007583`; restore `3130309`
-completed on `nid007628`, but revealed that NeMo-RL treated the embedded
-PyTorch-DCP optimizer as absent and resumed weights only. The current Bridge
-format stores optimizer entries in `.metadata`, while the fork recognized only
-the old `common.pt`. A narrow detector and regression tests now pass locally
-(54 checkpoint tests plus the real saved metadata). Baked-image preflight
-`3130348` correctly reproduced the old behavior because the candidate image
-predates this source fix. An exact-head source-only image rebuild is therefore
-required before the corrected restore can be called production evidence.
+Cross-allocation save `3132149` completed on `nid005395` with a two-step
+scheduler horizon. Step 2 was moved aside, and restore `3132165` resumed step 1
+on fresh node `nid006056`. The exact image detected optimizer entries in
+PyTorch-DCP `.metadata`, restored optimizer/scheduler state, reproduced the
+original step-2 loss exactly (`0.7125550508499146`), and emitted
+`baked_dpo_cross_allocation_resume=OK`.
 
-Megatron-backed Apertus SGLang job `3130299` loaded four engines but reached
-the explicit unsupported boundary
-`MegatronPolicyWorker.set_rollout_num_gpus_per_engine`. Supported DTensor-v2
-Apertus SGLang job `3130467` is the replacement compatibility probe. Async
-endurance `3130279` remains healthy beyond step 100.
+Megatron-backed Apertus SGLang remains explicitly unsupported. The supported
+DTensor-v2 text-only probe used Qwen2.5-Math-1.5B. Job `3132159` completed five
+steps with nine positive-reward samples, 2,518 nonzero advantage entries,
+9,932 valid token-mask entries, final loss `0.0021`, Generation-KL
+`0.0001`-`0.0002`, and repeated successful SGLang weight-update/cache-flush
+responses. A separate Automodel lexicographic Torch-version check incorrectly
+disables DTensor async checkpointing under Torch 2.11; checkpointing was
+disabled for this probe and the defect is deferred from the Bridge PR.
+
+Corrected async Apertus/vLLM job `3132025` completed 500 optimizer steps in
+29:41 on `nid007400` with Slurm exit `0:0`. Its 500 step files contain 4,000
+trajectories, 167 positive rewards, 95,952 nonzero advantage entries (maximum
+absolute value `1.0`), and 1,000,157 valid token-mask entries out of 1,923,632.
+Mean Generation-KL was `0.0003124` (maximum `0.0006`). The run emitted
+`baked_async_grpo_tp2=OK` without a traceback, OOM, engine-health failure, or
+collector-loop failure.
 
 ## Plan
 
@@ -90,10 +106,11 @@ endurance `3130279` remains healthy beyond step 100.
 - [x] Run ten-step two-node/eight-GPU Apertus Megatron training (job 3130139).
 - [x] Record results and address any real failure.
 - [x] Run full tracked-file NeMo-RL and Bridge Ruff validation.
-- [x] Complete ten-step two-node GRPO/refit (job 3130301).
-- [ ] Rebuild exact-head image and repeat optimizer-aware cross-allocation restore.
-- [ ] Complete bounded 500-step async-GRPO endurance (job 3130279).
-- [ ] Complete supported DTensor-v2 text-only Apertus SGLang GRPO (job 3130467).
+- [x] Rebuild exact runtime-source image (jobs 3130524 and 3131131).
+- [x] Repeat optimizer-aware cross-allocation restore (jobs 3132149 and 3132165).
+- [x] Complete supported DTensor-v2 text-only SGLang GRPO (job 3132159).
+- [x] Complete corrected ten-step two-node GRPO/refit (job 3132023).
+- [x] Complete corrected bounded 500-step async-GRPO endurance (job 3132025).
 - [ ] Commit/push final probe evidence and open the Bridge-upgrade NeMo-RL PR.
 
 ## Assumptions
@@ -102,8 +119,7 @@ endurance `3130279` remains healthy beyond step 100.
 
 ## Blockers
 
-- Exact-head image rebuild and active production-evidence jobs must finish
-  before the final evidence commit.
+- None.
 
 The earlier Slurm-controller diagnosis was a sandbox-network false positive.
 Escalated Slurm calls reached the healthy controller and all jobs above were

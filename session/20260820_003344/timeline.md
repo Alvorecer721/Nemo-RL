@@ -89,3 +89,31 @@
 - Apertus SGLang job `3130299` loaded four SGLang engines, then hit the explicit
   unsupported Megatron policy refit method. Started the supported DTensor-v2
   variant as job `3130467`. Async endurance `3130279` passed step 100.
+
+## 2026-08-20 15:00 CEST
+
+- Invalidated jobs `3130301` and `3130279` as learning-signal evidence after
+  confirming their absolute `0.02` GRPO error threshold masked all valid
+  nonzero batches. Added a multiplicative `1.02` threshold and regression gate.
+- Hermetic build `3130524` and fresh-allocation release build `3131131`
+  produced the exact runtime-source SquashFS. It completed all 47 build steps,
+  passed the baked import smoke, and has SHA-256
+  `4f4602919f6b982df135abf8dd5c0ae9bc69509e83b90a857b190ce6fb725e3d`.
+- Exact-image focused tests passed: 54 checkpoint tests, the threshold
+  regression, and three zero-valid-batch GRPO tests.
+- Corrected multi-node job `3132023` completed ten Apertus GRPO steps across
+  two nodes/eight GPUs with real rewards and repeated vLLM refits.
+- Cross-allocation save `3132149` on `nid005395` and restore `3132165` on
+  `nid006056` proved optimizer-aware PyTorch-DCP recovery. The restored step-2
+  loss exactly matched the original (`0.7125550508499146`).
+- DTensor-v2 SGLang job `3132159` completed five Qwen2.5-Math-1.5B GRPO steps
+  on four GH200 GPUs with real learning signal, low Generation-KL, and repeated
+  successful weight-update/cache-flush responses.
+- SGLang logs exposed a separate Automodel bug: lexicographic comparison of
+  Torch `2.11` against `2.9` disables DTensor async checkpointing. The probe had
+  checkpointing disabled, so this is a follow-up rather than Bridge-PR scope.
+- Corrected async Apertus/vLLM job `3132025` completed 500 optimizer steps in
+  29:41 on `nid007400` with Slurm exit `0:0`. It recorded 4,000 trajectories,
+  167 positive rewards, 95,952 nonzero advantage entries, and 1,000,157 valid
+  token-mask entries, then emitted `baked_async_grpo_tp2=OK` without a
+  traceback or OOM.
