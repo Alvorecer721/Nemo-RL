@@ -314,7 +314,7 @@ COPY --from=nemo-rl --link 3rdparty/TensorRT-LLM-workspace/ ./3rdparty/TensorRT-
 RUN --mount=type=ssh \
     --mount=type=bind,from=trtllm-ccache-seed,source=.,target=/tmp/trtllm-ccache-seed \
     --mount=type=cache,id=trtllm-wheel-cache-${TARGETARCH}-${BASE_IMAGE},from=trtllm-wheel-cache-seed,source=.,target=/root/.cache/trtllm-wheels,sharing=locked \
-    --mount=type=cache,id=trtllm-ccache-${TARGETARCH}-${BASE_IMAGE},target=/root/.cache/ccache,sharing=locked <<"EOF" bash -exu
+    --mount=type=cache,id=trtllm-ccache-${TARGETARCH}-${BASE_IMAGE},target=/root/.cache/ccache,sharing=locked <<"EOF" bash -exu -o pipefail
 # Lock/pyproject consistency is verified LATE here, for the whole image. The
 # dependency syncs above run --frozen (read-only on uv.lock: they neither update
 # nor validate it), so this uv lock --check is the ONLY place a stale lock is
