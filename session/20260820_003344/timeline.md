@@ -117,3 +117,5 @@
   167 positive rewards, 95,952 nonzero advantage entries, and 1,000,157 valid
   token-mask entries, then emitted `baked_async_grpo_tp2=OK` without a
   traceback or OOM.
+- Pushed `codex/sync-megatron-bridge-d9212902` and opened NeMo-RL PR #23 with
+  exactly the `CI:L1` label.

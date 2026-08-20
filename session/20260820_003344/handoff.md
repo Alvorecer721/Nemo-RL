@@ -33,11 +33,20 @@ they do not change the installed runtime, dependency graph, or image contents.
   rewards, 95,952 nonzero advantage entries, and 1,000,157 valid token-mask
   entries. It emitted `baked_async_grpo_tp2=OK` without a traceback or OOM.
 
+## Publication
+
+- NeMo-RL PR: `https://github.com/Alvorecer721/Nemo-RL/pull/23`
+- Branch: `codex/sync-megatron-bridge-d9212902`
+- Label: exactly `CI:L1`
+
+CI was triggered from the final branch SHA recorded in PR #23's
+`/ok to test <full-final-sha>` comment.
+
 ## Next Actions
 
-- Commit the final evidence and verify a clean worktree.
-- Push `codex/sync-megatron-bridge-d9212902`, open the NeMo-RL PR with exactly
-  label `CI:L1`, and comment `/ok to test <full-final-sha>`.
+- Monitor PR #23 CI/review.
+- Fix Automodel's Torch-version comparison as a separate SGLang checkpointing
+  follow-up; do not mix it into the Bridge-upgrade PR.
 
 ## Watch Outs
 
@@ -61,3 +70,6 @@ they do not change the installed runtime, dependency graph, or image contents.
   forward/backward smoke.
 - Bridge PR #3 and Gym PR #22 are merged. Async failure hardening is already in
   this branch as landed commit `cc904664e`; do not reapply `d0d97df4c`.
+- Test-only cross-allocation checkpoint trees remain under `.tmp/` because a
+  safety gate declined irreversible deletion without a separate explicit user
+  approval. They are ignored validation artifacts, not source changes.

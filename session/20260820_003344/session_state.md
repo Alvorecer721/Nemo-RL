@@ -12,8 +12,7 @@ Upgrade the Apertus NeMo-RL stack to Megatron-Bridge `d9212902`, deliver a repro
 
 ## Current Subtask
 
-Package the completed validation evidence and publish the Bridge-upgrade
-NeMo-RL PR.
+Monitor the published Bridge-upgrade NeMo-RL PR.
 
 ## Loaded Skills
 
@@ -111,7 +110,7 @@ collector-loop failure.
 - [x] Complete supported DTensor-v2 text-only SGLang GRPO (job 3132159).
 - [x] Complete corrected ten-step two-node GRPO/refit (job 3132023).
 - [x] Complete corrected bounded 500-step async-GRPO endurance (job 3132025).
-- [ ] Commit/push final probe evidence and open the Bridge-upgrade NeMo-RL PR.
+- [x] Commit/push final probe evidence and open Bridge-upgrade NeMo-RL PR #23.
 
 ## Assumptions
 
@@ -120,6 +119,13 @@ collector-loop failure.
 ## Blockers
 
 - None.
+
+## Publication
+
+- PR: `https://github.com/Alvorecer721/Nemo-RL/pull/23`
+- Required label: exactly `CI:L1`
+- CI trigger: PR #23's `/ok to test <full-final-sha>` comment identifies the
+  final publication-record commit.
 
 The earlier Slurm-controller diagnosis was a sandbox-network false positive.
 Escalated Slurm calls reached the healthy controller and all jobs above were
