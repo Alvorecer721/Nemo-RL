@@ -38,11 +38,22 @@ OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 MAX_JOBS=${MAX_JOBS:-4}
 NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS:-90}
+# This Apertus production image is validated with vLLM. Keep TensorRT-LLM an
+# explicit opt-in until its GH200 source build has independent evidence.
+BUILD_TRTLLM=${BUILD_TRTLLM:-0}
 VLLM_VERSION=0.25.1
 # Pin the arm64 manifest used on Clariden rather than resolving a mutable NGC
 # tag differently on a later rebuild. Override only when deliberately updating
 # the foundation image.
 BASE_IMAGE=${BASE_IMAGE:-nvcr.io/nvidia/cuda-dl-base:26.03-cuda13.2-devel-ubuntu24.04@sha256:aae478019be74ae86ce33f32c1468dff70cbcc80118831bd64ac67d5a510ac2a}
+case "$BUILD_TRTLLM" in
+    0) SKIP_TRTLLM_BUILD=1 ;;
+    1) SKIP_TRTLLM_BUILD= ;;
+    *)
+        echo "BUILD_TRTLLM must be 0 or 1, got: $BUILD_TRTLLM" >&2
+        exit 1
+        ;;
+esac
 # Completed hermetic stage for the dependency fingerprint below. Source-only
 # releases resume directly from this content-addressed manifest, avoiding
 # Podman's named-context identity bug that otherwise invalidates uv.lock when
@@ -89,6 +100,7 @@ BUILD_INPUTS_SHA256=$(
         printf 'base_image\0%s\0' "$BASE_IMAGE"
         printf 'max_jobs\0%s\0' "$MAX_JOBS"
         printf 'nvte_cuda_archs\0%s\0' "$NVTE_CUDA_ARCHS"
+        printf 'build_trtllm\0%s\0' "$BUILD_TRTLLM"
         printf 'platform\0linux/arm64\0'
         printf 'hermetic_cache_tag\0%s\0' "$HERMETIC_CACHE_TAG"
     } | sha256sum | cut -d' ' -f1
@@ -96,8 +108,12 @@ BUILD_INPUTS_SHA256=$(
 SOURCE_ID="${SOURCE_REV}-${BUILD_INPUTS_SHA256:0:12}"
 IMAGE="nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
 SQSH_PATH="${OUTPUT_DIR}/nemo-rl-apertus-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
-BUILD_FINGERPRINT_B64=$(python tools/generate_fingerprint.py | base64 -w0)
-CURRENT_FINGERPRINT_SHA256=$(python tools/generate_fingerprint.py | sha256sum | cut -d' ' -f1)
+generate_build_fingerprint() {
+    python tools/generate_fingerprint.py
+    printf '\nbuild_trtllm=%s\n' "$BUILD_TRTLLM"
+}
+BUILD_FINGERPRINT_B64=$(generate_build_fingerprint | base64 -w0)
+CURRENT_FINGERPRINT_SHA256=$(generate_build_fingerprint | sha256sum | cut -d' ' -f1)
 BUILD_TARGET=release
 if [[ "$HERMETIC_CACHE_TAG" == "rebuild" ]]; then
     BUILD_TARGET=hermetic
@@ -108,6 +124,7 @@ echo "Source ID:   $SOURCE_ID"
 echo "Base image:  $BASE_IMAGE"
 echo "Inputs SHA:  $BUILD_INPUTS_SHA256"
 echo "Hermetic:    $HERMETIC_CACHE_TAG"
+echo "TensorRT-LLM build: $BUILD_TRTLLM"
 echo "Podman tag:  $IMAGE"
 echo "Layer cache: $CACHE_DIR"
 echo "SquashFS:    $SQSH_PATH"
@@ -304,6 +321,7 @@ podman build \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "MAX_JOBS=$MAX_JOBS" \
     --build-arg "NVTE_CUDA_ARCHS=$NVTE_CUDA_ARCHS" \
+    --build-arg "SKIP_TRTLLM_BUILD=$SKIP_TRTLLM_BUILD" \
     --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
     --build-arg "NEMO_RL_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
     --build-arg "NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64" \
