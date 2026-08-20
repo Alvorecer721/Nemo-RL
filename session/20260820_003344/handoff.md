@@ -4,21 +4,20 @@
 
 The Bridge-upgrade candidate image is built and checksum-verified. The exact
 artifact is listed in `session_state.md`. Its GH200 vLLM generation, four-GPU
-DPO/XIELU, sync GRPO, async GRPO, async checkpoint/resume, and two-node/eight-GPU
-Apertus Megatron DPO probes all passed. The final multi-node gate ran ten
-optimizer steps, not only a startup step.
+DPO/XIELU, sync/async GRPO, two-node DPO, and ten-step two-node GRPO/refit gates
+passed. Cross-allocation testing exposed and fixed stale PyTorch-DCP optimizer
+detection in NeMo-RL; the fix now needs an exact-head source-only image rebuild.
 
 ## Next Actions
 
-- Publish local Bridge lint-only commit `535b7aa7` before publishing the corresponding NeMo-RL submodule pointer.
-- Integrate `origin/fix/async-grpo-reliability` before treating async engine
-  crashes, finite-loader EOF, and distributed finalization as production-safe.
-- Later gates: cross-allocation checkpoint restore, text-only SGLang, and a
-  many-hour endurance run.
-- Build an exact-head image only after the PR head is final if release
-  provenance must match the merge commit; the existing candidate contains the
-  semantic Bridge upgrade and differs only by later formatting/build/docs/probe
-  changes.
+- Monitor async endurance `3130279` and DTensor-v2 SGLang `3130467`.
+- Build an exact-head image from the pinned hermetic cache, then repeat
+  `CHECKPOINT_MODE=resume` against `3130280`'s shared checkpoint on a new node.
+- Record results, commit the launcher/evidence updates, push the rebased
+  Bridge branch, open its NeMo-RL PR with `CI:L1`, and trigger CI for the final
+  full SHA.
+- Do not count restore `3130309` as optimizer-resume evidence: it completed
+  weights-only and is the regression reproducer.
 
 ## Watch Outs
 
@@ -32,3 +31,6 @@ optimizer steps, not only a startup step.
   service ports delayed raylet registration. The passing launcher retains only
   the established low worker-port range and raises
   `RAY_raylet_start_wait_time_s` to 120 seconds.
+- Bridge PR #3 and Gym PR #22 are merged. Async failure hardening is already in
+  this branch/image as landed commit `cc904664e`; do not reapply the old
+  `d0d97df4c` SHA.

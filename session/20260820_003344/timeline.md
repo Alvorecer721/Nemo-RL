@@ -55,3 +55,37 @@
   time, and final loss `0.6937193870544434`.
 - The step-10 metric gate passed and emitted
   `baked_dpo_multinode_training=OK`.
+
+## 2026-08-20 10:47 CEST
+
+- Opened and merged lint-only Bridge PR #3. Commit `535b7aa7` is now an
+  ancestor of the Bridge fork's `main`.
+- Corrected Gym PR #22's label to `CI:L1` and merged it as `53cf1c038`. Its
+  only red workflow step was a comment-post permission failure; all substantive
+  lightweight checks and prior GH200/image gates passed.
+- Rebased the six unpublished Bridge/build/probe commits onto the merged Gym
+  mainline without conflicts.
+- Added explicit cross-allocation checkpoint modes and configurable GRPO probe
+  lengths. Submitted async endurance `3130279`, checkpoint save `3130280`,
+  multi-node GRPO `3130301`, and Apertus SGLang `3130299`.
+- Multi-node attempt `3130283` proved Ray registered two nodes/eight GPUs but
+  failed in an embedded preflight print because shell quoting stripped the
+  Python `"GPU"` string. Corrected the harness and resubmitted as `3130301`.
+
+## 2026-08-20 11:00 CEST
+
+- Job `3130301` completed ten two-node/eight-GPU GRPO steps with ten zero-KL
+  refits and emitted `baked_grpo_multinode_refit=OK`.
+- Cross-allocation save `3130280` and restore `3130309` ran on different nodes.
+  The restore completed step 2 but warned that the optimizer was missing. The
+  checkpoint's real `.metadata` contains optimizer shards; NeMo-RL simply did
+  not recognize the current PyTorch-DCP layout and disabled optimizer loading.
+- Added official DCP metadata inspection and positive/weights-only regression
+  tests. All 54 checkpoint tests pass, and the detector recognizes optimizer
+  state in job `3130280`'s real checkpoint.
+- Baked-image preflight `3130348` reproduced the old detector because the
+  candidate image predates the fix, establishing the need for an exact-head
+  source-only rebuild.
+- Apertus SGLang job `3130299` loaded four SGLang engines, then hit the explicit
+  unsupported Megatron policy refit method. Started the supported DTensor-v2
+  variant as job `3130467`. Async endurance `3130279` passed step 100.

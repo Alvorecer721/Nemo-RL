@@ -4,7 +4,7 @@
 - Repo: /capstor/store/cscs/swissai/infra01/users/xyixuan/nemo-rl/v0.7.0/.tmp/nemo-bridge-sync
 - Branch: codex/sync-megatron-bridge-d9212902
 - Started: 2026-08-20 00:33:44 CEST
-- Updated: 2026-08-20 10:21 CEST
+- Updated: 2026-08-20 11:00 CEST
 
 ## Goal
 
@@ -12,8 +12,8 @@ Upgrade the Apertus NeMo-RL stack to Megatron-Bridge `d9212902`, deliver a repro
 
 ## Current Subtask
 
-Package the completed baked-image, checkpoint/resume, GRPO, and multi-node
-Megatron validation evidence without leaving probe changes uncommitted.
+Finish publication and production validation: multi-node GRPO, a true
+cross-allocation restore, async endurance, and text-only SGLang.
 
 ## Loaded Skills
 
@@ -29,7 +29,11 @@ Image build job 3127636 completed. Artifact:
 
 Operational invariant: on 334 GiB nodes, a dependency-changing build must not carry the hermetic build graph into release assembly. The launcher now maps `HERMETIC_CACHE_TAG=rebuild` to `--target=hermetic`, publishes the hermetic image under its dependency fingerprint, prints the exact cache pin and digests, and exits. Release assembly must resume in a fresh allocation-local Podman store.
 
-Bridge lint follow-up: mandatory full tracked-file Ruff checks found mechanical import-order/format failures in the merged Bridge fork. Local signed Bridge commit `535b7aa7` fixes only formatting and now passes Ruff check and format-check across all 1,706 tracked Python files; the NeMo-RL gitlink must use that commit after it is published to the Bridge fork.
+Bridge lint follow-up: mandatory full tracked-file Ruff checks found mechanical
+import-order/format failures in the merged Bridge fork. Signed Bridge commit
+`535b7aa7` fixes only formatting and passes Ruff check and format-check across
+all 1,706 tracked Python files. Bridge PR #3 merged it into the fork's `main`,
+so the NeMo-RL gitlink is now remotely resolvable.
 
 The exact candidate image has now passed all bounded release probes:
 
@@ -51,11 +55,31 @@ allocation and completed ten optimizer steps. All ten losses were finite
 (`0.601646` to `0.763633`), every step reported eight valid samples and sixteen
 global valid sequences, and mean step time was `2.3791` seconds.
 
-The async crash/EOF/checkpoint-order fixes exist on
-`origin/fix/async-grpo-reliability` at `d0d97df4c` and passed 175 focused tests,
-but are not ancestors of this Bridge branch and are not in this candidate
-image. Integrate that branch before relying on async failure-path behavior in
-production.
+The async crash/EOF/checkpoint-order fixes landed on `main` as `cc904664e`, are
+ancestors of the candidate-image source commit, and passed 175 focused tests.
+The earlier handoff incorrectly searched only for the pre-merge SHA
+`d0d97df4c`.
+
+Publication status: Gym PR #22 merged as `53cf1c038`. The six unpublished
+Bridge/build/probe commits were cleanly rebased onto that new `main`.
+Multi-node GRPO job `3130301` completed ten steps across two nodes/eight GPUs;
+all ten generation-KL checks were `0.0000` and the final refit gate passed.
+
+Cross-allocation save `3130280` completed on `nid007583`; restore `3130309`
+completed on `nid007628`, but revealed that NeMo-RL treated the embedded
+PyTorch-DCP optimizer as absent and resumed weights only. The current Bridge
+format stores optimizer entries in `.metadata`, while the fork recognized only
+the old `common.pt`. A narrow detector and regression tests now pass locally
+(54 checkpoint tests plus the real saved metadata). Baked-image preflight
+`3130348` correctly reproduced the old behavior because the candidate image
+predates this source fix. An exact-head source-only image rebuild is therefore
+required before the corrected restore can be called production evidence.
+
+Megatron-backed Apertus SGLang job `3130299` loaded four engines but reached
+the explicit unsupported boundary
+`MegatronPolicyWorker.set_rollout_num_gpus_per_engine`. Supported DTensor-v2
+Apertus SGLang job `3130467` is the replacement compatibility probe. Async
+endurance `3130279` remains healthy beyond step 100.
 
 ## Plan
 
@@ -66,6 +90,11 @@ production.
 - [x] Run ten-step two-node/eight-GPU Apertus Megatron training (job 3130139).
 - [x] Record results and address any real failure.
 - [x] Run full tracked-file NeMo-RL and Bridge Ruff validation.
+- [x] Complete ten-step two-node GRPO/refit (job 3130301).
+- [ ] Rebuild exact-head image and repeat optimizer-aware cross-allocation restore.
+- [ ] Complete bounded 500-step async-GRPO endurance (job 3130279).
+- [ ] Complete supported DTensor-v2 text-only Apertus SGLang GRPO (job 3130467).
+- [ ] Commit/push final probe evidence and open the Bridge-upgrade NeMo-RL PR.
 
 ## Assumptions
 
@@ -73,7 +102,8 @@ production.
 
 ## Blockers
 
-- Bridge commit `535b7aa7` is local only until explicitly pushed to `Alvorecer721/Megatron-Bridge`; do not publish a NeMo-RL gitlink that remote clones cannot resolve.
+- Exact-head image rebuild and active production-evidence jobs must finish
+  before the final evidence commit.
 
 The earlier Slurm-controller diagnosis was a sandbox-network false positive.
 Escalated Slurm calls reached the healthy controller and all jobs above were
@@ -81,7 +111,4 @@ scheduled normally.
 
 ## Deferred Validation
 
-- many-hour or multi-day endurance;
-- checkpoint restore in a completely new Slurm allocation;
-- text-only SGLang generation/GRPO;
-- integration of `origin/fix/async-grpo-reliability`.
+- multi-day endurance remains beyond the bounded 500-step gate.

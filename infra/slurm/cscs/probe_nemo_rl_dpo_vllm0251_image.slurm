@@ -40,6 +40,19 @@ APERTUS_CKPT=${APERTUS_CKPT:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_
 APERTUS_TOKENIZER=${APERTUS_TOKENIZER:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official}
 RECIPE=${RECIPE:-/opt/nemo-rl/examples/configs/recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml}
 CHECKPOINT_RESUME=${CHECKPOINT_RESUME:-false}
+CHECKPOINT_MODE=${CHECKPOINT_MODE:-none}
+CHECKPOINT_DIR=${CHECKPOINT_DIR:-$RUN_DIR/checkpoints}
+
+if [[ "$CHECKPOINT_RESUME" == "true" && "$CHECKPOINT_MODE" == "none" ]]; then
+  CHECKPOINT_MODE=same_allocation
+fi
+case "$CHECKPOINT_MODE" in
+  none | save | resume | same_allocation) ;;
+  *)
+    echo "Unsupported CHECKPOINT_MODE=$CHECKPOINT_MODE" >&2
+    exit 1
+    ;;
+esac
 
 [[ -r "$CONTAINER_ENV" ]] || {
   echo "Container EDF not found at CONTAINER_ENV=$CONTAINER_ENV" >&2
@@ -76,8 +89,8 @@ srun \
     export LOG_DIR="$RUN_DIR/tb"
     export JSON_METRICS="$RUN_DIR/metrics.json"
     export RUN_LOG="$RUN_DIR/run.log"
-    export CHECKPOINT_RESUME='"$CHECKPOINT_RESUME"'
-    export CHECKPOINT_DIR="$RUN_DIR/checkpoints"
+    export CHECKPOINT_MODE='"$CHECKPOINT_MODE"'
+    export CHECKPOINT_DIR='"$CHECKPOINT_DIR"'
     APERTUS_CKPT='"$APERTUS_CKPT"'
     APERTUS_TOKENIZER='"$APERTUS_TOKENIZER"'
     RECIPE='"$RECIPE"'
@@ -123,6 +136,10 @@ PY
     run_dpo() {
       local max_steps=$1
       local run_log=$2
+      local checkpoint_enabled=false
+      if [[ "$CHECKPOINT_MODE" != "none" ]]; then
+        checkpoint_enabled=true
+      fi
       /opt/nemo_rl_venv/bin/python -m examples.run_dpo \
         --config "$RECIPE" \
         policy.model_name="$APERTUS_CKPT" \
@@ -139,13 +156,13 @@ PY
         policy.megatron_cfg.use_linear_ce_fusion_loss=true \
         policy.megatron_cfg.linear_ce_fusion_chunk_size=256 \
         policy.megatron_cfg.distributed_data_parallel_config.overlap_param_gather=false \
-        policy.megatron_cfg.checkpoint.async_save="$CHECKPOINT_RESUME" \
-        policy.megatron_cfg.checkpoint.ckpt_assume_constant_structure="$CHECKPOINT_RESUME" \
+        policy.megatron_cfg.checkpoint.async_save="$checkpoint_enabled" \
+        policy.megatron_cfg.checkpoint.ckpt_assume_constant_structure="$checkpoint_enabled" \
         logger.tensorboard_enabled=true \
         logger.log_dir="$LOG_DIR" \
         logger.wandb_enabled=false \
         logger.monitor_gpus=true \
-        checkpointing.enabled="$CHECKPOINT_RESUME" \
+        checkpointing.enabled="$checkpoint_enabled" \
         checkpointing.checkpoint_dir="$CHECKPOINT_DIR" \
         checkpointing.metric_name=null \
         checkpointing.keep_top_k=2 \
@@ -156,8 +173,27 @@ PY
         2>&1 | tee "$run_log"
     }
 
-    printf "=== one-step baked-image DPO smoke ===\n"
-    run_dpo 1 "$RUN_LOG"
+    metric_step=1
+    if [[ "$CHECKPOINT_MODE" == "resume" ]]; then
+      test -f "$CHECKPOINT_DIR/step_1/training_info.json"
+      /opt/nemo_rl_venv/bin/python - "$CHECKPOINT_DIR/step_1" <<'PY'
+import sys
+
+from nemo_rl.utils.checkpoint import CheckpointManager
+
+weights_path, optimizer_path = CheckpointManager.get_resume_paths(sys.argv[1])
+assert weights_path is not None
+assert optimizer_path is not None, "embedded Megatron optimizer was not detected"
+print("baked_dpo_resume_optimizer_detected=OK")
+PY
+      printf "=== cross-allocation resume from step 1 to step 2 ===\n"
+      run_dpo 2 "$RUN_LOG"
+      test -f "$CHECKPOINT_DIR/step_2/training_info.json"
+      metric_step=2
+    else
+      printf "=== one-step baked-image DPO smoke ===\n"
+      run_dpo 1 "$RUN_LOG"
+    fi
 
     if grep -Fq "Apertus XIELU: using eager fallback" "$RUN_LOG"; then
       echo "DPO workers unexpectedly used the eager xIELU fallback" >&2
@@ -166,7 +202,20 @@ PY
     grep -Fq "training_xielu_cuda_forward_backward=OK" \
       "$RUN_DIR/preflight.log"
 
-    if [[ "$CHECKPOINT_RESUME" == "true" ]]; then
+    if [[ "$CHECKPOINT_MODE" == "save" ]]; then
+      test -f "$CHECKPOINT_DIR/step_1/training_info.json"
+      echo "baked_dpo_cross_allocation_save=OK"
+    elif [[ "$CHECKPOINT_MODE" == "resume" ]]; then
+      /opt/nemo_rl_venv/bin/python - "$CHECKPOINT_DIR/step_2/training_info.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    training_info = json.load(f)
+assert training_info["total_steps"] == 2, training_info
+print("baked_dpo_cross_allocation_resume=OK")
+PY
+    elif [[ "$CHECKPOINT_MODE" == "same_allocation" ]]; then
       test -f "$CHECKPOINT_DIR/step_1/training_info.json"
       printf "=== resume baked-image DPO from step 1 to step 2 ===\n"
       run_dpo 2 "$RUN_DIR/resume.log"
@@ -185,5 +234,5 @@ PY
     /opt/nemo_rl_venv/bin/python /opt/nemo-rl/tests/json_dump_tb_logs.py \
       "$LOG_DIR" --output_path "$JSON_METRICS"
     /opt/nemo_rl_venv/bin/python /opt/nemo-rl/tests/check_metrics.py \
-      "$JSON_METRICS" '"'"'data["train/loss"]["1"] < 100'"'"'
+      "$JSON_METRICS" "data[\"train/loss\"][\"$metric_step\"] < 100"
   '

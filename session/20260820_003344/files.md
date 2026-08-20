@@ -16,6 +16,18 @@
   checkpoint/save and fresh-process resume gate.
 - `infra/slurm/cscs/probe_nemo_rl_dpo_vllm0251_multinode_image.slurm` - new
   two-node/eight-GPU baked-image Apertus Megatron DPO gate.
+- `infra/slurm/cscs/probe_nemo_rl_dpo_vllm0251_image.slurm` - explicit
+  `save`, `resume`, and backward-compatible same-allocation checkpoint modes.
+- `infra/slurm/cscs/probe_nemo_rl_grpo_vllm0251_image.slurm` - configurable
+  duration and generation actor for vLLM/SGLang compatibility gates.
+- `infra/slurm/cscs/probe_nemo_rl_grpo_async_vllm0251_image.slurm` -
+  configurable duration and rollout size for endurance testing.
+- `infra/slurm/cscs/probe_nemo_rl_grpo_vllm0251_multinode_image.slurm` - new
+  two-node/eight-GPU GRPO, generation-KL, and refit gate.
+- `nemo_rl/utils/checkpoint.py` - recognize embedded optimizer state in current
+  Megatron PyTorch-DCP `.metadata` checkpoints.
+- `tests/unit/utils/test_checkpoint.py` - DCP optimizer and weights-only resume
+  regression coverage.
 
 ## Generated
 
@@ -39,3 +51,8 @@
   `train/loss[10]=0.6937193870544434`.
 - Slurm accounting: jobs `3128582`, `3128583`, `3128587`, `3130089`, and `3130139`
   completed with exit `0:0`.
+- `logs/nrl_vllm0251_grpo_mn_3130301.out` - ten-step two-node/eight-GPU GRPO
+  and refit gate passed with ten zero generation-KL checks.
+- `logs/nrl_vllm0251_dpo_3130280.out` and
+  `logs/nrl_vllm0251_dpo_3130309.out` - cross-allocation save/restore exposed
+  weights-only resume caused by stale DCP optimizer detection.
