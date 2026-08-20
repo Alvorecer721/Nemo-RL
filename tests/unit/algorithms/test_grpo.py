@@ -258,6 +258,12 @@ def mock_grpo_components():
                         "content": "test",
                         "token_ids": torch.tensor([1, 2, 3]),
                     },
+                    {
+                        "role": "assistant",
+                        "content": "answer",
+                        "token_ids": torch.tensor([4, 5]),
+                        "generation_logprobs": torch.tensor([0.1, 0.2]),
+                    },
                 ]
             ],
             "task_name": ["math"],

@@ -1669,7 +1669,13 @@ def test_native_rollout_groups_match_whole_batch(monkeypatch):
         captured_calls.append((sample_idx, initial_sample_state, kwargs))
         final_state = {
             "message_log": initial_sample_state["message_log"]
-            + [{"role": "assistant", "content": f"answer-{sample_idx}"}],
+            + [
+                {
+                    "role": "assistant",
+                    "content": f"answer-{sample_idx}",
+                    "token_ids": torch.arange(sample_idx + 2),
+                }
+            ],
             "extra_env_info": initial_sample_state["extra_env_info"],
             "task_name": initial_sample_state["task_name"],
             "total_reward": torch.tensor(float(sample_idx - 1)),
