@@ -45,6 +45,7 @@ from nemo_rl.algorithms.grpo import (
     _raise_if_reward_penalties_enabled_without_nemo_gym,
     _resolve_logprob_skip_flags,
     _default_grpo_save_state,
+    _raise_if_grpo_batch_has_no_valid_tokens,
     _raise_for_collector_error,
     _resolve_message_level_advantage_penalties,
     _save_async_replay_buffer_checkpoint,
@@ -193,6 +194,31 @@ def test_initial_policy_generation_stale() -> None:
 
     generation.weight_synchronizer.is_stale = True
     assert _initial_policy_generation_stale(generation, completed_steps=0)
+
+
+def test_raise_if_grpo_batch_has_no_valid_tokens_accepts_valid_batch():
+    train_data = {
+        "sample_mask": torch.tensor([1.0, 0.0]),
+        "token_mask": torch.tensor([[0.0, 1.0], [0.0, 1.0]]),
+    }
+
+    _raise_if_grpo_batch_has_no_valid_tokens(train_data)
+
+
+@pytest.mark.parametrize(
+    ("sample_mask", "token_mask"),
+    [
+        (torch.zeros(2), torch.ones(2, 3)),
+        (torch.ones(2), torch.zeros(2, 3)),
+    ],
+)
+def test_raise_if_grpo_batch_has_no_valid_tokens_rejects_empty_signal(
+    sample_mask, token_mask
+):
+    train_data = {"sample_mask": sample_mask, "token_mask": token_mask}
+
+    with pytest.raises(RuntimeError, match="no valid training tokens"):
+        _raise_if_grpo_batch_has_no_valid_tokens(train_data)
 
 
 @pytest.fixture

@@ -2721,6 +2721,25 @@ def compute_and_apply_seq_logprob_error_masking(
     }
 
 
+def _raise_if_grpo_batch_has_no_valid_tokens(train_data: BatchedDataDict) -> None:
+    """Reject a fully masked GRPO batch before the optimizer can advance.
+
+    A zero-gradient optimizer step is not necessarily a no-op: optimizer momentum,
+    weight decay, and the learning-rate scheduler can still update state. Fully
+    masked batches therefore need to fail before ``policy.train`` instead of being
+    treated as successful zero-loss steps.
+    """
+    sample_mask = train_data["sample_mask"]
+    token_mask = train_data["token_mask"]
+    valid_token_mask = token_mask * sample_mask.unsqueeze(-1)
+    if torch.count_nonzero(valid_token_mask).item() == 0:
+        raise RuntimeError(
+            "GRPO batch has no valid training tokens after rollout filtering; "
+            "refusing to advance the optimizer. Inspect rollout masks and the "
+            "sequence logprob error metrics/threshold."
+        )
+
+
 # ===============================================================================
 # Training & Validation
 # ===============================================================================
@@ -3388,6 +3407,8 @@ def grpo_train(
                         seq_logprob_error_metrics[
                             "num_masked_seqs_by_logprob_error"
                         ] = seq_logprob_error_metrics.pop("num_masked_seqs")
+
+                _raise_if_grpo_batch_has_no_valid_tokens(train_data)
 
                 # Compute advantages with adv_estimator using correct mask and logprobs
                 with timer.time("advantage_calculation"):
@@ -5002,6 +5023,8 @@ def async_grpo_train(
                         seq_logprob_error_metrics[
                             "num_masked_seqs_by_logprob_error"
                         ] = seq_logprob_error_metrics.pop("num_masked_seqs")
+
+                _raise_if_grpo_batch_has_no_valid_tokens(train_data)
 
                 # Pad teacher logprobs to match train_data sequence length.
                 if trajectory_teacher_logprobs is not None:
