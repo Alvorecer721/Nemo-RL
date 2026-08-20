@@ -11,31 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared fixtures and the nemo_rl runtime pin.
+"""Shared fixtures for the Apertus extension tests.
 
-The adapter targets the LOCKED runtime at /opt/nemo-rl (v0.6.0); this repo also
-carries a newer ``nemo_rl`` tree that pytest's repo-root sys.path prepend would
-shadow it with. Importing ``nemo_rl`` here while /opt/nemo-rl is first caches
-the locked package in ``sys.modules``, pinning every submodule for the session.
-The real tokenizer (~200 s load) is session-scoped and loaded only on request.
+Pytest imports ``nemo_rl`` from the checkout under test. The real tokenizer
+(~200 s load) is session-scoped and loaded only on request.
 """
 
 import os
 import sys
-from pathlib import Path
 
 import pytest
 
-LOCKED_NEMO_RL_REPO = "/opt/nemo-rl"
-if Path(LOCKED_NEMO_RL_REPO, "nemo_rl").is_dir():
-    sys.path.insert(0, LOCKED_NEMO_RL_REPO)
-    import nemo_rl
-
-    assert nemo_rl.__file__ is not None and nemo_rl.__file__.startswith(
-        LOCKED_NEMO_RL_REPO
-    ), f"nemo_rl resolved outside the locked runtime: {nemo_rl.__file__}"
-
-TOKENIZER_PATH = "/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official"
+TOKENIZER_PATH = (
+    "/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official"
+)
 
 
 @pytest.fixture(scope="session")

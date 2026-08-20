@@ -643,6 +643,7 @@ def _patch_vllm_radio_layerscale_loader(logger) -> None:
 
     logger.info("Successfully patched vLLM RADIO LayerScale loading.")
 
+
 def ensure_vllm_source_compat() -> None:
     """Apply interpreter-independent vLLM source-compat patches.
 

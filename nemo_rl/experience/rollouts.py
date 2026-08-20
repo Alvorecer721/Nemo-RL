@@ -2534,6 +2534,7 @@ async def run_async_nemo_gym_rollout(
                         reward_penalty_config=reward_penalty_config,
                         thinking_tags=thinking_tags,
                         mask_env_flagged_samples=mask_env_flagged_samples,
+                        cot_token_ids=cot_token_ids,
                     )
                     if accumulator.is_complete:
                         final_rollout_result = rollout_result
@@ -2574,6 +2575,7 @@ def run_nemo_gym_rollout_sync(
     mask_env_flagged_samples: bool = True,
     deduplicate_multimodal_data: bool = False,
     debug_payload_metrics: bool = False,
+    cot_token_ids: tuple[int, int] | None = None,
 ) -> NemoGymRolloutResult:
     """Run and return one complete NeMo-Gym batch synchronously.
 
@@ -2605,6 +2607,8 @@ def run_nemo_gym_rollout_sync(
         deduplicate_multimodal_data: Omit initial policy-ready media from the
             remote Gym return and restore it from the input batch.
         debug_payload_metrics: Emit exact Gym Ray-boundary media payload metrics.
+        cot_token_ids: Optional (start, end) thinking-block token ids used for
+            generation-quality metrics.
 
     Returns:
         The fully postprocessed NeMo-Gym rollout batch in input-row order.
@@ -2639,6 +2643,7 @@ def run_nemo_gym_rollout_sync(
             sampling_params=sampling_params,
             deduplicate_multimodal_data=deduplicate_multimodal_data,
             debug_payload_metrics=debug_payload_metrics,
+            cot_token_ids=cot_token_ids,
         ):
             pass
         if rollout_result is None:
@@ -2661,6 +2666,7 @@ def _postprocess_single_nemo_gym_group(
     reward_penalty_config: dict[str, Any] | BaseModel | None = None,
     thinking_tags: list[str] | tuple[str, ...] | None = None,
     mask_env_flagged_samples: bool = True,
+    cot_token_ids: tuple[int, int] | None = None,
 ) -> NemoGymRolloutResult:
     """Postprocess one complete prompt group from the NeMo-Gym stream."""
     # Length-based reward shaping for low-effort prompts
@@ -2770,11 +2776,7 @@ def _postprocess_single_nemo_gym_group(
         }
         metrics = _compute_generation_quality_metrics(
             [
-                [
-                    m["token_ids"]
-                    for m in r["message_log"]
-                    if m["role"] == "assistant"
-                ]
+                [m["token_ids"] for m in r["message_log"] if m["role"] == "assistant"]
                 for r in results
             ],
             [bool(m["hit_max_tokens"]) for m in all_sample_metrics],

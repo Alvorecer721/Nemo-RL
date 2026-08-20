@@ -45,14 +45,12 @@ from nemo_rl.environments.games.sliding_puzzle import (
     SlidingPuzzleMetadata,
 )
 from nemo_rl.environments.interfaces import EnvironmentReturn
+from nemo_rl.experience import rollouts as rollouts_module
 from nemo_rl.experience.metric_utils import calculate_single_metric, pct
 from nemo_rl.experience.rollout_manager import (
     AsyncNemoGymRolloutImpl,
     RolloutTimeouts,
 )
-from nemo_rl.experience import rollouts as rollouts_module
-from nemo_rl.experience.interfaces import Completion, PromptGroupRecord
-from nemo_rl.experience.rollout_manager import RolloutManager
 from nemo_rl.experience.rollouts import (
     _add_multimodal_generation_payload,
     _compute_generation_quality_metrics,
@@ -1940,6 +1938,7 @@ def test_run_async_nemo_gym_rollout_streams_complete_prompt_groups(monkeypatch):
 
     def _postprocess_group(**kwargs):
         assert kwargs["log_full_result_tables"] is False
+        assert kwargs["cot_token_ids"] == (10, 11)
         task_index = int(kwargs["nemo_gym_rows"][0]["_ng_task_index"])
         for result, original_log in zip(
             kwargs["results"], kwargs["input_batch"]["message_log"]
@@ -2004,6 +2003,7 @@ def test_run_async_nemo_gym_rollout_streams_complete_prompt_groups(monkeypatch):
             log_full_result_tables=False,
             deduplicate_multimodal_data=True,
             debug_payload_metrics=True,
+            cot_token_ids=(10, 11),
         ):
             results.append(result)
             if len(results) == 1:
@@ -2141,6 +2141,7 @@ def test_run_nemo_gym_rollout_sync_drains_entire_batch(monkeypatch):
         assert kwargs["log_full_result_tables"] is False
         assert kwargs["deduplicate_multimodal_data"] is True
         assert kwargs["debug_payload_metrics"] is True
+        assert kwargs["cot_token_ids"] == (10, 11)
         yield expected
 
     monkeypatch.setattr(rollouts_mod, "run_async_nemo_gym_rollout", fake_stream)
@@ -2154,6 +2155,7 @@ def test_run_nemo_gym_rollout_sync_drains_entire_batch(monkeypatch):
         log_full_result_tables=False,
         deduplicate_multimodal_data=True,
         debug_payload_metrics=True,
+        cot_token_ids=(10, 11),
     )
 
     assert actual is expected

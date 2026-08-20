@@ -44,7 +44,6 @@ from nemo_rl.algorithms.grpo import (
     _needs_hf_refit_handshake,
     _raise_if_reward_penalties_enabled_without_nemo_gym,
     _resolve_logprob_skip_flags,
-    _default_grpo_save_state,
     _raise_if_grpo_batch_has_no_valid_tokens,
     _raise_for_collector_error,
     _resolve_message_level_advantage_penalties,

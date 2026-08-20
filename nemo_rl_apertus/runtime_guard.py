@@ -47,7 +47,12 @@ def _bridge_apertus_module_path() -> Path:
             "  Fix: initialize the Bridge submodule — git submodule update --init --recursive — "
             "and ensure PYTHONPATH includes <repo>/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src."
         )
-    return Path(next(iter(spec.submodule_search_locations))) / "models" / "apertus" / "apertus_bridge.py"
+    return (
+        Path(next(iter(spec.submodule_search_locations)))
+        / "models"
+        / "apertus"
+        / "apertus_bridge.py"
+    )
 
 
 def assert_apertus_runtime() -> None:
