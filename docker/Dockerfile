@@ -236,23 +236,64 @@ fi
 # without evaluating that absent local source; the late layer runs uv lock
 # --check with the complete workspace before starting the TRT-LLM build.
 
-# Sync each training + inference backend one at a time (since they may conflict)
-# to warm the uv cache, then at the end just sync the default dependencies.
-# Do everything in one layer to prevent large layers.
-
-# The venv is symlinked to avoid bloating the layer size
+# Install the common environment first. Later backend-specific syncs use
+# disposable environments so their conflicting package sets warm the uv cache
+# without bloating image layers.
 UV_LINK_MODE=hardlink uv sync --frozen --no-install-project
+EOF
+
+# Commit backend cache additions independently. This bounds the mutable overlay
+# Podman must snapshot at once and makes expensive native builds reusable after
+# an interrupted build.
+RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
-    UV_LINK_MODE=hardlink uv sync --frozen --extra vllm --no-install-project
+    source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
+    uv venv --seed /tmp/nemo-rl-warm-vllm
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
+        uv sync --frozen --no-install-project
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
+        uv sync --frozen --extra vllm --no-install-project
+    rm -rf /tmp/nemo-rl-warm-vllm
 fi
 EOF
 RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
-    UV_LINK_MODE=hardlink uv sync --frozen --extra sglang --no-install-project
+    uv venv --seed /tmp/nemo-rl-warm-sglang
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
+        uv sync --frozen --no-install-project
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
+        uv sync --frozen --extra sglang --no-install-project
+    rm -rf /tmp/nemo-rl-warm-sglang
 fi
-uv sync --link-mode symlink --frozen --extra mcore --no-install-project
-uv sync --link-mode symlink --frozen --extra automodel --no-install-project
-uv sync --link-mode symlink --frozen --extra modelopt --no-install-project
+EOF
+RUN <<"EOF" bash -exu
+uv venv --seed /tmp/nemo-rl-warm-mcore
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
+    uv sync --frozen --no-install-project
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
+    uv sync --frozen --extra mcore --no-install-project
+rm -rf /tmp/nemo-rl-warm-mcore
+EOF
+RUN <<"EOF" bash -exu
+uv venv --seed /tmp/nemo-rl-warm-automodel
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
+    uv sync --frozen --no-install-project
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
+    uv sync --frozen --extra automodel --no-install-project
+rm -rf /tmp/nemo-rl-warm-automodel
+EOF
+RUN <<"EOF" bash -exu
+uv venv --seed /tmp/nemo-rl-warm-modelopt
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
+    uv sync --frozen --no-install-project
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
+    uv sync --frozen --extra modelopt --no-install-project
+rm -rf /tmp/nemo-rl-warm-modelopt
+EOF
+
+# Assemble the image's actual project environment from the now-warm cache.
+RUN <<"EOF" bash -exu
+source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
 uv sync --link-mode symlink --frozen --all-groups --no-install-project
 
 # Remove the aiohttp in this uv cache dir to fully address CVE GHSA-mqqc-3gqh-h2x8
