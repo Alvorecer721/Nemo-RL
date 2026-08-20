@@ -112,7 +112,12 @@ PY
       cluster.gpus_per_node=4 \
       2>&1 | tee "$RUN_DIR/run.log"
 
-    grep -Fq "GPU Memory after refit complete" "$RUN_DIR/run.log"
+    if [[ "$GENERATION_ACTOR" == *SGLangGenerationWorker ]]; then
+      grep -Fq "[sglang refit] All SGLang server caches flushed successfully" \
+        "$RUN_DIR/run.log"
+    else
+      grep -Fq "GPU Memory after refit complete" "$RUN_DIR/run.log"
+    fi
     grep -Fq "========================= Step $MAX_STEPS/$MAX_STEPS" "$RUN_DIR/run.log"
     test "$(grep -Fc "Generation KL Error" "$RUN_DIR/run.log")" -ge "$MAX_STEPS"
     if grep -Fq "Apertus XIELU: using eager fallback" "$RUN_DIR/run.log"; then
