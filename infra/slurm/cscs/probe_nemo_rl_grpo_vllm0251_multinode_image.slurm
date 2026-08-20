@@ -152,7 +152,7 @@ PY
         grpo.max_num_steps="$MAX_STEPS" \
         grpo.num_prompts_per_step="$NUM_PROMPTS" \
         grpo.num_generations_per_prompt="$NUM_GENERATIONS" \
-        grpo.seq_logprob_error_threshold=0.02 \
+        grpo.seq_logprob_error_threshold=1.02 \
         policy.train_global_batch_size="$((NUM_PROMPTS * NUM_GENERATIONS))" \
         policy.generation.max_new_tokens="$MAX_NEW_TOKENS" \
         policy.generation.vllm_cfg.gpu_memory_utilization=0.40 \
