@@ -33,6 +33,12 @@ CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
 RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nrl_vllm0251_grpo_${SLURM_JOB_ID}}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}
 RECIPE=${RECIPE:-/opt/nemo-rl/examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-probe.yaml}
+GENERATION_ACTOR=${GENERATION_ACTOR:-nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker}
+MAX_STEPS=${MAX_STEPS:-1}
+MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-64}
+NUM_PROMPTS=${NUM_PROMPTS:-4}
+NUM_GENERATIONS=${NUM_GENERATIONS:-2}
+GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 
 [[ -r "$CONTAINER_ENV" ]] || {
   echo "Container EDF not found at CONTAINER_ENV=$CONTAINER_ENV" >&2
@@ -51,7 +57,7 @@ srun \
   --mpi=pmix \
   --environment="$CONTAINER_ENV" \
   --ntasks=1 \
-  --gpus-per-task=4 \
+  --gpus-per-task="$GPUS_PER_NODE" \
   --cpus-per-task="$SLURM_CPUS_PER_TASK" \
   bash -lc '
     set -euo pipefail
@@ -61,12 +67,29 @@ srun \
     export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
     export WANDB_DISABLED=true
     export RUN_DIR='"$RUN_DIR"'
+    export GENERATION_ACTOR='"$GENERATION_ACTOR"'
+    export MAX_STEPS='"$MAX_STEPS"'
+    export MAX_NEW_TOKENS='"$MAX_NEW_TOKENS"'
+    export NUM_PROMPTS='"$NUM_PROMPTS"'
+    export NUM_GENERATIONS='"$NUM_GENERATIONS"'
+    export GPUS_PER_NODE='"$GPUS_PER_NODE"'
     RECIPE='"$RECIPE"'
 
     mkdir -p "$RUN_DIR" "$HF_HOME" "$HF_DATASETS_CACHE"
     cd /opt/nemo-rl
 
+    extra_overrides=()
+    if [[ "$GENERATION_ACTOR" == *SGLangGenerationWorker ]]; then
+      # The upstream text recipe targets a single eight-GPU node. Clariden
+      # GH200 nodes expose four GPUs, so keep TP2 and run two engines on the
+      # GPUs actually allocated to this probe.
+      extra_overrides+=(
+        policy.generation.sglang_cfg.sglang_server_config.num_gpus="$GPUS_PER_NODE"
+      )
+    fi
+
     /opt/nemo_rl_venv/bin/python - <<'"'"'PY'"'"'
+import os
 from pathlib import Path
 
 import nemo_rl
@@ -74,7 +97,7 @@ import nemo_rl
 root = Path(nemo_rl.__file__).resolve()
 assert root.is_relative_to("/opt/nemo-rl"), root
 for actor in (
-    "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker",
+    os.environ["GENERATION_ACTOR"],
     "nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker",
 ):
     venv = Path("/opt/ray_venvs") / actor
@@ -86,23 +109,35 @@ PY
 
     /opt/nemo_rl_venv/bin/python -m examples.run_grpo \
       --config "$RECIPE" \
-      grpo.max_num_steps=1 \
-      grpo.num_prompts_per_step=4 \
-      grpo.num_generations_per_prompt=2 \
-      grpo.seq_logprob_error_threshold=0.02 \
-      policy.train_global_batch_size=8 \
-      policy.generation.max_new_tokens=64 \
+      grpo.max_num_steps="$MAX_STEPS" \
+      grpo.num_prompts_per_step="$NUM_PROMPTS" \
+      grpo.num_generations_per_prompt="$NUM_GENERATIONS" \
+      grpo.seq_logprob_error_threshold=1.02 \
+      policy.train_global_batch_size="$((NUM_PROMPTS * NUM_GENERATIONS))" \
+      policy.generation.max_new_tokens="$MAX_NEW_TOKENS" \
       policy.generation.vllm_cfg.gpu_memory_utilization=0.40 \
       policy.generation.vllm_cfg.enforce_eager=true \
+      "${extra_overrides[@]}" \
       logger.log_dir="$RUN_DIR/tb" \
       logger.wandb_enabled=false \
       checkpointing.enabled=false \
       cluster.num_nodes=1 \
-      cluster.gpus_per_node=4 \
+      cluster.gpus_per_node="$GPUS_PER_NODE" \
       2>&1 | tee "$RUN_DIR/run.log"
 
-    grep -Fq "GPU Memory after refit complete" "$RUN_DIR/run.log"
-    grep -Fq "Generation KL Error" "$RUN_DIR/run.log"
+    if [[ "$GENERATION_ACTOR" == *SGLangGenerationWorker ]]; then
+      # SGLang reports the refit contract through its HTTP responses. Require
+      # successful weight updates and cache flushes throughout the run rather
+      # than a NeMo-RL message that is not emitted by this backend version.
+      test "$(grep -Fc "POST /update_weights_from_tensor HTTP/1.1\" 200 OK" \
+        "$RUN_DIR/run.log")" -ge "$MAX_STEPS"
+      test "$(grep -Fc "GET /flush_cache HTTP/1.1\" 200 OK" \
+        "$RUN_DIR/run.log")" -ge "$MAX_STEPS"
+    else
+      grep -Fq "GPU Memory after refit complete" "$RUN_DIR/run.log"
+    fi
+    grep -Fq "========================= Step $MAX_STEPS/$MAX_STEPS" "$RUN_DIR/run.log"
+    test "$(grep -Fc "Generation KL Error" "$RUN_DIR/run.log")" -ge "$MAX_STEPS"
     if grep -Fq "Apertus XIELU: using eager fallback" "$RUN_DIR/run.log"; then
       echo "GRPO training workers unexpectedly used the eager xIELU fallback" >&2
       exit 1

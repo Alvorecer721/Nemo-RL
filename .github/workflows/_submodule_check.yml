@@ -124,6 +124,17 @@ jobs:
               changed=1
               success_body+="$submodule_name: ✅ Approved v0.4.0 release-to-main migration"$'\n'
 
+            # The Apertus Bridge fork was rebuilt on the Bridge commit pinned by
+            # upstream NeMo-RL. The old fork pin and the rebuilt history diverge,
+            # so approve this exact one-time migration only. Later Bridge updates
+            # must fast-forward from the new pin.
+            elif [[ "$submodule_path" = "3rdparty/Megatron-Bridge-workspace/Megatron-Bridge" \
+                  && "$target_commit" = "be49de1cbe08974b28e3412129ef9a4117301fca" \
+                  && "$current_commit" = "535b7aa734347004663086fafa4efe160b5f36c7" ]]; then
+              echo "✅ $submodule_name: approved upstream-pin Apertus migration"
+              changed=1
+              success_body+="$submodule_name: ✅ Approved upstream-pin Apertus migration"$'\n'
+
             # Case 1: Same commit
             elif [[ "$current_commit" = "$target_commit" ]]; then
               echo "✅ $submodule_name: PR branch matches ${{ inputs.base_ref }} branch (same commit)"

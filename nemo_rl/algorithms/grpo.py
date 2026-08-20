@@ -18,12 +18,21 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from typing import Any, Callable, NotRequired, Optional, TypedDict, TypeVar, cast
+from typing import (
+    Annotated,
+    Any,
+    Callable,
+    NotRequired,
+    Optional,
+    TypedDict,
+    TypeVar,
+    cast,
+)
 
 import numpy as np
 import ray
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoProcessor
@@ -205,7 +214,7 @@ class GRPOConfig(TypedDict):
     calculate_advantages_on_gpu: NotRequired[bool]
     # Sequence-level logprob error masking for training stability. If set, mask sequences with mult_prob_error exceeding this threshold (same scale as token_mult_prob_error metric, e.g., 1.5)
     # Note that this is slightly different than Masked Importance Sampling (MIS) because this uses the absolute value of the difference between the training and generation logprobs, whereas MIS just uses the difference between the training and generation logprobs.
-    seq_logprob_error_threshold: float | None
+    seq_logprob_error_threshold: Annotated[float, Field(ge=1.0)] | None
     # Advantage value to assign to invalid tool call tokens. When set (e.g. -5.0), overwrites the
     # computed advantage for those tokens to penalize them; absent/None disables the penalty.
     invalid_tool_call_advantage: NotRequired[float | None]
@@ -2125,6 +2134,25 @@ def compute_and_apply_seq_logprob_error_masking(
     }
 
 
+def _raise_if_grpo_batch_has_no_valid_tokens(train_data: BatchedDataDict) -> None:
+    """Reject a fully masked GRPO batch before the optimizer can advance.
+
+    A zero-gradient optimizer step is not necessarily a no-op: optimizer momentum,
+    weight decay, and the learning-rate scheduler can still update state. Fully
+    masked batches therefore need to fail before ``policy.train`` instead of being
+    treated as successful zero-loss steps.
+    """
+    sample_mask = train_data["sample_mask"]
+    token_mask = train_data["token_mask"]
+    valid_token_mask = token_mask * sample_mask.unsqueeze(-1)
+    if torch.count_nonzero(valid_token_mask).item() == 0:
+        raise RuntimeError(
+            "GRPO batch has no valid training tokens after rollout filtering; "
+            "refusing to advance the optimizer. Inspect rollout masks and the "
+            "sequence logprob error metrics/threshold."
+        )
+
+
 # ===============================================================================
 # Training & Validation
 # ===============================================================================
@@ -2707,6 +2735,8 @@ def grpo_train(
                         seq_logprob_error_metrics[
                             "num_masked_seqs_by_logprob_error"
                         ] = seq_logprob_error_metrics.pop("num_masked_seqs")
+
+                _raise_if_grpo_batch_has_no_valid_tokens(train_data)
 
                 # Compute advantages with adv_estimator using correct mask and logprobs
                 with timer.time("advantage_calculation"):
@@ -4129,6 +4159,8 @@ def async_grpo_train(
                         seq_logprob_error_metrics[
                             "num_masked_seqs_by_logprob_error"
                         ] = seq_logprob_error_metrics.pop("num_masked_seqs")
+
+                _raise_if_grpo_batch_has_no_valid_tokens(train_data)
 
                 # Pad teacher logprobs to match train_data sequence length.
                 if trajectory_teacher_logprobs is not None:

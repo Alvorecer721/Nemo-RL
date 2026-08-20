@@ -16,11 +16,13 @@ import threading
 import time
 from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
+import torch.distributed.checkpoint as dist_checkpoint
 import yaml
 
 from nemo_rl.utils.checkpoint import CheckpointManager
@@ -450,6 +452,67 @@ def test_get_resume_paths_embedded_megatron_optimizer(checkpoint_dir, model_comp
 
     assert weights_path == expected_weights_path
     assert optimizer_path == expected_optimizer_path
+
+
+@pytest.mark.parametrize("model_component", ["policy", "value"])
+def test_get_resume_paths_embedded_dcp_optimizer(
+    checkpoint_dir, model_component, monkeypatch
+):
+    """Current Megatron checkpoints advertise optimizer shards in DCP metadata."""
+    checkpoint_path = checkpoint_dir / "step_1"
+    expected_weights_path = checkpoint_path / model_component / "weights"
+    iter_path = expected_weights_path / "iter_0000000"
+    iter_path.mkdir(parents=True)
+    (iter_path / ".metadata").touch()
+    expected_optimizer_path = checkpoint_path / model_component / "optimizer"
+
+    metadata = SimpleNamespace(
+        state_dict_metadata={
+            "model.decoder.layers.0.weight": object(),
+            "optimizer.distributed.dp_group_idx_0.exp_avg": object(),
+        }
+    )
+    reader = MagicMock()
+    reader.read_metadata.return_value = metadata
+    reader_cls = MagicMock(return_value=reader)
+    monkeypatch.setattr(dist_checkpoint, "FileSystemReader", reader_cls)
+
+    weights_path, optimizer_path = CheckpointManager.get_resume_paths(
+        checkpoint_path,
+        model_component=model_component,
+    )
+
+    reader_cls.assert_called_once_with(iter_path)
+    assert weights_path == expected_weights_path
+    assert optimizer_path == expected_optimizer_path
+
+
+def test_get_resume_paths_weights_only_dcp_checkpoint(checkpoint_dir, monkeypatch):
+    """DCP metadata alone must not imply that optimizer state was saved."""
+    checkpoint_path = checkpoint_dir / "step_1"
+    expected_weights_path = checkpoint_path / "policy" / "weights"
+    iter_path = expected_weights_path / "iter_0000000"
+    iter_path.mkdir(parents=True)
+    (iter_path / ".metadata").touch()
+
+    metadata = SimpleNamespace(
+        state_dict_metadata={"model.decoder.layers.0.weight": object()}
+    )
+    reader = MagicMock()
+    reader.read_metadata.return_value = metadata
+    monkeypatch.setattr(
+        dist_checkpoint,
+        "FileSystemReader",
+        MagicMock(return_value=reader),
+    )
+
+    with pytest.warns(UserWarning, match="Optimizer state not found"):
+        weights_path, optimizer_path = CheckpointManager.get_resume_paths(
+            checkpoint_path
+        )
+
+    assert weights_path == expected_weights_path
+    assert optimizer_path is None
 
 
 def test_get_best_checkpoint_path_no_checkpoints(checkpoint_manager, checkpoint_dir):

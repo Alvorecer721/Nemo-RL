@@ -1,7 +1,7 @@
 [submodule "3rdparty/Megatron-Bridge"]
 	path = 3rdparty/Megatron-Bridge-workspace/Megatron-Bridge
 	url = https://github.com/Alvorecer721/Megatron-Bridge.git
-	branch = yxu/apertus-v070
+	branch = main
 	shallow = true
 	ignore = untracked
 [submodule "3rdparty/Automodel-workspace/Automodel"]

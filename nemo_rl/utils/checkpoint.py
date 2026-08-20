@@ -199,6 +199,23 @@ class CheckpointManager:
                     # state from the weights_path.
                     return weights_path, optimizer_path
 
+            # Current Megatron PyTorch DCP checkpoints store their embedded
+            # optimizer state in shards indexed by ``.metadata`` rather than
+            # ``common.pt``.
+            # Inspect the official metadata instead of treating every DCP
+            # checkpoint as optimizer-bearing: weights-only saves use the same
+            # directory layout and must continue to resume without an optimizer.
+            iter_path = weights_path / "iter_0000000"
+            if (iter_path / ".metadata").exists():
+                from torch.distributed.checkpoint import FileSystemReader
+
+                metadata = FileSystemReader(iter_path).read_metadata()
+                optimizer_key = re.compile(r"optimizer(?:\d+)?(?:\.|$)")
+                if any(
+                    optimizer_key.match(key) for key in metadata.state_dict_metadata
+                ):
+                    return weights_path, optimizer_path
+
             warnings.warn(
                 f"Optimizer state not found at {optimizer_path} (DTensor path), and no embedded "
                 f"optimizer state detected under {weights_path} (Megatron path). "

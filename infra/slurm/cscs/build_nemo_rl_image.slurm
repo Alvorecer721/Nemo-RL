@@ -48,8 +48,8 @@ BASE_IMAGE=${BASE_IMAGE:-nvcr.io/nvidia/cuda-dl-base:26.03-cuda13.2-devel-ubuntu
 # Podman's named-context identity bug that otherwise invalidates uv.lock when
 # an unrelated application source file changes. Set to "rebuild" only when
 # intentionally changing dependencies.
-HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-f47dd93a00e3c08e65bac3cd0cad5fadba600e3887306671e23fbd358ac47e50}
-HERMETIC_FINGERPRINT_SHA256=116fd2b80909bea2c7c4cb47668b1684a9e9d807f2e1dd067e56c690530e82aa
+HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-508e7c3083af7ce63ece6885650b95dd70e66cc10f576b3ed8b41de6b7727d26}
+HERMETIC_FINGERPRINT_SHA256=508e7c3083af7ce63ece6885650b95dd70e66cc10f576b3ed8b41de6b7727d26
 # Use an explicit allocation-local store so the launcher does not depend on a
 # login-node containers/storage.conf. Large release layers are bounded in the
 # Dockerfile so they fit this node-local tmpfs.
@@ -98,6 +98,10 @@ IMAGE="nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
 SQSH_PATH="${OUTPUT_DIR}/nemo-rl-apertus-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
 BUILD_FINGERPRINT_B64=$(python tools/generate_fingerprint.py | base64 -w0)
 CURRENT_FINGERPRINT_SHA256=$(python tools/generate_fingerprint.py | sha256sum | cut -d' ' -f1)
+BUILD_TARGET=release
+if [[ "$HERMETIC_CACHE_TAG" == "rebuild" ]]; then
+    BUILD_TARGET=hermetic
+fi
 
 echo "Repository:  $REPO_DIR"
 echo "Source ID:   $SOURCE_ID"
@@ -274,8 +278,8 @@ if [[ "$HERMETIC_CACHE_TAG" != "rebuild" ]]; then
     HERMETIC_VLLM_VERSION=$(podman run --rm \
         --entrypoint /opt/nemo_rl_venv/bin/python "$HERMETIC_IMAGE" -c \
         'import tomllib; lock = tomllib.load(open("/opt/nemo-rl/uv.lock", "rb")); print(next(package["version"] for package in lock["package"] if package["name"] == "vllm"))')
-    [[ "$HERMETIC_PYPROJECT_MD5" == "97ef0774da410409aadeb5cb9abc73a2" ]] # pragma: allowlist secret
-    [[ "$HERMETIC_LOCK_MD5" == "3b89f2ef2b089b114c23eeb93b16a3b1" ]] # pragma: allowlist secret
+    [[ "$HERMETIC_PYPROJECT_MD5" == "83a1323583d507d0e5a3af0cc942c968" ]] # pragma: allowlist secret
+    [[ "$HERMETIC_LOCK_MD5" == "dff35fa07275ef50870e13f829c24829" ]] # pragma: allowlist secret
     [[ "$HERMETIC_VLLM_VERSION" == "$VLLM_VERSION" ]]
 
     BUILD_DOCKERFILE="$PODMAN_STORAGE_BASE/Dockerfile.release"
@@ -284,7 +288,8 @@ if [[ "$HERMETIC_CACHE_TAG" != "rebuild" ]]; then
     grep -F "FROM ${HERMETIC_IMAGE} AS release" "$BUILD_DOCKERFILE"
     echo "Resuming from hermetic image: $HERMETIC_IMAGE"
 else
-    echo "Rebuilding the hermetic dependency stage from source"
+    echo "Rebuilding only the hermetic dependency stage from source"
+    echo "Release assembly will require a second build with the printed cache pin"
 fi
 
 podman build \
@@ -294,7 +299,7 @@ podman build \
     --cache-to="${LOCAL_REGISTRY}/cache" \
     --network=host \
     --platform=linux/arm64 \
-    --target=release \
+    --target="$BUILD_TARGET" \
     --build-context "nemo-rl=$SOURCE_CONTEXT" \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "MAX_JOBS=$MAX_JOBS" \
@@ -305,6 +310,25 @@ podman build \
     --tag "$IMAGE" \
     --file "$BUILD_DOCKERFILE" \
     "$SOURCE_CONTEXT"
+
+# A dependency-changing build and release assembly cannot safely share the
+# 334 GiB allocation-local Podman graph: committing a release worker layer may
+# briefly duplicate enough data to exhaust /tmp. Persist the completed
+# hermetic image under its dependency fingerprint and stop. After recording
+# the printed pin values, a second job starts from a clean graph and builds the
+# release target only.
+if [[ "$BUILD_TARGET" == "hermetic" ]]; then
+    PUBLISHED_HERMETIC_TAG="$CURRENT_FINGERPRINT_SHA256"
+    PUBLISHED_HERMETIC_IMAGE="${LOCAL_REGISTRY}/cache:${PUBLISHED_HERMETIC_TAG}"
+    podman push --tls-verify=false "$IMAGE" "$PUBLISHED_HERMETIC_IMAGE"
+    echo "HERMETIC BUILD COMPLETE: $PUBLISHED_HERMETIC_IMAGE"
+    echo "Pin these values before submitting the fresh release build:"
+    echo "HERMETIC_CACHE_TAG=$PUBLISHED_HERMETIC_TAG"
+    echo "HERMETIC_FINGERPRINT_SHA256=$CURRENT_FINGERPRINT_SHA256"
+    echo "HERMETIC_PYPROJECT_MD5=$(md5sum pyproject.toml | cut -d' ' -f1)"
+    echo "HERMETIC_LOCK_MD5=$(md5sum uv.lock | cut -d' ' -f1)"
+    exit 0
+fi
 
 # Persist the final manifest/tag as well as its cached layers. Registry blobs
 # are content-addressed, so this reuses the cache payload instead of storing a
