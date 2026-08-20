@@ -119,3 +119,7 @@
   traceback or OOM.
 - Pushed `codex/sync-megatron-bridge-d9212902` and opened NeMo-RL PR #23 with
   exactly the `CI:L1` label.
+- All substantive PR checks passed. The post-check comment job then failed with
+  HTTP 403 because its reusable workflow lacked `issues: write`; added
+  least-privilege caller permissions so future PR comments succeed after this
+  branch lands on `main`.

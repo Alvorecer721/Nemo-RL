@@ -73,3 +73,9 @@ CI was triggered from the final branch SHA recorded in PR #23's
 - Test-only cross-allocation checkpoint trees remain under `.tmp/` because a
   safety gate declined irreversible deletion without a separate explicit user
   approval. They are ignored validation artifacts, not source changes.
+- PR #23's only red check is a notification-only HTTP 403 after the substantive
+  submodule check passed. This branch grants the reusable comment job the
+  least-privilege `actions: read` and `issues: write` permissions needed to
+  prevent that recurring failure after merge. Because `pull_request_target`
+  loads workflow code from the base branch, the historical PR #23 check cannot
+  become green until the fix is on `main`.
