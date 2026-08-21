@@ -52,6 +52,7 @@ from nemo_rl.models.generation.vllm.utils import (
 )
 from nemo_rl.models.generation.vllm.vllm_worker import BaseVllmGenerationWorker
 from nemo_rl.models.generation.openai_server_utils import (
+    load_generation_eos_token_ids,
     replace_prefix_tokens,
 )
 
@@ -393,6 +394,7 @@ class VllmAsyncGenerationWorkerImpl(
 
         engine_client = self.llm
         model_config = self.llm_async_engine_args.create_model_config()
+        generation_eos_token_ids = load_generation_eos_token_ids(model_config.model)
         base_model_paths = [
             BaseModelPath(
                 name=model_config.served_model_name, model_path=model_config.model
@@ -559,6 +561,7 @@ class VllmAsyncGenerationWorkerImpl(
                     model_prefix_token_ids=request.required_prefix_token_ids,
                     template_prefix_token_ids=actual_corresponding_token_ids,
                     template_token_ids=engine_prompt["prompt_token_ids"],
+                    eos_token_ids=generation_eos_token_ids,
                 )
 
                 engine_prompt["prompt_token_ids"] = final_prompt_token_ids

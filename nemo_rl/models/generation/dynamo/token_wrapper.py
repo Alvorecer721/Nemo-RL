@@ -17,6 +17,7 @@
 import asyncio
 import json
 import threading
+from collections.abc import Collection
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any, Optional
@@ -305,6 +306,7 @@ def prepare_dynamo_chat_completion_request(
     tokenizer: Any,
     tokenizer_chat_template_kwargs: Optional[dict[str, Any]] = None,
     exclude_tools_when_tool_choice_none: bool,
+    eos_token_ids: Collection[int] | None = None,
 ) -> dict[str, Any]:
     """Prepare a NeMo-Gym chat-completion request for Dynamo token input."""
     if request_body.get("stream"):
@@ -373,6 +375,7 @@ def prepare_dynamo_chat_completion_request(
             model_prefix_token_ids=required_prefix_token_ids,
             template_prefix_token_ids=template_prefix_token_ids,
             template_token_ids=full_prompt_token_ids,
+            eos_token_ids=eos_token_ids,
         )
 
     nvext = prepared_body.get("nvext")
@@ -402,12 +405,14 @@ class DynamoTokenWrapperServer:
         tokenizer_chat_template_kwargs: Optional[dict[str, Any]],
         exclude_tools_when_tool_choice_none: bool,
         request_timeout_s: Optional[float],
+        eos_token_ids: Collection[int] | None = None,
     ) -> None:
         self.dynamo_frontend_base_url = dynamo_frontend_base_url
         self.tokenizer = tokenizer
         self.tokenizer_chat_template_kwargs = tokenizer_chat_template_kwargs
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
         self.request_timeout_s = request_timeout_s
+        self.eos_token_ids = tuple(eos_token_ids or ())
         self.base_url: Optional[str] = None
         self.server: Any = None
         self.thread: Optional[threading.Thread] = None
@@ -467,6 +472,7 @@ class DynamoTokenWrapperServer:
                     tokenizer=self.tokenizer,
                     tokenizer_chat_template_kwargs=self.tokenizer_chat_template_kwargs,
                     exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
+                    eos_token_ids=self.eos_token_ids,
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e

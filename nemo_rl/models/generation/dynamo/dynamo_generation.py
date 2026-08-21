@@ -38,6 +38,9 @@ from nemo_rl.models.generation.interfaces import (
     GenerationOutputSpec,
     verify_right_padding,
 )
+from nemo_rl.models.generation.openai_server_utils import (
+    load_generation_eos_token_ids,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -199,6 +202,10 @@ class DynamoGeneration(GenerationInterface):
             )
 
             if expose_http_server:
+                generation_eos_token_ids = set(
+                    load_generation_eos_token_ids(self.cfg["model_name"])
+                )
+                generation_eos_token_ids.update(self.cfg["stop_token_ids"] or [])
                 self._token_wrapper_server = DynamoTokenWrapperServer(
                     dynamo_frontend_base_url=url,
                     tokenizer=tokenizer,
@@ -207,6 +214,7 @@ class DynamoGeneration(GenerationInterface):
                         dynamo_cfg.worker_args.exclude_tools_when_tool_choice_none
                     ),
                     request_timeout_s=dynamo_cfg.request_timeout_s,
+                    eos_token_ids=generation_eos_token_ids,
                 )
                 wrapper_url = self._token_wrapper_server.start()
                 self.dp_openai_server_base_urls = [wrapper_url]

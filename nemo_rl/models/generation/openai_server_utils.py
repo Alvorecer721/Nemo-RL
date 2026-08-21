@@ -22,7 +22,30 @@ token-in/token-out via ``generate(input_ids)`` and never re-templates messages,
 so it has no retokenization drift to correct.
 """
 
+from collections.abc import Collection
 from typing import Any
+
+
+def load_generation_eos_token_ids(model_path: str) -> list[int]:
+    """Load every EOS token ID declared by a model's generation config.
+
+    Tokenizers expose only one ``eos_token_id``, while models such as Apertus
+    declare several valid turn terminators in ``generation_config.json``.
+    Keep this helper best-effort because some local/converted model layouts do
+    not ship a generation config and can still use the tokenizer fallback.
+    """
+    from transformers import GenerationConfig
+
+    try:
+        eos_token_ids = GenerationConfig.from_pretrained(model_path).eos_token_id
+    except (OSError, ValueError):
+        return []
+
+    if isinstance(eos_token_ids, int):
+        return [eos_token_ids]
+    if eos_token_ids is None:
+        return []
+    return [token_id for token_id in eos_token_ids if isinstance(token_id, int)]
 
 
 def replace_prefix_tokens(
@@ -30,6 +53,8 @@ def replace_prefix_tokens(
     model_prefix_token_ids: list[int],
     template_prefix_token_ids: list[int],
     template_token_ids: list[int],
+    *,
+    eos_token_ids: Collection[int] | None = None,
 ) -> list[int]:
     """This is a subroutine used inside the OpenAI-compatible Chat Completion server.
 
@@ -92,24 +117,31 @@ def replace_prefix_tokens(
     if not model_prefix_token_ids:
         return template_token_ids
 
-    eos_token_id = tokenizer.eos_token_id
-    assert eos_token_id is not None, "Tokenizer must have an EOS token ID"
+    effective_eos_token_ids = set(eos_token_ids or ())
+    tokenizer_eos_token_id = tokenizer.eos_token_id
+    if tokenizer_eos_token_id is not None:
+        effective_eos_token_ids.add(tokenizer_eos_token_id)
+    assert effective_eos_token_ids, (
+        "Tokenizer or model generation config must provide an EOS token ID"
+    )
 
     # The model isn't guaranteed to end on EOS (e.g. it hit max_tokens); chat
     # templates always add one, so cut the model input to just before its EOS.
     model_cut_end = len(model_prefix_token_ids)
-    if model_prefix_token_ids[-1] == eos_token_id:
+    if model_prefix_token_ids[-1] in effective_eos_token_ids:
         model_cut_end -= 1
 
     # Locate the turn boundary by EOS count rather than token position. Qwen3
     # templates may strip prior reasoning blocks when re-rendering history;
     # EOS counting preserves the original generated reasoning tokens without
     # requiring a customized chat template.
-    count_needed = template_prefix_token_ids.count(eos_token_id)
+    count_needed = sum(
+        token_id in effective_eos_token_ids for token_id in template_prefix_token_ids
+    )
     count_seen = 0
     template_cut_start = -1
     for pos, tid in enumerate(template_token_ids):
-        if tid == eos_token_id:
+        if tid in effective_eos_token_ids:
             count_seen += 1
             if count_seen == count_needed:
                 template_cut_start = pos
