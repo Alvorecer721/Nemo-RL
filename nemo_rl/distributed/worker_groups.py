@@ -14,6 +14,7 @@
 import importlib
 import math
 import os
+import sys
 import time
 from copy import deepcopy
 from dataclasses import dataclass
@@ -143,6 +144,7 @@ class RayWorkerBuilder:
             placement_group_bundle_index: int,
             num_gpus: int,
             bundle_indices: Optional[tuple] = None,
+            num_gpus_per_node: Optional[int] = None,
             **extra_options: Optional[dict[str, Any]],
         ):
             """Create a Ray worker with the specified configuration.
@@ -160,6 +162,11 @@ class RayWorkerBuilder:
                 placement_group_bundle_index: Index of the bundle in the placement group
                 num_gpus: Number of GPUs to allocate to this worker
                 bundle_indices: Tuple of (node_idx, local_bundle_indices) for tensor parallelism (if applicable)
+                num_gpus_per_node: Number of GPUs per node in the cluster. Passed to
+                    configure_worker so it can map a bundle id to a node-local index,
+                    for example when assigning ports to model-parallel engines that
+                    span more than one node. None when the caller does not supply
+                    cluster topology.
                 extra_options: Additional options to pass to the Ray actor (may be overridden by actor's configure_worker(...) method)
 
             Returns:
@@ -181,6 +188,7 @@ class RayWorkerBuilder:
                     worker_class.configure_worker(
                         num_gpus=num_gpus,
                         bundle_indices=bundle_indices,
+                        num_gpus_per_node=num_gpus_per_node,
                     )
                 )
 
@@ -474,23 +482,36 @@ class RayWorkerGroup:
         placement_groups = self.cluster.get_placement_groups()
 
         # Get available address and port for each worker
-        available_addresses = []
-        available_ports = []
-        for group_idx, (pg_idx, local_bundle_indices) in enumerate(bundle_indices_list):
-            for local_rank, bundle_idx in enumerate(local_bundle_indices):
-                addr, port = self.cluster.get_available_address_and_port(
-                    pg_idx, bundle_idx
-                )
-                available_addresses.append(addr)
-                available_ports.append(port)
+        pg_bundle_pairs = [
+            (pg_idx, bundle_idx)
+            for pg_idx, local_bundle_indices in bundle_indices_list
+            for bundle_idx in local_bundle_indices
+        ]
+        addr_port_results = self.cluster.get_available_addresses_and_ports_batch(
+            pg_bundle_pairs
+        )
+        available_addresses = [addr for addr, _ in addr_port_results]
+        available_ports = [port for _, port in addr_port_results]
 
         # Pool one IsolatedWorkerInitializer per unique pg_idx instead of one
         # per worker. All workers on a node share the same py_executable, so
-        # the initializer only needs that in its runtime_env — per-worker
+        # the initializer mostly needs only that in its runtime_env — per-worker
         # env_vars are passed through create_worker(). This reduces GCS actor
-        # registrations from N_workers to N_nodes.
+        # registrations from N_workers to N_nodes. The initializer does unpickle
+        # constructor arguments before it can create the real worker, so the
+        # import-related variables that trust_remote_code classes need to
+        # resolve their generated modules have to travel with it.
         unique_pg_indices = sorted({pg_idx for pg_idx, _ in bundle_indices_list})
-        initializer_runtime_env = {"py_executable": py_executable}
+        initializer_env_vars = {
+            key: env_vars[key]
+            for key in ("HF_HOME", "HF_MODULES_CACHE", "PYTHONPATH")
+            if key in env_vars
+        }
+        initializer_runtime_env = {}
+        if py_executable != sys.executable:
+            initializer_runtime_env["py_executable"] = py_executable
+        if initializer_env_vars:
+            initializer_runtime_env["env_vars"] = initializer_env_vars
         self._initializer_pool: dict[int, ray.actor.ActorHandle] = {}
         for pg_idx in unique_pg_indices:
             # num_cpus=0 so the initializer doesn't consume a CPU slot — it
@@ -580,6 +601,7 @@ class RayWorkerGroup:
                     bundle_idx,
                     num_gpus,
                     worker_bundle_indices,
+                    num_gpus_per_node=self.cluster.num_gpus_per_node,
                     **extra_options,
                 )
 

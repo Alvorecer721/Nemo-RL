@@ -56,9 +56,35 @@ from nemo_rl.utils.flops_tracker import (
     get_default_hf_config,
     get_theoretical_tflops,
 )
+from nemo_rl.utils.multimodal_payload_metrics import (
+    collect_sharded_multimodal_payload_metrics,
+    print_multimodal_payload_metrics,
+)
 from nemo_rl.utils.timer import Timer
 
 PathLike = Union[str, "os.PathLike[Any]"]
+
+
+def _aggregate_megatron_flops_metrics(
+    results: list[dict],
+    world_size: int,
+) -> dict:
+    """Aggregate FLOPS metrics from Megatron worker results.
+
+    Called when the Megatron worker returns total_flops directly (no FLOPTracker).
+    """
+    aggregated: dict = {}
+    aggregated["total_flops"] = results[0]["total_flops"]
+    aggregated["num_ranks"] = results[0].get("num_ranks", world_size)
+    if "train_elapsed_seconds" in results[0]:
+        aggregated["train_elapsed_seconds"] = results[0]["train_elapsed_seconds"]
+    try:
+        aggregated["theoretical_tflops"] = aggregated[
+            "num_ranks"
+        ] * get_theoretical_tflops(results[0]["gpu_name"], results[0]["model_dtype"])
+    except Exception as e:
+        warnings.warn(f"Error getting theoretical flops: {e}")
+    return aggregated
 
 
 class Policy(ColocatablePolicyInterface, GenerationInterface):
@@ -75,7 +101,9 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         init_reference_model: bool = True,
         processor: Optional[AutoProcessor] = None,
         worker_extension_cls_fqn: Optional[str] = None,
+        skip_weight_load: bool = False,
     ):
+        self.debug_payload_metrics = False
         if weights_path:
             weights_path = os.path.abspath(weights_path)
         if optimizer_path:
@@ -236,6 +264,8 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             worker_sharding_annotations=self.sharding_annotations,
             pre_init_communication_queue=pre_init_queue,
         )
+        if skip_weight_load:
+            worker_kwargs["skip_weight_load"] = True
 
         if use_v2:
             # DTensor v2 workers reconstruct tokenizer/processor locally to avoid
@@ -316,6 +346,9 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
                 "input_lengths_key": "input_lengths",
                 "sequence_length_pad_multiple": sequence_length_pad_multiple,
             }
+            microbatch_order = config["sequence_packing"].get("microbatch_order")
+            if microbatch_order is not None:
+                self.sequence_packing_args["microbatch_order"] = microbatch_order
             assert not config["dynamic_batching"]["enabled"], (
                 "Sequence Packing is exclusive of Dynamic Batching. Please disable Dynamic Batching"
             )
@@ -368,7 +401,13 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         return results
 
     def init_collective(
-        self, ip: str, port: int, world_size: int, *, train_world_size: int
+        self,
+        ip: str,
+        port: int,
+        world_size: int,
+        *,
+        train_world_size: int,
+        nccl_peer: str = "nemo",
     ) -> list[ray.ObjectRef]:
         """Initialize the collective communication."""
         futures = self.worker_group.run_all_workers_single_data(
@@ -377,6 +416,7 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             port=port,
             world_size=world_size,
             train_world_size=train_world_size,
+            nccl_peer=nccl_peer,
         )
         # this function should co-work with vllm, so we should wait for all futures to complete outside
         return futures
@@ -495,6 +535,22 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             )
         return sharded_data
 
+    def _report_sharded_payload(
+        self,
+        sharded_data: list["SlicedDataDict"],
+        boundary: str,
+    ) -> None:
+        """Measure the exact unique per-DP-shard Ray arguments."""
+        if not self.debug_payload_metrics:
+            return
+        print_multimodal_payload_metrics(
+            collect_sharded_multimodal_payload_metrics(
+                sharded_data,
+                boundary,
+                enabled=True,
+            )
+        )
+
     def get_logprobs(
         self,
         data: BatchedDataDict[GenerationDatumSpec],
@@ -509,6 +565,7 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         """
         with timer.time("get_logprobs/shard_data") if timer else nullcontext():
             sharded_data, unsorted_data_indices = self._shard_for_logprob(data)
+        self._report_sharded_payload(sharded_data, "policy_get_logprobs")
 
         with (
             timer.time("get_logprobs/submit_logprob_futures")
@@ -557,6 +614,7 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             else nullcontext()
         ):
             sharded_data, unsorted_data_indices = self._shard_for_logprob(data)
+        self._report_sharded_payload(sharded_data, "policy_get_reference_logprobs")
 
         with (
             timer.time(
@@ -723,6 +781,7 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         # Shard and replicate the batch
         with timer.time("policy_training/sharding_data") if timer else nullcontext():
             sharded_data = self._shard_for_train(data, batch_size)
+        self._report_sharded_payload(sharded_data, "policy_train")
 
         if self.flops_tracker is not None:
             self.flops_tracker.reset()
@@ -769,6 +828,8 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             aggregated_results["moe_metrics"] = results[0]["moe_metrics"]
         if "mtp_metrics" in results[0]:
             aggregated_results["mtp_metrics"] = results[0]["mtp_metrics"]
+        if "draft_grad_norm" in results[0]:
+            aggregated_results["draft_grad_norm"] = results[0]["draft_grad_norm"]
 
         if self.flops_tracker is not None:
             aggregated_results["total_flops"] = self.flops_tracker.total_flops
@@ -782,6 +843,12 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
                 )
             except Exception as e:
                 warnings.warn(f"Error getting theoretical flops: {e}")
+        elif results and "total_flops" in results[0]:
+            aggregated_results.update(
+                _aggregate_megatron_flops_metrics(
+                    results, self.worker_group.cluster.world_size()
+                )
+            )
 
         # Aggregate metrics across all workers
         all_mb_metrics = defaultdict(list)
@@ -891,9 +958,17 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         futures = self.worker_group.run_all_workers_single_data("prepare_for_training")
         ray.get(futures)
 
-    def prepare_for_lp_inference(self, *args: Any, **kwargs: Any) -> None:
+    def prepare_for_lp_inference(self, keep_train_buffers: bool = False) -> None:
+        """Put every worker in eval mode for logprob inference.
+
+        Args:
+            keep_train_buffers: Leave grad buffers and optimizer state on CUDA.
+                Set this when a train step is already open, so that gradients
+                accumulated by earlier streaming chunks survive; see
+                ``MegatronPolicyWorker.prepare_for_lp_inference``.
+        """
         futures = self.worker_group.run_all_workers_single_data(
-            "prepare_for_lp_inference"
+            "prepare_for_lp_inference", keep_train_buffers=keep_train_buffers
         )
         ray.get(futures)
 
@@ -959,6 +1034,7 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
                 dp_size,
                 batch_size=None,
             )
+        self._report_sharded_payload(sharded_data, "policy_kv_calibration")
 
         futures = self.worker_group.run_all_workers_sharded_data(
             "calibrate_qkv_fp8_scales",
@@ -1036,14 +1112,70 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         )
 
     def broadcast_weights_for_collective(
-        self, kv_scales: Optional[dict[str, float]] = None
+        self,
+        kv_scales: Optional[dict[str, float]] = None,
+        *,
+        buffer_size_bytes: Optional[int] = None,
+        num_buffers: Optional[int] = None,
     ) -> list[ray.ObjectRef]:
         """Broadcast the weights for collective communication."""
         futures = self.worker_group.run_all_workers_single_data(
             "broadcast_weights_for_collective",
             kv_scales=kv_scales,
+            buffer_size_bytes=buffer_size_bytes,
+            num_buffers=num_buffers,
         )
         # this function should co-work with vllm, so we should wait for all futures to complete outside
+        return futures
+
+    def init_nccl_reshard_comm_group(
+        self,
+        pp_ips: list[str],
+        pp_ports: list[int],
+        pp_size: int,
+        pp_stages: list[int],
+        sub_world_size: int,
+        ranks_in_group: list[int],
+    ) -> list[ray.ObjectRef]:
+        """Initialize the nccl_reshard bulk-path comm group on all train workers."""
+        futures = self.worker_group.run_all_workers_multiple_data(
+            "init_nccl_reshard_comm_group",
+            my_pp_stage=pp_stages,
+            my_rank_in_group=ranks_in_group,
+            common_kwargs={
+                "pp_ips": pp_ips,
+                "pp_ports": pp_ports,
+                "pp_size": pp_size,
+                "sub_world_size": sub_world_size,
+            },
+        )
+        # co-works with vllm; wait for all futures to complete outside
+        return futures
+
+    def prepare_nccl_reshard_refit_info(
+        self,
+        train_parallelism,
+        gen_parallelism,
+        train_world_size,
+        gen_world_size,
+    ):
+        """Prepare per-layer param metadata for nccl_reshard refit."""
+        futures = self.worker_group.run_all_workers_single_data(
+            "prepare_nccl_reshard_refit_info",
+            train_parallelism=train_parallelism,
+            gen_parallelism=gen_parallelism,
+            train_world_size=train_world_size,
+            gen_world_size=gen_world_size,
+        )
+        results = ray.get(futures)
+        return results[0]
+
+    def nccl_reshard_refit(self, kv_scales=None) -> list[ray.ObjectRef]:
+        """Transfer weights to gen workers via nccl_reshard (xferdtensor)."""
+        futures = self.worker_group.run_all_workers_single_data(
+            "nccl_reshard_refit",
+            kv_scales=kv_scales,
+        )
         return futures
 
     def offload_before_refit(self) -> None:
@@ -1055,6 +1187,10 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         """Offload the optimizer and buffers to the CPU."""
         futures = self.worker_group.run_all_workers_single_data("offload_after_refit")
         ray.get(futures)
+
+    def offload_to_cpu(self) -> None:
+        """Offload to CPU to free GPU memory; currently only used by PPO."""
+        self.offload_after_refit()
 
     def save_checkpoint(
         self,
@@ -1116,9 +1252,14 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
 
     def shutdown(self) -> bool:
         """Shut down all HF workers and clean up resources."""
+        if not hasattr(self, "worker_group"):
+            return True
         try:
             # Use the worker group's shutdown method with the worker's cleanup method
             return self.worker_group.shutdown(cleanup_method="shutdown")
+        except ray.exceptions.RayActorError:
+            # Workers already dead (e.g., shut down via another handle to the same actors).
+            return True
         except Exception as e:
             print(f"Error during policy shutdown: {e}")
             return False
@@ -1126,12 +1267,11 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
     def __del__(self) -> None:
         """Shuts down the worker groups when the object is deleted or is garbage collected.
 
-        This is an extra safety net in case the user forgets to call worker_group.shutdown() and the pointer to
+        This is an extra safety net in case the user forgets to call shutdown() and the pointer to
         the object is lost due to leaving a function scope. It's always recommended that the
-        user calls worker_group.shutdown().
+        user calls shutdown().
         """
-        if hasattr(self, "worker_group"):
-            self.worker_group.shutdown(cleanup_method="shutdown")
+        self.shutdown()
 
     def start_gpu_profiling(self) -> None:
         """Start GPU profiling."""

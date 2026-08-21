@@ -38,18 +38,29 @@ OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 MAX_JOBS=${MAX_JOBS:-4}
 NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS:-90}
+# This Apertus production image is validated with vLLM. Keep TensorRT-LLM an
+# explicit opt-in until its GH200 source build has independent evidence.
+BUILD_TRTLLM=${BUILD_TRTLLM:-0}
 VLLM_VERSION=0.25.1
 # Pin the arm64 manifest used on Clariden rather than resolving a mutable NGC
 # tag differently on a later rebuild. Override only when deliberately updating
 # the foundation image.
 BASE_IMAGE=${BASE_IMAGE:-nvcr.io/nvidia/cuda-dl-base:26.03-cuda13.2-devel-ubuntu24.04@sha256:aae478019be74ae86ce33f32c1468dff70cbcc80118831bd64ac67d5a510ac2a}
+case "$BUILD_TRTLLM" in
+    0) SKIP_TRTLLM_BUILD=1 ;;
+    1) SKIP_TRTLLM_BUILD= ;;
+    *)
+        echo "BUILD_TRTLLM must be 0 or 1, got: $BUILD_TRTLLM" >&2
+        exit 1
+        ;;
+esac
 # Completed hermetic stage for the dependency fingerprint below. Source-only
 # releases resume directly from this content-addressed manifest, avoiding
 # Podman's named-context identity bug that otherwise invalidates uv.lock when
 # an unrelated application source file changes. Set to "rebuild" only when
 # intentionally changing dependencies.
-HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-508e7c3083af7ce63ece6885650b95dd70e66cc10f576b3ed8b41de6b7727d26}
-HERMETIC_FINGERPRINT_SHA256=508e7c3083af7ce63ece6885650b95dd70e66cc10f576b3ed8b41de6b7727d26
+HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-f189ec651a8a976671a1bcc77d3487000999acde233786f8467ce759a08f6d52}
+HERMETIC_FINGERPRINT_SHA256=f189ec651a8a976671a1bcc77d3487000999acde233786f8467ce759a08f6d52
 # Use an explicit allocation-local store so the launcher does not depend on a
 # login-node containers/storage.conf. Large release layers are bounded in the
 # Dockerfile so they fit this node-local tmpfs.
@@ -89,6 +100,7 @@ BUILD_INPUTS_SHA256=$(
         printf 'base_image\0%s\0' "$BASE_IMAGE"
         printf 'max_jobs\0%s\0' "$MAX_JOBS"
         printf 'nvte_cuda_archs\0%s\0' "$NVTE_CUDA_ARCHS"
+        printf 'build_trtllm\0%s\0' "$BUILD_TRTLLM"
         printf 'platform\0linux/arm64\0'
         printf 'hermetic_cache_tag\0%s\0' "$HERMETIC_CACHE_TAG"
     } | sha256sum | cut -d' ' -f1
@@ -96,8 +108,14 @@ BUILD_INPUTS_SHA256=$(
 SOURCE_ID="${SOURCE_REV}-${BUILD_INPUTS_SHA256:0:12}"
 IMAGE="nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
 SQSH_PATH="${OUTPUT_DIR}/nemo-rl-apertus-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
+generate_hermetic_cache_fingerprint() {
+    python tools/generate_fingerprint.py
+    printf '\nbuild_trtllm=%s\n' "$BUILD_TRTLLM"
+}
+# The runtime version check expects this file to contain exactly one JSON
+# document. BUILD_TRTLLM still participates in the separate hermetic cache key.
 BUILD_FINGERPRINT_B64=$(python tools/generate_fingerprint.py | base64 -w0)
-CURRENT_FINGERPRINT_SHA256=$(python tools/generate_fingerprint.py | sha256sum | cut -d' ' -f1)
+CURRENT_FINGERPRINT_SHA256=$(generate_hermetic_cache_fingerprint | sha256sum | cut -d' ' -f1)
 BUILD_TARGET=release
 if [[ "$HERMETIC_CACHE_TAG" == "rebuild" ]]; then
     BUILD_TARGET=hermetic
@@ -108,6 +126,7 @@ echo "Source ID:   $SOURCE_ID"
 echo "Base image:  $BASE_IMAGE"
 echo "Inputs SHA:  $BUILD_INPUTS_SHA256"
 echo "Hermetic:    $HERMETIC_CACHE_TAG"
+echo "TensorRT-LLM build: $BUILD_TRTLLM"
 echo "Podman tag:  $IMAGE"
 echo "Layer cache: $CACHE_DIR"
 echo "SquashFS:    $SQSH_PATH"
@@ -268,7 +287,15 @@ if [[ "$HERMETIC_CACHE_TAG" != "rebuild" ]]; then
     curl --fail --silent --show-error --output /dev/null \
         -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
         "http://${LOCAL_REGISTRY}/v2/cache/manifests/${HERMETIC_CACHE_TAG}"
-    podman pull --tls-verify=false "$HERMETIC_IMAGE"
+    pull_rc=0
+    podman pull --tls-verify=false "$HERMETIC_IMAGE" || pull_rc=$?
+    if ((pull_rc != 0)); then
+        # Podman can report a post-copy cleanup failure after it has already
+        # written a complete manifest into the allocation-local graph. Only
+        # accept that case when Podman itself confirms the image is usable.
+        podman image exists "$HERMETIC_IMAGE" || exit "$pull_rc"
+        echo "Podman pull exited $pull_rc after materializing $HERMETIC_IMAGE; continuing with the verified local image" >&2
+    fi
     HERMETIC_PYPROJECT_MD5=$(podman run --rm \
         --entrypoint /usr/bin/md5sum "$HERMETIC_IMAGE" \
         /opt/nemo-rl/pyproject.toml | cut -d' ' -f1)
@@ -277,10 +304,38 @@ if [[ "$HERMETIC_CACHE_TAG" != "rebuild" ]]; then
         /opt/nemo-rl/uv.lock | cut -d' ' -f1)
     HERMETIC_VLLM_VERSION=$(podman run --rm \
         --entrypoint /opt/nemo_rl_venv/bin/python "$HERMETIC_IMAGE" -c \
-        'import tomllib; lock = tomllib.load(open("/opt/nemo-rl/uv.lock", "rb")); print(next(package["version"] for package in lock["package"] if package["name"] == "vllm"))')
-    [[ "$HERMETIC_PYPROJECT_MD5" == "83a1323583d507d0e5a3af0cc942c968" ]] # pragma: allowlist secret
-    [[ "$HERMETIC_LOCK_MD5" == "dff35fa07275ef50870e13f829c24829" ]] # pragma: allowlist secret
-    [[ "$HERMETIC_VLLM_VERSION" == "$VLLM_VERSION" ]]
+        '
+import re
+import tomllib
+
+lock = tomllib.load(open("/opt/nemo-rl/uv.lock", "rb"))
+nemo_rl = next(package for package in lock["package"] if package["name"] == "nemo-rl")
+requirement = next(
+    requirement
+    for requirement in nemo_rl["metadata"]["requires-dist"]
+    if requirement["name"] == "vllm"
+    and "platform_machine == '\''aarch64'\''" in requirement.get("marker", "")
+    and "extra == '\''vllm'\''" in requirement.get("marker", "")
+)
+match = re.search(r"/v([^/]+)/vllm-([^-]+)-", requirement["url"])
+assert match and match.group(1) == match.group(2), requirement
+print(match.group(2))
+')
+    echo "Hermetic pyproject MD5: $HERMETIC_PYPROJECT_MD5"
+    echo "Hermetic lock MD5:      $HERMETIC_LOCK_MD5"
+    echo "Hermetic vLLM version:  $HERMETIC_VLLM_VERSION"
+    [[ "$HERMETIC_PYPROJECT_MD5" == "1e3fcef485b5ebf9d48deec104110d64" ]] || { # pragma: allowlist secret
+        echo "Hermetic pyproject.toml does not match the pinned digest" >&2
+        exit 1
+    }
+    [[ "$HERMETIC_LOCK_MD5" == "3b2857b69fafc927ad8d2183b176fa79" ]] || { # pragma: allowlist secret
+        echo "Hermetic uv.lock does not match the pinned digest" >&2
+        exit 1
+    }
+    [[ "$HERMETIC_VLLM_VERSION" == "$VLLM_VERSION" ]] || {
+        echo "Hermetic vLLM version does not match $VLLM_VERSION" >&2
+        exit 1
+    }
 
     BUILD_DOCKERFILE="$PODMAN_STORAGE_BASE/Dockerfile.release"
     sed "s|^FROM hermetic AS release$|FROM ${HERMETIC_IMAGE} AS release|" \
@@ -304,6 +359,7 @@ podman build \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "MAX_JOBS=$MAX_JOBS" \
     --build-arg "NVTE_CUDA_ARCHS=$NVTE_CUDA_ARCHS" \
+    --build-arg "SKIP_TRTLLM_BUILD=$SKIP_TRTLLM_BUILD" \
     --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
     --build-arg "NEMO_RL_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
     --build-arg "NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64" \

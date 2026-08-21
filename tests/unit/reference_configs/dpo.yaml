@@ -122,11 +122,16 @@ policy:
     checkpoint:
       async_save: false
       ckpt_assume_constant_structure: false
-    use_linear_ce_fusion_loss: false
-    linear_ce_fusion_chunk_size: 256
+    use_fused_linear_logprobs: false
+    fused_linear_logprobs_chunk_size: 256
     force_reconvert_from_hf: False # Set to True to force reconvert of the model from Hugging Face
     empty_unused_memory_level: 1
     activation_checkpointing: false
+    cuda_graph_impl: "none"
+    cuda_graph_modules: []
+    cuda_graph_warmup_steps: 3
+    fine_grained_activation_offloading: false
+    offload_modules: null
     recompute_granularity: "full"
     recompute_modules: null
     tensor_model_parallel_size: 2
@@ -152,6 +157,7 @@ policy:
     moe_enable_deepep: false
     moe_token_dispatcher_type: "alltoall"
     moe_shared_expert_overlap: false
+    use_gloo_process_groups: false
     gradient_accumulation_fusion: false
     use_fused_weighted_squared_relu: false
 
@@ -194,6 +200,7 @@ policy:
       # optimizer cpu offload
       optimizer_cpu_offload: false
       optimizer_offload_fraction: 0.0
+      overlap_cpu_optimizer_d2h_h2d: false
 
     scheduler:
       start_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}

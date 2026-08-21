@@ -72,6 +72,7 @@ unset LD_PRELOAD
 
 srun \
   --mpi=pmix \
+  --cpu-bind=none \
   --environment="$CONTAINER_ENV" \
   --ntasks=1 \
   --gpus-per-task=4 \
@@ -153,8 +154,8 @@ PY
         policy.max_total_sequence_length=2048 \
         policy.megatron_cfg.tensor_model_parallel_size=2 \
         policy.megatron_cfg.sequence_parallel=false \
-        policy.megatron_cfg.use_linear_ce_fusion_loss=true \
-        policy.megatron_cfg.linear_ce_fusion_chunk_size=256 \
+        policy.megatron_cfg.use_fused_linear_logprobs=true \
+        policy.megatron_cfg.fused_linear_logprobs_chunk_size=256 \
         policy.megatron_cfg.distributed_data_parallel_config.overlap_param_gather=false \
         policy.megatron_cfg.checkpoint.async_save="$checkpoint_enabled" \
         policy.megatron_cfg.checkpoint.ckpt_assume_constant_structure="$checkpoint_enabled" \
@@ -214,6 +215,12 @@ PY
     if [[ "$CHECKPOINT_MODE" == "save" ]]; then
       test -f "$CHECKPOINT_DIR/step_1/training_info.json"
       test -f "$CHECKPOINT_DIR/step_2/training_info.json"
+      # The save process uses a two-step scheduler horizon so that the
+      # optimizer state is compatible with the fresh resume process. Keep the
+      # second checkpoint as save-run evidence, but remove it from the shared
+      # checkpoint directory so the fresh process must resume from step 1.
+      test ! -e "$RUN_DIR/initial_step_2"
+      mv "$CHECKPOINT_DIR/step_2" "$RUN_DIR/initial_step_2"
       echo "baked_dpo_cross_allocation_save=OK"
     elif [[ "$CHECKPOINT_MODE" == "resume" ]]; then
       /opt/nemo_rl_venv/bin/python - "$CHECKPOINT_DIR/step_2/training_info.json" <<'PY'

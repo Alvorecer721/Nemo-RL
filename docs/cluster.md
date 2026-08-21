@@ -150,38 +150,62 @@ sbatch ray.sub \
     allocation or to override detection.
 * - `GPUS_PER_NODE=8`
   - Number of GPUs each Ray worker node claims. To determine this, run `nvidia-smi` on a worker node.
+* - `DEDICATED_RAY_HEAD=0`
+  - Set to `1` to run the first allocated node as a GPU-free Ray head: it hosts
+    only the Ray control plane and the driver, advertises `--num-gpus=0`, and
+    carries neither `worker_units` nor the topology resources, so no GPU actor
+    or topology-constrained placement group can land on it. Use this when driver
+    or head-node memory pressure is destabilizing training.
+
+    **You must shrink the driver's node count yourself.** `ray.sub` cannot see
+    inside your `COMMAND`, so it only prints the effective GPU-node count. With
+    `--nodes=N` and `DEDICATED_RAY_HEAD=1`, `cluster.num_nodes` (plus
+    `env.nemo_gym.num_gpu_nodes` when set) must sum to `N - 1`. If you leave it
+    at `N`, cluster bringup still succeeds and the driver instead fails minutes
+    later with `Maximum number of retries reached (6). Cluster resources may be
+    insufficient...`.
+
+    **The head's GPUs are idled, not freed.** Under `#SBATCH --exclusive` the
+    head node is still allocated with `--gres`, so this costs one node's worth
+    of GPUs.
+
+    **Watch segment divisibility.** With topology-aware placement the allocation
+    becomes `--nodes=N+1`, which can trip the "`SEGMENT_SIZE` must evenly divide
+    `NUM_NODES`" check in `tools/launch`.
 * - `BASE_LOG_DIR=$SLURM_SUBMIT_DIR`
   - Base directory for storing Ray logs. Defaults to the Slurm submission directory ([SLURM_SUBMIT_DIR](https://slurm.schedmd.com/sbatch.html#OPT_SLURM_SUBMIT_DIR)).
-* - `NODE_MANAGER_PORT=53001`
+* - `NODE_MANAGER_PORT=1301`
   - Port for the Ray node manager on worker nodes.
-* - `OBJECT_MANAGER_PORT=53003`
+* - `OBJECT_MANAGER_PORT=1303`
   - Port for the Ray object manager on worker nodes.
-* - `RUNTIME_ENV_AGENT_PORT=53005`
+* - `RUNTIME_ENV_AGENT_PORT=1305`
   - Port for the Ray runtime environment agent on worker nodes.
-* - `DASHBOARD_AGENT_GRPC_PORT=53007`
+* - `DASHBOARD_AGENT_GRPC_PORT=1307`
   - gRPC port for the Ray dashboard agent on worker nodes.
-* - `METRICS_EXPORT_PORT=53009`
+* - `METRICS_EXPORT_PORT=1309`
   - Port for exporting metrics from worker nodes.
-* - `PORT=6379`
+* - `PORT=1200`
   - Main port for the Ray head node.
-* - `RAY_CLIENT_SERVER_PORT=10001`
+* - `RAY_CLIENT_SERVER_PORT=1201`
   - Port for the Ray client server on the head node.
 * - `DASHBOARD_GRPC_PORT=52367`
   - gRPC port for the Ray dashboard on the head node.
 * - `DASHBOARD_PORT=8265`
   - Port for the Ray dashboard UI on the head node. This is also the port
     used by the Ray distributed debugger.
-* - `DASHBOARD_AGENT_LISTEN_PORT=52365`
+* - `DASHBOARD_AGENT_LISTEN_PORT=1311`
   - Listening port for the dashboard agent on the head node.
-* - `MIN_WORKER_PORT=54001`
+* - `MIN_WORKER_PORT=2000`
   - Minimum port in the range for Ray worker processes.
-* - `MAX_WORKER_PORT=54257`
+* - `MAX_WORKER_PORT=2999`
   - Maximum port in the range for Ray worker processes.
 ``````
 
 > [!NOTE]
 > For the most part, you will not need to change ports unless these
 > are already taken by some other service backgrounded on your cluster.
+> The defaults above are the source-of-truth port layout defined in `ray.sub`;
+> keep this table in sync with that block if the defaults ever change.
 
 ### Topology-Aware Placement for MoE (avoiding cross-rack stalls)
 

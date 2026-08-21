@@ -72,12 +72,19 @@ from nemo_rl.models.policy.utils import (
     get_runtime_env_for_policy_worker,
 )
 from nemo_rl.models.policy.workers.base_policy_worker import AbstractPolicyWorker
+from nemo_rl.models.policy.workers.checkpoint_engine import (
+    DTensorCheckpointEngineSendMixin,
+    PolicyCheckpointEngineMixin,
+    maybe_preinit_nixl_checkpoint_engine,
+)
 from nemo_rl.models.policy.workers.patches import (
     apply_transformer_engine_patch,
 )
 from nemo_rl.utils.checkpoint import CheckpointingConfig
+from nemo_rl.utils.grad_norm import warn_if_inf_grad_norm
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
 from nemo_rl.utils.packed_tensor import packed_broadcast_producer
+from nemo_rl.utils.timer import Timer
 
 
 def dtensor_params_generator(
@@ -196,7 +203,11 @@ def get_train_context(
 # Classes with @ray.remote can't be inherited from, so we split the implementation out.
 # This is useful when using worker extension classes.
 class DTensorPolicyWorkerV2Impl(
-    TQWorkerMixin, AbstractPolicyWorker, ColocatablePolicyInterface
+    TQWorkerMixin,
+    DTensorCheckpointEngineSendMixin,
+    PolicyCheckpointEngineMixin,
+    AbstractPolicyWorker,
+    ColocatablePolicyInterface,
 ):
     def __repr__(self) -> str:
         """Customizes the actor's prefix in the Ray logs.
@@ -288,6 +299,7 @@ class DTensorPolicyWorkerV2Impl(
         )
         # Set instance attributes from distributed context
         self.rank = torch.distributed.get_rank()
+        self.timer = Timer(context={"worker": "dtensor_policy_v2", "rank": self.rank})
         self.device_mesh = distributed_context.device_mesh
         self.dp_cp_mesh = self.device_mesh["dp_cp"]
         self.dp_mesh = self.device_mesh["dp"]
@@ -297,6 +309,7 @@ class DTensorPolicyWorkerV2Impl(
         self.dp_size = distributed_context.dp_size
         self.tp_size = distributed_context.tp_size
         self.cp_size = distributed_context.cp_size
+        self._nixl_preinit_agent = maybe_preinit_nixl_checkpoint_engine(config)
 
         # Initialize checkpoint manager now that distributed is set up
         self._init_checkpoint_manager(
@@ -396,6 +409,7 @@ class DTensorPolicyWorkerV2Impl(
         check_dim_skip_keys: Optional[Iterable[str]] = None,
     ) -> dict[str, Any]:
         """Train the policy on a batch of data with a given loss function."""
+        self.timer.start("train")
         if gbs is None:
             gbs = self.cfg["train_global_batch_size"]
         if mbs is None:
@@ -543,6 +557,7 @@ class DTensorPolicyWorkerV2Impl(
                     grad_norm = torch.tensor(
                         grad_norm, device="cpu", dtype=torch.float32
                     )
+                    warn_if_inf_grad_norm(grad_norm)
 
                     # Update parameters and the non-gradient MoE routing bias.
                     self.optimizer.step()
@@ -568,6 +583,7 @@ class DTensorPolicyWorkerV2Impl(
                 dtype=self.dtype,
             )
 
+            self.timer.stop("train")
             return metrics
 
     @wrap_with_nvtx_name("dtensor_policy_worker_v2/get_logprobs")
@@ -586,6 +602,7 @@ class DTensorPolicyWorkerV2Impl(
           We use the convention that the logprob of the first token is 0 so that the sequence length is maintained.
           The logprob of input token i is specified at position i in the output logprobs tensor.
         """
+        self.timer.start("get_logprobs")
         logprob_batch_size = (
             micro_batch_size
             if micro_batch_size is not None
@@ -662,6 +679,7 @@ class DTensorPolicyWorkerV2Impl(
             all_log_probs_padded.append(lp)
         return_data["logprobs"] = torch.cat(all_log_probs_padded, dim=0).cpu()
 
+        self.timer.stop("get_logprobs")
         return return_data
 
     @wrap_with_nvtx_name("dtensor_policy_worker_v2/score")
@@ -1156,9 +1174,18 @@ class DTensorPolicyWorkerV2Impl(
             worker_state=self._ipc_worker_state,
         )
 
+    def _checkpoint_engine_params(
+        self,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        return dtensor_params_generator(self.model, self.dtype)
+
     @torch.no_grad()
     def broadcast_weights_for_collective(
-        self, kv_scales: Optional[dict[str, float]] = None
+        self,
+        kv_scales: Optional[dict[str, float]] = None,
+        *,
+        buffer_size_bytes: Optional[int] = None,
+        num_buffers: Optional[int] = None,
     ) -> None:
         """Broadcast the weights for collective communication."""
         if kv_scales is not None:
@@ -1182,6 +1209,8 @@ class DTensorPolicyWorkerV2Impl(
             group=self.model_update_group,
             src=0,
             post_iter_func=dtensor_post_iter_func,
+            buffer_size_bytes=buffer_size_bytes,
+            num_buffers=num_buffers,
         )
 
         # Manually move model to cpu for cpu offload case
@@ -1190,7 +1219,16 @@ class DTensorPolicyWorkerV2Impl(
             self.model = self.move_to_cpu(self.model)
 
     @wrap_with_nvtx_name("dtensor_policy_worker_v2/prepare_for_lp_inference")
-    def prepare_for_lp_inference(self) -> None:
+    def prepare_for_lp_inference(self, keep_train_buffers: bool = False) -> None:
+        """Put the model in eval mode for logprob inference.
+
+        Args:
+            keep_train_buffers: Leave the optimizer state on CUDA because a train
+                step is already open. This backend accumulates gradients in
+                ``param.grad`` and never offloads them, so unlike the Megatron
+                backend there is nothing here that could discard them; the flag
+                only suppresses the per-chunk optimizer round trip.
+        """
         # onload model to cuda
         if not self.cpu_offload:
             self.move_to_cuda(self.model)
@@ -1201,7 +1239,11 @@ class DTensorPolicyWorkerV2Impl(
 
         # offload optimizer to cpu
         torch.randn(1).cuda()  # wake up torch allocator
-        if self.optimizer is not None and self.offload_optimizer_for_logprob:
+        if (
+            not keep_train_buffers
+            and self.optimizer is not None
+            and self.offload_optimizer_for_logprob
+        ):
             self.move_optimizer_to_device("cpu")
 
         gc.collect()
