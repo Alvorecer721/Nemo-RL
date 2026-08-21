@@ -194,12 +194,11 @@ def apply_reward_shaping(
     overlong_buffer_length = cfg.overlong_buffer_length
     overlong_buffer_penalty = cfg.overlong_buffer_penalty
     max_response_length = cfg.max_response_length
-    dapo_fields = (
-        overlong_buffer_length,
-        overlong_buffer_penalty,
-        max_response_length,
-    )
-    if any(field is None for field in dapo_fields):
+    if (
+        overlong_buffer_length is None
+        or overlong_buffer_penalty is None
+        or max_response_length is None
+    ):
         raise ValueError(
             "Reward function is enabled but only DAPO reward shaping is currently supported. Please ensure overlong_buffer_length, overlong_buffer_penalty, and max_response_length are properly configured."
         )
