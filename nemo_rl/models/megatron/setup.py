@@ -871,7 +871,7 @@ def _apply_parallelism_config(model_cfg: Any, config: PolicyConfig) -> None:
             "Context Parallelism is not supported with linear CE fusion loss, please set use_fused_linear_logprobs to false"
         )
 
-    if config["megatron_cfg"].get("use_linear_ce_fusion_loss", False):
+    if config["megatron_cfg"].get("use_fused_linear_logprobs", False):
         # The fused hidden->logprob path has no cu_seqlens plumbing: get_logprobs
         # returns one row per packed microbatch instead of per sequence, and the
         # packed training wrappers expect vocab-parallel logits, not fused

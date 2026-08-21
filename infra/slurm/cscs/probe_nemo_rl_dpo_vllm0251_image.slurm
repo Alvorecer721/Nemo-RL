@@ -154,8 +154,8 @@ PY
         policy.max_total_sequence_length=2048 \
         policy.megatron_cfg.tensor_model_parallel_size=2 \
         policy.megatron_cfg.sequence_parallel=false \
-        policy.megatron_cfg.use_linear_ce_fusion_loss=true \
-        policy.megatron_cfg.linear_ce_fusion_chunk_size=256 \
+        policy.megatron_cfg.use_fused_linear_logprobs=true \
+        policy.megatron_cfg.fused_linear_logprobs_chunk_size=256 \
         policy.megatron_cfg.distributed_data_parallel_config.overlap_param_gather=false \
         policy.megatron_cfg.checkpoint.async_save="$checkpoint_enabled" \
         policy.megatron_cfg.checkpoint.ckpt_assume_constant_structure="$checkpoint_enabled" \

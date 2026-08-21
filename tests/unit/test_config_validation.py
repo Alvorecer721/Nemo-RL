@@ -173,6 +173,18 @@ def test_grpo_rejects_seq_logprob_error_threshold_below_one():
         validate_config_section(config_dict, GRPOMasterConfig, config_file)
 
 
+def test_apertus_dpo_recipe_enables_supported_fused_linear_logprobs():
+    config_file = str(
+        configs_dir / "recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml"
+    )
+    config = load_config_with_inheritance(config_file)
+    megatron_cfg = OmegaConf.to_container(config.policy.megatron_cfg, resolve=True)
+
+    assert megatron_cfg["use_fused_linear_logprobs"] is True
+    assert megatron_cfg["fused_linear_logprobs_chunk_size"] == 256
+    assert "use_linear_ce_fusion_loss" not in megatron_cfg
+
+
 def test_multimodal_dedup_grpo_config_keys_default_off():
     """Older recipes keep flag-off behavior without duplicating default keys."""
     assert GRPOConfig.model_fields["deduplicate_multimodal_data"].default is False
