@@ -215,6 +215,12 @@ PY
     if [[ "$CHECKPOINT_MODE" == "save" ]]; then
       test -f "$CHECKPOINT_DIR/step_1/training_info.json"
       test -f "$CHECKPOINT_DIR/step_2/training_info.json"
+      # The save process uses a two-step scheduler horizon so that the
+      # optimizer state is compatible with the fresh resume process. Keep the
+      # second checkpoint as save-run evidence, but remove it from the shared
+      # checkpoint directory so the fresh process must resume from step 1.
+      test ! -e "$RUN_DIR/initial_step_2"
+      mv "$CHECKPOINT_DIR/step_2" "$RUN_DIR/initial_step_2"
       echo "baked_dpo_cross_allocation_save=OK"
     elif [[ "$CHECKPOINT_MODE" == "resume" ]]; then
       /opt/nemo_rl_venv/bin/python - "$CHECKPOINT_DIR/step_2/training_info.json" <<'PY'
