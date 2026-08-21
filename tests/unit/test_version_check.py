@@ -24,6 +24,25 @@ import pytest
 from nemo_rl import _check_container_fingerprint
 
 
+def test_cscs_build_bakes_valid_json_without_changing_hermetic_cache_key():
+    """Runtime JSON and optional-backend cache inputs must remain separate."""
+    repo_root = Path(__file__).parent.parent.parent
+    build_script = (
+        repo_root / "infra/slurm/cscs/build_nemo_rl_image.slurm"
+    ).read_text()
+
+    assert (
+        "BUILD_FINGERPRINT_B64=$(python tools/generate_fingerprint.py | base64 -w0)"
+        in build_script
+    )
+    assert "generate_hermetic_cache_fingerprint()" in build_script
+    assert "printf '\\nbuild_trtllm=%s\\n' \"$BUILD_TRTLLM\"" in build_script
+    assert (
+        "CURRENT_FINGERPRINT_SHA256=$(generate_hermetic_cache_fingerprint "
+        "| sha256sum | cut -d' ' -f1)" in build_script
+    )
+
+
 class TestContainerFingerprintCheck:
     """Test the container fingerprint check functionality."""
 
