@@ -30,6 +30,9 @@ Modeled after `tests/unit/models/policy/test_megatron_worker.py`.
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 import ray
@@ -47,6 +50,75 @@ from nemo_rl.models.value.lm_value import Value
 from nemo_rl.utils.checkpoint import CheckpointManager
 
 pytestmark = pytest.mark.mcore
+
+
+def test_get_values_suspends_activation_offload() -> None:
+    """Value inference must preserve the activation-offload training warmup."""
+    from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
+        PipelineOffloadManager,
+    )
+
+    from nemo_rl.models.value.workers.megatron_value_worker import (
+        MegatronValueWorkerImpl,
+    )
+
+    class OffloadManager:
+        def __init__(self) -> None:
+            self.do_offload = True
+
+        def disable_offload(self) -> None:
+            self.do_offload = False
+
+        def enable_offload(self) -> None:
+            self.do_offload = True
+
+    manager = OffloadManager()
+    model_config = SimpleNamespace(fine_grained_activation_offloading=True)
+    model = SimpleNamespace(config=model_config, eval=lambda: None)
+    worker = SimpleNamespace(
+        cfg={"train_micro_batch_size": 1},
+        model=model,
+        _policy_like_cfg={},
+        mcore_state=SimpleNamespace(straggler_timer=None),
+    )
+    observed_states: list[tuple[bool, bool]] = []
+
+    def run_forward_only(**kwargs: Any) -> list[dict[str, torch.Tensor]]:
+        assert kwargs["forward_only"] is True
+        observed_states.append(
+            (model_config.fine_grained_activation_offloading, manager.do_offload)
+        )
+        return [{"values": torch.tensor([[1.0]])}]
+
+    with (
+        patch.object(PipelineOffloadManager, "OFFLOAD_MGR", manager),
+        patch(
+            "nemo_rl.models.value.workers.megatron_value_worker.get_microbatch_iterator",
+            return_value=(iter([]), 1, 1, 1, 1),
+        ),
+        patch(
+            "nemo_rl.models.value.workers.megatron_value_worker.get_forward_backward_func",
+            return_value=run_forward_only,
+        ),
+        patch(
+            "nemo_rl.models.value.workers.megatron_value_worker.get_pipeline_model_parallel_group",
+            return_value=None,
+        ),
+        patch(
+            "nemo_rl.models.value.workers.megatron_value_worker.is_pipeline_last_stage",
+            return_value=True,
+        ),
+        patch("nemo_rl.models.value.workers.megatron_value_worker.broadcast_tensor"),
+        patch("torch.distributed.get_rank", return_value=0),
+        patch("torch.cuda.nvtx.range_push"),
+        patch("torch.cuda.nvtx.range_pop"),
+    ):
+        result = MegatronValueWorkerImpl.get_values(worker, BatchedDataDict({}))
+
+    torch.testing.assert_close(result["values"], torch.tensor([[1.0]]))
+    assert observed_states == [(False, False)]
+    assert model_config.fine_grained_activation_offloading is True
+    assert manager.do_offload is True
 
 
 def _create_value_test_config(
@@ -117,6 +189,7 @@ def _create_value_test_config(
                 "clip_grad": 1.0,
                 "optimizer_cpu_offload": False,
                 "optimizer_offload_fraction": 0.0,
+                "overlap_cpu_optimizer_d2h_h2d": False,
             },
             "scheduler": {
                 "start_weight_decay": 0.01,
@@ -186,6 +259,35 @@ def _apply_config_updates(config: ValueConfig, config_updates: dict) -> None:
             )
         else:
             raise ValueError(f"Unknown config_updates key: {k!r}")
+
+
+def test_prepare_for_training_leaves_native_cpu_optimizer_placement():
+    """HybridDeviceOptimizer owns state placement for value-model training."""
+    from nemo_rl.models.value.workers.megatron_value_worker import (
+        MegatronValueWorkerImpl,
+    )
+
+    class _TrainableModel:
+        def __init__(self) -> None:
+            self.train_called = False
+
+        def train(self) -> None:
+            self.train_called = True
+
+    worker = object.__new__(MegatronValueWorkerImpl)
+    model = _TrainableModel()
+    worker.model = model
+    worker.optimizer = object()
+    worker.optimizer_cpu_offload = True
+    worker.cfg = {"megatron_cfg": {"empty_unused_memory_level": 0}}
+    worker.move_model = lambda model, device, move_grads, move_params: model
+    worker.move_optimizer = lambda device: pytest.fail(
+        "native optimizer CPU offload must not use the generic optimizer mover"
+    )
+
+    MegatronValueWorkerImpl.prepare_for_training(worker)
+
+    assert model.train_called
 
 
 @pytest.fixture
@@ -583,6 +685,56 @@ def test_unpack_value_sequences_variable_lengths():
         # values[t] = V(state before token t): prepend 0, drop last.
         expected[i, : v.shape[0]] = torch.cat([torch.zeros(1), v[:-1]])
     torch.testing.assert_close(out, expected)
+
+
+def test_value_loss_prepare_fn_shift_and_truncate():
+    """`_value_loss_prepare_fn` (the value-model LossPostProcessor prepare_fn)
+    right-shifts the value-head output (values[t] = V(state before token t)),
+    drops a trailing singleton, and truncates to the returns length. CPU-only
+    (cp_group=None, so the CP all-gather is a no-op).
+    """
+    from nemo_rl.models.value.workers.megatron_value_worker import (
+        _value_loss_prepare_fn,
+    )
+
+    logits = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+    data = BatchedDataDict({"returns": torch.zeros(2, 3)})
+    # Right-shift by one, then truncate to the returns length (3).
+    expected = torch.tensor([[0.0, 1.0, 2.0], [0.0, 5.0, 6.0]])
+
+    out, _ = _value_loss_prepare_fn(logits, data, context_parallel_group=None)
+    torch.testing.assert_close(out["logits"], expected)
+
+    # The value head's trailing singleton [B, S, 1] is squeezed first.
+    out_3d, _ = _value_loss_prepare_fn(
+        logits.unsqueeze(-1), data, context_parallel_group=None
+    )
+    torch.testing.assert_close(out_3d["logits"], expected)
+
+
+def test_loss_post_processor_rejects_fuse_loss_with_custom_prepare_fn():
+    """The fused sequence-packing path prepares loss via
+    ``prepare_packed_loss_input`` and cannot honor a custom ``prepare_fn``. The
+    value model passes ``_value_loss_prepare_fn``, so ``fuse_loss=true`` together
+    with a custom ``prepare_fn`` must fail fast rather than silently bypass the
+    value-specific prep. CPU-only: the guard fires before any Megatron
+    parallel-state call.
+    """
+    from nemo_rl.models.megatron.train import LossPostProcessor
+    from nemo_rl.models.value.workers.megatron_value_worker import (
+        _value_loss_prepare_fn,
+    )
+
+    loss_post_processor = LossPostProcessor(
+        loss_fn=lambda *args, **kwargs: None,
+        cfg={"sequence_packing": {"enabled": True, "fuse_loss": True}},
+        num_microbatches=1,
+        prepare_fn=_value_loss_prepare_fn,
+    )
+    # packed_seq_params only needs to be non-None; its attributes are read after
+    # the guard, so a bare sentinel suffices.
+    with pytest.raises(AssertionError, match="fuse_loss"):
+        loss_post_processor(BatchedDataDict({}), packed_seq_params=object())
 
 
 @pytest.mark.hf_gated

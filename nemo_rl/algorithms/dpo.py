@@ -17,6 +17,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, fields
 from enum import Enum
 from functools import partial
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -60,15 +61,25 @@ class DPOTrainStatus(Enum):
     TIMED_OUT = "timed_out"
 
 
-# Exit code an entrypoint returns for TIMED_OUT; launchers key conditional
-# resubmission off it (see infra/slurm/cscs/submit_nemo_rl_dpo.slurm).
-DPO_TIMEOUT_EXIT_CODE = os.EX_TEMPFAIL
-
-
 def _initial_dpo_save_state() -> DPOSaveState:
     return DPOSaveState(
         epoch=0, step=0, total_steps=0, consumed_samples=0, total_valid_tokens=0
     )
+
+
+def _get_dpo_save_state(
+    loaded_state: Optional[dict[str, Any]],
+) -> DPOSaveState:
+    if loaded_state is None:
+        return _initial_dpo_save_state()
+
+    # Start from current defaults so partial/legacy checkpoints remain loadable.
+    known_fields = {field.name for field in fields(DPOSaveState)}
+    state_values = vars(_initial_dpo_save_state()).copy()
+    state_values.update(
+        {key: value for key, value in loaded_state.items() if key in known_fields}
+    )
+    return DPOSaveState(**state_values)
 
 
 class DPOConfig(BaseModel, extra="allow"):
@@ -171,7 +182,7 @@ def setup(
     if policy_config["sequence_packing"]["enabled"]:
         assert not (
             policy_config["megatron_cfg"]["enabled"]
-            and policy_config["megatron_cfg"]["use_linear_ce_fusion_loss"]
+            and policy_config["megatron_cfg"]["use_fused_linear_logprobs"]
         ), (
             "Linear CE fusion loss is not supported with sequence packing in DPO. "
             "The fusion path has not been validated with cu_seqlens-based logprob aggregation."
@@ -189,17 +200,7 @@ def setup(
     checkpointer = CheckpointManager(checkpointing_config)
     last_checkpoint_path = checkpointer.get_latest_checkpoint_path()
     loaded_state = checkpointer.load_training_info(last_checkpoint_path)
-    if loaded_state is not None:
-        # Filter to only known DPOSaveState fields; checkpoints may carry
-        # extra keys (e.g. validation metrics from previous runs).
-        # Backcompat: checkpoints saved before total_valid_tokens was added.
-        loaded_state.setdefault("total_valid_tokens", 0)
-        known_fields = {f.name for f in fields(DPOSaveState)}
-        dpo_save_state = DPOSaveState(
-            **{k: v for k, v in loaded_state.items() if k in known_fields}
-        )
-    else:
-        dpo_save_state = _initial_dpo_save_state()
+    dpo_save_state = _get_dpo_save_state(loaded_state)
 
     # ==========================
     #           Data
@@ -296,8 +297,8 @@ def setup(
 
     loss_fn = DPOLossFn(
         master_config.dpo,
-        use_linear_ce_fusion=policy_config["megatron_cfg"]["enabled"]
-        and policy_config["megatron_cfg"]["use_linear_ce_fusion_loss"],
+        use_fused_linear_logprobs=policy_config["megatron_cfg"]["enabled"]
+        and policy_config["megatron_cfg"]["use_fused_linear_logprobs"],
     )
     print("  ✓ Model initialized")
 
@@ -591,6 +592,8 @@ def dpo_train(
 
     policy.prepare_for_training()
 
+    ft_save_period = master_config.checkpointing.get("ft_save_period")
+
     while (
         current_epoch < max_num_epochs and total_steps < master_config.dpo.max_num_steps
     ):
@@ -668,6 +671,10 @@ def dpo_train(
                     is_last_step
                     or (total_steps + 1) % master_config.checkpointing["save_period"]
                     == 0
+                    or (
+                        ft_save_period is not None
+                        and (total_steps + 1) % ft_save_period == 0
+                    )
                 )
                 # +1 because step is 0-indexed
                 # Check if timeout-based checkpointing is enabled in config.
@@ -808,6 +815,7 @@ def dpo_train(
             total_steps += 1
 
             if is_last_step:
+                checkpointer.shutdown()
                 if total_steps >= master_config.dpo.max_num_steps:
                     print(
                         "Max number of steps has been reached, stopping training early",
@@ -815,10 +823,17 @@ def dpo_train(
                     )
                 return DPOTrainStatus.COMPLETED
             if should_save_by_timeout:
+                checkpointer.shutdown()
                 print("Timeout has been reached, stopping training early", flush=True)
                 return DPOTrainStatus.TIMED_OUT
 
         current_epoch += 1
         current_step = 0  # Reset step counter for new epoch
 
+    # Flush the last checkpoint's background finalization on an epoch-bounded
+    # exit. Reaching max_num_epochs falls through the while loop and bypasses
+    # the inline shutdown() calls at the max_num_steps / timeout early returns,
+    # so without this the daemon finalization thread could be killed before the
+    # final tmp_step_N is renamed.
+    checkpointer.shutdown()
     return DPOTrainStatus.COMPLETED

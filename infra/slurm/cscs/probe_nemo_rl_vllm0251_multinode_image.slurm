@@ -62,6 +62,7 @@ unset LD_PRELOAD
 
 srun \
   --mpi=pmix \
+  --cpu-bind=none \
   --environment="$CONTAINER_ENV" \
   --ntasks-per-node=1 \
   --gpus-per-node="$GPUS_PER_NODE" \

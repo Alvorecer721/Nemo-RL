@@ -44,7 +44,7 @@ jobs:
       comment_body: ${{ steps.check.outputs.comment_body }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
 
@@ -113,30 +113,8 @@ jobs:
               github_repo="$remote_url"
             fi
 
-            # The fork's v0.7.0 base pins Gym's v0.4.0 release branch, while
-            # upstream NeMo-RL moved back to Gym main. These exact commits
-            # intentionally diverge from a common ancestor; after this one-time
-            # migration, later Gym updates must fast-forward from the new pin.
-            if [[ "$submodule_path" = "3rdparty/Gym-workspace/Gym" \
-                  && "$target_commit" = "d67ad6611cfe21dbaeb301c59e59df32ce22ec50" \
-                  && "$current_commit" = "473f446f71ec7c1243eb1517fe2440a2b37fe68b" ]]; then
-              echo "✅ $submodule_name: approved v0.4.0 release-to-main migration"
-              changed=1
-              success_body+="$submodule_name: ✅ Approved v0.4.0 release-to-main migration"$'\n'
-
-            # The Apertus Bridge fork was rebuilt on the Bridge commit pinned by
-            # upstream NeMo-RL. The old fork pin and the rebuilt history diverge,
-            # so approve this exact one-time migration only. Later Bridge updates
-            # must fast-forward from the new pin.
-            elif [[ "$submodule_path" = "3rdparty/Megatron-Bridge-workspace/Megatron-Bridge" \
-                  && "$target_commit" = "be49de1cbe08974b28e3412129ef9a4117301fca" \
-                  && "$current_commit" = "535b7aa734347004663086fafa4efe160b5f36c7" ]]; then
-              echo "✅ $submodule_name: approved upstream-pin Apertus migration"
-              changed=1
-              success_body+="$submodule_name: ✅ Approved upstream-pin Apertus migration"$'\n'
-
             # Case 1: Same commit
-            elif [[ "$current_commit" = "$target_commit" ]]; then
+            if [[ "$current_commit" = "$target_commit" ]]; then
               echo "✅ $submodule_name: PR branch matches ${{ inputs.base_ref }} branch (same commit)"
               # No change, so don't add to changed count or comment
 
@@ -254,7 +232,7 @@ jobs:
     if: always() && needs.check.outputs.changed == '1'
     steps:
       - name: Create comment file
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             const fs = require('fs');
@@ -275,7 +253,7 @@ jobs:
             console.log('Comment body written to comment.txt');
 
       - name: Upload comment artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: submodule-check
           path: comment.txt

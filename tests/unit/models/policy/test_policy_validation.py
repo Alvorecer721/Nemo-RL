@@ -28,6 +28,13 @@ from nemo_rl.models.policy import PolicyConfig
 from nemo_rl.models.policy.lm_policy import Policy
 
 
+def test_shutdown_succeeds_before_worker_group_is_initialized(capsys) -> None:
+    policy = Policy.__new__(Policy)
+
+    assert policy.shutdown()
+    assert capsys.readouterr().out == ""
+
+
 @patch("nemo_rl.models.policy.lm_policy.ray.get")
 def test_async_save_finalization_submits_before_wait(mock_ray_get):
     """All worker RPCs are submitted before background waiting can begin."""

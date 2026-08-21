@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,7 +26,13 @@ class AbstractPolicyWorker:
     """Base class for policy workers with shared functionality."""
 
     def init_collective(
-        self, ip: str, port: int, world_size: int, *, train_world_size: int
+        self,
+        ip: str,
+        port: int,
+        world_size: int,
+        *,
+        train_world_size: int,
+        nccl_peer: str = "nemo",
     ) -> None:
         """Initialize the collective communication.
 
@@ -35,6 +41,7 @@ class AbstractPolicyWorker:
             port: Port for the process group
             world_size: Total world size (train_world_size + inference_world_size)
             train_world_size: Number of training workers (used in inference cluster)
+            nccl_peer: NCCL initialization protocol used by the inference workers
         """
         from nemo_rl.distributed.stateless_process_group import StatelessProcessGroup
 
@@ -42,7 +49,61 @@ class AbstractPolicyWorker:
             master_address=ip, port=port, rank=self.rank, world_size=world_size
         )
         device = torch.cuda.current_device()
-        self.model_update_group.init_nccl_communicator(device=device)
+        # Release unused cached allocator blocks before NCCL communicator
+        # initialization so transport buffers have sufficient device-memory headroom.
+        torch.cuda.empty_cache()
+        self.model_update_group.init_nccl_communicator(device=device, peer=nccl_peer)
+
+    def init_nccl_reshard_comm_group(
+        self,
+        pp_ips: list[str],
+        pp_ports: list[int],
+        pp_size: int,
+        my_pp_stage: int,
+        sub_world_size: int,
+        my_rank_in_group: int,
+    ) -> None:
+        """Bootstrap this train worker's nccl_reshard comm group.
+
+        One comm group per PP stage; each train worker joins exactly its own
+        stage's group (``pp_ips[my_pp_stage]`` / ``pp_ports[my_pp_stage]``).
+        Non-PP is simply ``pp_size == 1`` that contains all the train ranks.
+        """
+        from nemo_rl.distributed.stateless_process_group import StatelessProcessGroup
+
+        self.pp_comm_group = StatelessProcessGroup(
+            master_address=pp_ips[my_pp_stage],
+            port=pp_ports[my_pp_stage],
+            rank=my_rank_in_group,
+            world_size=sub_world_size,
+        )
+        device = torch.cuda.current_device()
+        # Free cached blocks so NCCL P2P buffers have headroom (see init_collective).
+        torch.cuda.empty_cache()
+        self.pp_comm_group.init_nccl_communicator(device=device)
+        self.my_pp_stage = my_pp_stage
+
+    def prepare_nccl_reshard_refit_info(
+        self,
+        train_parallelism: dict[str, int],
+        gen_parallelism: dict[str, int],
+        train_world_size: int,
+        gen_world_size: int,
+    ) -> dict[str, Any]:
+        """Prepare parameter metadata for NCCL reshard refit."""
+        # This is a placeholder implementation.
+        # Implementation should be located in each policy worker implementation.
+        raise NotImplementedError(
+            "prepare_nccl_reshard_refit_info is not implemented for this policy worker"
+        )
+
+    def nccl_reshard_refit(self, kv_scales: Optional[dict[str, float]] = None) -> None:
+        """Transfer policy weights with NCCL reshard refit."""
+        # This is a placeholder implementation.
+        # Implementation should be located in each policy worker implementation.
+        raise NotImplementedError(
+            "nccl_reshard_refit is not implemented for this policy worker"
+        )
 
     def is_alive(self) -> bool:
         """Check if the worker is alive."""

@@ -19,12 +19,14 @@ import torch
 from nemo_rl.algorithms.loss import (
     ClippedPGLossConfig,
     ClippedPGLossFn,
+    DistillationLossConfig,
     DistillationLossFn,
     DPOLossConfig,
     DPOLossFn,
     NLLLossFn,
     prepare_loss_input,
 )
+from nemo_rl.algorithms.loss.interfaces import MetricNormalizer
 from nemo_rl.algorithms.loss.loss_functions import CrossTokenizerDistillationLossFn
 from nemo_rl.algorithms.utils import calculate_kl, masked_mean
 from nemo_rl.algorithms.x_token.loss_utils import (
@@ -37,6 +39,7 @@ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.model_utils import (
     cp_load_balanced_to_contiguous,
     cp_shift_next,
+    vocab_parallel_gather_columns,
 )
 
 
@@ -2157,11 +2160,11 @@ def test_distillation_loss_different_settings(kl_type, zero_outside_topk):
     data, student_logits = setup_distillation_test_data()
 
     loss_fn = DistillationLossFn(
-        {
-            "kl_type": kl_type,
-            "mixed_kl_weight": 0.3,
-            "zero_outside_topk": zero_outside_topk,
-        }
+        DistillationLossConfig(
+            kl_type=kl_type,
+            mixed_kl_weight=0.3,
+            zero_outside_topk=zero_outside_topk,
+        )
     )
 
     loss_input, data = prepare_loss_input(student_logits, data, loss_fn)
@@ -2202,11 +2205,11 @@ def test_distillation_loss_topk_filtering(k, zero_outside_topk):
     data, student_logits = setup_distillation_test_data(topk=k)
 
     loss_fn = DistillationLossFn(
-        {
-            "kl_type": "forward",
-            "mixed_kl_weight": 0.5,
-            "zero_outside_topk": zero_outside_topk,
-        }
+        DistillationLossConfig(
+            kl_type="forward",
+            mixed_kl_weight=0.5,
+            zero_outside_topk=zero_outside_topk,
+        )
     )
 
     loss_input, data = prepare_loss_input(student_logits, data, loss_fn)
@@ -2240,11 +2243,11 @@ def test_distillation_loss_invalid_k_zero():
     data, student_logits = setup_distillation_test_data(topk=0)
 
     loss_fn = DistillationLossFn(
-        {
-            "kl_type": "forward",
-            "mixed_kl_weight": 0.5,
-            "zero_outside_topk": False,
-        }
+        DistillationLossConfig(
+            kl_type="forward",
+            mixed_kl_weight=0.5,
+            zero_outside_topk=False,
+        )
     )
 
     # This should raise a ValueError for k=0
@@ -2260,11 +2263,11 @@ def test_distillation_loss_gradient_flow():
     student_logits.requires_grad_(True)
 
     loss_fn = DistillationLossFn(
-        {
-            "kl_type": "forward",
-            "mixed_kl_weight": 0.5,
-            "zero_outside_topk": False,
-        }
+        DistillationLossConfig(
+            kl_type="forward",
+            mixed_kl_weight=0.5,
+            zero_outside_topk=False,
+        )
     )
 
     loss_input, data = prepare_loss_input(student_logits, data, loss_fn)
@@ -2292,11 +2295,11 @@ def test_distillation_loss_edge_cases():
     data, student_logits = setup_distillation_test_data()
 
     loss_fn = DistillationLossFn(
-        {
-            "kl_type": "forward",
-            "mixed_kl_weight": 0.5,
-            "zero_outside_topk": False,
-        }
+        DistillationLossConfig(
+            kl_type="forward",
+            mixed_kl_weight=0.5,
+            zero_outside_topk=False,
+        )
     )
 
     # Test with all-zero logits
@@ -2345,22 +2348,22 @@ def test_distillation_loss_edge_cases():
 def test_distillation_loss_fn_initialization():
     """Test DistillationLossFn initialization."""
     # Test with default values
-    default_config = {
-        "kl_type": "forward",
-        "mixed_kl_weight": 0.5,
-        "zero_outside_topk": False,
-    }
+    default_config = DistillationLossConfig(
+        kl_type="forward",
+        mixed_kl_weight=0.5,
+        zero_outside_topk=False,
+    )
     loss_fn = DistillationLossFn(default_config)
     assert loss_fn.kl_type == "forward"
     assert loss_fn.mixed_kl_weight == 0.5
     assert not loss_fn.zero_outside_topk
 
     # Test with custom values
-    custom_config = {
-        "kl_type": "reverse",
-        "mixed_kl_weight": 0.3,
-        "zero_outside_topk": True,
-    }
+    custom_config = DistillationLossConfig(
+        kl_type="reverse",
+        mixed_kl_weight=0.3,
+        zero_outside_topk=True,
+    )
     loss_fn = DistillationLossFn(custom_config)
     assert loss_fn.kl_type == "reverse"
     assert loss_fn.mixed_kl_weight == 0.3
@@ -2372,11 +2375,11 @@ def test_distillation_loss_fn_call():
     data, student_logits = setup_distillation_test_data()
 
     loss_fn = DistillationLossFn(
-        {
-            "kl_type": "forward",
-            "mixed_kl_weight": 0.5,
-            "zero_outside_topk": False,
-        }
+        DistillationLossConfig(
+            kl_type="forward",
+            mixed_kl_weight=0.5,
+            zero_outside_topk=False,
+        )
     )
 
     loss_input, data = prepare_loss_input(student_logits, data, loss_fn)
@@ -2677,3 +2680,245 @@ def test_cross_tokenizer_ce_respects_sample_mask(tmp_path):
     ce_single = loss_fn._compute_ce(logits[:1], data_single, gvt_single)
 
     assert torch.allclose(ce_masked, ce_single, atol=1e-6)
+
+
+# ── Metric-normalization advertisement (PR #2683) ─────────────────────────
+
+
+class TestMetricNormalizationAdvertisement:
+    """Losses advertise per-metric global denominators (MetricNormalizer)
+    built from the same flags that pick the denominators inside __call__."""
+
+    def test_default_grpo_config(self):
+        norms = ClippedPGLossFn(ClippedPGLossConfig()).metric_normalizations
+        # token_level_loss=True default → gradient normalizer is TOKENS
+        assert norms["loss"] is MetricNormalizer.TOKENS
+        assert norms["kl_penalty"] is MetricNormalizer.TOKENS
+        assert norms["sampling_importance_ratio"] is MetricNormalizer.TOKENS
+        for key in (
+            "probs_ratio",
+            "probs_ratio_clamped",
+            "token_mult_prob_error",
+            "gen_kl_error",
+            "policy_kl_error",
+            "js_divergence_error",
+            "approx_entropy",
+        ):
+            assert norms[key] is MetricNormalizer.TOKENS
+        # raw counts / local means / extrema are never rescaled
+        assert norms["num_valid_samples"] is MetricNormalizer.NONE
+        assert norms["positive_nll_loss"] is MetricNormalizer.NONE
+        assert norms["probs_ratio_min"] is MetricNormalizer.NONE
+        assert norms["probs_ratio_max"] is MetricNormalizer.NONE
+        # no TIS configured → the metric is never emitted, so not advertised
+        assert "is_oob_ratio" not in norms
+
+    def test_gspo_config_keys_on_sequence_flags(self):
+        norms = ClippedPGLossFn(
+            ClippedPGLossConfig(
+                token_level_loss=False,
+                sequence_level_importance_ratios=True,
+                use_importance_sampling_correction=True,
+            )
+        ).metric_normalizations
+        assert norms["loss"] is MetricNormalizer.SEQUENCES
+        assert norms["kl_penalty"] is MetricNormalizer.SEQUENCES
+        assert norms["sampling_importance_ratio"] is MetricNormalizer.SEQUENCES
+        # the always-token diagnostics do NOT follow loss_type
+        assert norms["token_mult_prob_error"] is MetricNormalizer.TOKENS
+        assert norms["probs_ratio"] is MetricNormalizer.TOKENS
+
+    def test_seq_mask_tis_with_token_level_loss(self):
+        """is_oob_ratio keys on the TIS type, not loss_type: seq-mask-tis
+        reduces it by global_valid_seqs even under a token-level loss
+        (PR #2683 review, F-SEQ)."""
+        norms = ClippedPGLossFn(
+            ClippedPGLossConfig(
+                token_level_loss=True,
+                use_importance_sampling_correction=True,
+                truncated_importance_sampling_type="seq-mask-tis",
+                truncated_importance_sampling_ratio=2.0,
+                truncated_importance_sampling_ratio_min=0.5,
+            )
+        ).metric_normalizations
+        assert norms["loss"] is MetricNormalizer.TOKENS
+        assert norms["is_oob_ratio"] is MetricNormalizer.SEQUENCES
+
+    def test_tis_under_sequence_level_loss_stays_tokens(self):
+        """The converse mismatch: tis normalizes is_oob_ratio by tokens even
+        when the loss itself is sequence-level."""
+        norms = ClippedPGLossFn(
+            ClippedPGLossConfig(
+                token_level_loss=False,
+                use_importance_sampling_correction=True,
+                truncated_importance_sampling_type="tis",
+                truncated_importance_sampling_ratio=2.0,
+            )
+        ).metric_normalizations
+        assert norms["loss"] is MetricNormalizer.SEQUENCES
+        assert norms["is_oob_ratio"] is MetricNormalizer.TOKENS
+
+    def test_nll_loss_advertises_counts_as_none(self):
+        norms = NLLLossFn().metric_normalizations
+        assert norms["loss"] is MetricNormalizer.TOKENS
+        assert norms["num_unmasked_tokens"] is MetricNormalizer.NONE
+        assert norms["num_valid_samples"] is MetricNormalizer.NONE
+
+
+def test_split_rescale_matches_sync_normalization():
+    """Metric parity of split-API rescale vs sync normalization.
+
+    Sync path: the loss runs per microbatch with the TRUE global valid
+    counts; downstream sums the per-microbatch fragments. Split path: the
+    loss runs per microbatch with placeholder global_valid_*=1 (raw sums)
+    and the trainer rescales the summed fragments by the advertised
+    denominator at finish. The two must agree for every advertised metric
+    (PR #2683 review, F-TESTGAP — metric half; uses seq-mask-tis + token
+    level loss so the flag-keyed F-SEQ metrics are exercised too).
+    """
+    torch.manual_seed(1234)
+    cfg = ClippedPGLossConfig(
+        token_level_loss=True,
+        use_importance_sampling_correction=True,
+        truncated_importance_sampling_type="seq-mask-tis",
+        truncated_importance_sampling_ratio=1.5,
+        truncated_importance_sampling_ratio_min=0.7,
+    )
+    loss_fn = ClippedPGLossFn(cfg)
+
+    batch_size, seq_len = 4, 8
+    microbatches = []
+    for _ in range(2):
+        data, *_ = _setup_clipped_pg_test_data(
+            batch_size=batch_size, seq_len=seq_len, device="cpu"
+        )
+        data["advantages"] = torch.randn(batch_size, seq_len)
+        data["prev_logprobs"] = -torch.rand(batch_size, seq_len)
+        data["generation_logprobs"] = -torch.rand(batch_size, seq_len)
+        data["reference_policy_logprobs"] = -torch.rand(batch_size, seq_len)
+        # drop one sample + a few tokens so the valid counts are non-trivial
+        data["sample_mask"] = torch.tensor([1, 1, 1, 0], dtype=torch.int64)
+        data["token_mask"][0, -2:] = 0
+        logprobs = -torch.rand(batch_size, seq_len - 1)
+        microbatches.append((data, logprobs))
+
+    total_seqs = sum(d["sample_mask"].sum() for d, _ in microbatches).float()
+    total_toks = sum(
+        (d["token_mask"][:, 1:] * d["sample_mask"].unsqueeze(-1)).sum()
+        for d, _ in microbatches
+    ).float()
+
+    # Sync style: true global counts per call; fragments summed downstream.
+    sync_totals: dict[str, float] = {}
+    for data, logprobs in microbatches:
+        _, metrics = loss_fn(logprobs, data, total_seqs, total_toks)
+        for key, value in metrics.items():
+            sync_totals[key] = sync_totals.get(key, 0.0) + value
+
+    # Split style: placeholder counts per call; raw sums rescaled at finish
+    # by the advertised denominator.
+    one = torch.tensor(1.0)
+    raw_totals: dict[str, float] = {}
+    for data, logprobs in microbatches:
+        _, metrics = loss_fn(logprobs, data, one, one)
+        for key, value in metrics.items():
+            raw_totals[key] = raw_totals.get(key, 0.0) + value
+
+    norms = loss_fn.metric_normalizations
+    for key, kind in norms.items():
+        if kind is MetricNormalizer.NONE:
+            continue  # extrema/counts: identical fragments in both styles
+        denom = total_toks if kind is MetricNormalizer.TOKENS else total_seqs
+        assert raw_totals[key] / denom.item() == pytest.approx(
+            sync_totals[key], rel=1e-5, abs=1e-7
+        ), f"metric {key!r} (normalizer={kind}) diverges between sync and split"
+    # counts pass through unchanged in both styles
+    assert raw_totals["num_valid_samples"] == pytest.approx(
+        sync_totals["num_valid_samples"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# vocab_parallel_gather_columns / _direct_topk_kl subset-softmax equivalence
+# (issue #3272): the K-subset renormalization cancels the full-vocab
+# partition function, so gathering K columns and softmaxing within the
+# subset must reproduce the previous full-vocab-log-softmax-then-renorm
+# form exactly — values and gradients.
+# ---------------------------------------------------------------------------
+
+
+def test_vocab_parallel_gather_columns_no_tp():
+    """No-TP path: plain column slice, upcast to fp32."""
+    logits = torch.randn(2, 3, 10, dtype=torch.bfloat16)
+    idx = torch.tensor([1, 4, 7])
+    out = vocab_parallel_gather_columns(logits, idx, tp_group=None)
+    assert out.dtype == torch.float32
+    torch.testing.assert_close(out, logits[..., idx].float())
+
+
+@pytest.mark.parametrize("temperature", [1.0, 2.0])
+def test_subset_softmax_matches_full_vocab_reference(temperature):
+    """log_softmax_K(logits[..., idx] / T) == full log_softmax -> slice ->
+    renorm, for both the forward value and the gradient w.r.t. logits."""
+    torch.manual_seed(0)
+    batch, seq, vocab, k = 2, 6, 64, 8
+    idx = torch.randperm(vocab)[:k].sort().values
+    base = torch.randn(batch, seq, vocab)
+
+    # reference: previous full-vocab formulation
+    ref_logits = base.clone().requires_grad_(True)
+    full = torch.log_softmax(ref_logits.float() / temperature, dim=-1)
+    gathered = full[..., idx]
+    ref = gathered - torch.logsumexp(gathered, dim=-1, keepdim=True)
+
+    # new: subset softmax over gathered columns
+    new_logits = base.clone().requires_grad_(True)
+    new = torch.log_softmax(
+        vocab_parallel_gather_columns(new_logits, idx, tp_group=None) / temperature,
+        dim=-1,
+    )
+
+    torch.testing.assert_close(new, ref, atol=1e-6, rtol=1e-6)
+    ref.sum().backward()
+    new.sum().backward()
+    torch.testing.assert_close(new_logits.grad, ref_logits.grad, atol=1e-6, rtol=1e-6)
+
+
+def test_vocab_parallel_gather_columns_tp_sharded(monkeypatch):
+    """TP path via an emulated 2-rank group: running the production code per
+    vocab shard and summing (what ``all_reduce(SUM)`` does — each column is
+    owned by exactly one rank) must reproduce the full-logits column slice,
+    and each shard's backward must receive exactly its own columns' grads."""
+    import nemo_rl.distributed.model_utils as mu
+
+    torch.manual_seed(7)
+    batch, seq, vocab, k = 2, 5, 32, 6
+    full = torch.randn(batch, seq, vocab)
+    idx = torch.randperm(vocab)[:k].sort().values
+    v_local = vocab // 2
+    shards = [
+        full[..., :v_local].clone().requires_grad_(True),
+        full[..., v_local:].clone().requires_grad_(True),
+    ]
+
+    outputs = []
+    for rank in (0, 1):
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda g=None: 2)
+        monkeypatch.setattr(torch.distributed, "get_rank", lambda g=None, _r=rank: _r)
+        monkeypatch.setattr(
+            torch.distributed, "all_reduce", lambda t, op=None, group=None: None
+        )
+        outputs.append(
+            mu.vocab_parallel_gather_columns(shards[rank], idx, tp_group=object())
+        )
+    combined = outputs[0] + outputs[1]
+
+    truth = full[..., idx].float()
+    torch.testing.assert_close(combined, truth)
+
+    grad_out = torch.randn_like(combined)
+    combined.backward(grad_out)
+    ref = full.clone().requires_grad_(True)
+    ref[..., idx].float().backward(grad_out)
+    torch.testing.assert_close(shards[0].grad, ref.grad[..., :v_local])
+    torch.testing.assert_close(shards[1].grad, ref.grad[..., v_local:])

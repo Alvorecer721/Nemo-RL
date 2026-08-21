@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import glob
 import os
 from pathlib import Path
@@ -23,7 +24,13 @@ from pydantic import TypeAdapter, ValidationError
 
 from nemo_rl.algorithms.distillation import MasterConfig as DistillationMasterConfig
 from nemo_rl.algorithms.dpo import MasterConfig as DPOMasterConfig
-from nemo_rl.algorithms.grpo import MasterConfig as GRPOMasterConfig
+from nemo_rl.algorithms.grpo import (
+    GRPOConfig,
+    RewardPenaltyConfig,
+)
+from nemo_rl.algorithms.grpo import (
+    MasterConfig as GRPOMasterConfig,
+)
 from nemo_rl.algorithms.ppo import MasterConfig as PPOMasterConfig
 from nemo_rl.algorithms.rm import MasterConfig as RMMasterConfig
 from nemo_rl.algorithms.sft import MasterConfig as SFTMasterConfig
@@ -164,6 +171,76 @@ def test_grpo_rejects_seq_logprob_error_threshold_below_one():
 
     with pytest.raises(AssertionError, match="greater than or equal to 1"):
         validate_config_section(config_dict, GRPOMasterConfig, config_file)
+
+
+def test_apertus_dpo_recipe_enables_supported_fused_linear_logprobs():
+    config_file = str(
+        configs_dir / "recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml"
+    )
+    config = load_config_with_inheritance(config_file)
+    megatron_cfg = OmegaConf.to_container(config.policy.megatron_cfg, resolve=True)
+
+    assert megatron_cfg["use_fused_linear_logprobs"] is True
+    assert megatron_cfg["fused_linear_logprobs_chunk_size"] == 256
+    assert "use_linear_ce_fusion_loss" not in megatron_cfg
+
+
+def test_multimodal_dedup_grpo_config_keys_default_off():
+    """Older recipes keep flag-off behavior without duplicating default keys."""
+    assert GRPOConfig.model_fields["deduplicate_multimodal_data"].default is False
+    assert GRPOConfig.model_fields["debug_payload_metrics"].default is False
+
+
+def test_nemo_gym_launcher_forwards_processor_to_both_trainers():
+    """Keep sync and async Gym image processing wired to the selected processor."""
+    launcher = Path(__file__).parents[2] / "examples/nemo_gym/run_grpo_nemo_gym.py"
+    tree = ast.parse(launcher.read_text())
+    trainer_calls = {
+        node.func.id: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"grpo_train", "async_grpo_train"}
+    }
+
+    assert trainer_calls.keys() == {"grpo_train", "async_grpo_train"}
+    for trainer_name, call in trainer_calls.items():
+        processor_keywords = [
+            keyword
+            for keyword in call.keywords
+            if keyword.arg == "processor"
+            and isinstance(keyword.value, ast.Name)
+            and keyword.value.id == "processor"
+        ]
+        assert len(processor_keywords) == 1, (
+            f"{trainer_name} must receive processor=processor"
+        )
+
+
+def test_reward_penalty_config_requires_explicit_unwanted_token_ids():
+    """Unwanted-token penalty requires explicit unwanted-token config.
+
+    Validates that token_ids.unwanted is present whenever penalize_unwanted_tokens
+    is enabled.
+    """
+    with pytest.raises(ValidationError, match="reward_penalties.token_ids.unwanted"):
+        RewardPenaltyConfig(penalize_unwanted_tokens=True)
+
+    with pytest.raises(ValidationError, match="reward_penalties.token_ids.unwanted"):
+        RewardPenaltyConfig(penalize_unwanted_tokens=True, token_ids=None)
+
+    with pytest.raises(ValidationError, match="reward_penalties.token_ids.unwanted"):
+        RewardPenaltyConfig(penalize_unwanted_tokens=True, token_ids={})
+
+    with pytest.raises(ValidationError, match="reward_penalties.token_ids.unwanted"):
+        RewardPenaltyConfig(penalize_unwanted_tokens=True, token_ids={"unwanted": []})
+
+    config = RewardPenaltyConfig(
+        penalize_unwanted_tokens=True,
+        token_ids={"unwanted": [2]},
+    )
+    assert config.token_ids is not None
+    assert config.token_ids.unwanted == [2]
 
 
 @pytest.mark.parametrize("config_file", config_files)

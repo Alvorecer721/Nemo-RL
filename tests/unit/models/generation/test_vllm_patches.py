@@ -46,6 +46,9 @@ from tests.unit.models.generation.vllm_patch_source_utils import (
 _TOOL_PARSER_SOURCE = "tool_parsers/utils.py"
 _PATCH_FN = "_patch_vllm_tool_parser_namespace_tool"
 _MARKER = "except ImportError:  # openai < 2.25.0 predates namespace tools"
+_RADIO_SOURCE = "model_executor/models/radio.py"
+_RADIO_PATCH_FN = "_patch_vllm_radio_layerscale_loader"
+_RADIO_MARKER = "initializer_factor = self.config.initializer_factor"
 
 
 @pytest.fixture
@@ -54,6 +57,15 @@ def patched_tool_parser_source(tmp_path, monkeypatch):
     copied = write_unpatched_copy(_TOOL_PARSER_SOURCE, _PATCH_FN, tmp_path / "utils.py")
     monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
     patches._patch_vllm_tool_parser_namespace_tool(logging.getLogger(__name__))
+    return copied
+
+
+@pytest.fixture
+def patched_radio_source(tmp_path, monkeypatch):
+    """The installed vLLM RADIO loader, unpatched then patched in tmp."""
+    copied = write_unpatched_copy(_RADIO_SOURCE, _RADIO_PATCH_FN, tmp_path / "radio.py")
+    monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
+    patches._patch_vllm_radio_layerscale_loader(logging.getLogger(__name__))
     return copied
 
 
@@ -104,6 +116,16 @@ def test_namespace_tool_stub_never_matches(patched_tool_parser_source):
         assert not isinstance(value, stub_cls)
 
 
+@pytest.mark.vllm
+def test_radio_layerscale_patch_anchor_still_matches_installed_vllm(
+    patched_radio_source,
+):
+    """Pin the vLLM 0.25.1 RADIO loader shape used by the source patch."""
+    content = patched_radio_source.read_text()
+    assert _RADIO_MARKER in content
+    assert "Skip layer-scale entries that vLLM doesn't use" not in content
+
+
 _FLASHINFER_AR_SOURCE = "distributed/device_communicators/flashinfer_all_reduce.py"
 _MNNVL_PATCH_FN = "_patch_vllm_invalid_mnnvl_workspace"
 _MNNVL_MARKER = 'backend == "mnnvl" and not getattr(workspace, "mc_ptr", 0)'
@@ -132,6 +154,41 @@ def test_invalid_mnnvl_workspace_patch_matches_installed_vllm(
     assert "workspace.destroy()" in content
     assert "return None" in content
     ast.parse(content)
+
+
+@pytest.mark.vllm
+def test_radio_layerscale_patch_loads_explicit_and_initializes_folded_weights(
+    patched_radio_source,
+):
+    content = patched_radio_source.read_text()
+    assert 'vllm_key = f"model.encoder.layers.{layer_idx}.{suffix}"' in content
+    assert 'name.endswith((".ls1", ".ls2"))' in content
+    assert "param.data.fill_(initializer_factor)" in content
+    assert "loaded_params.add(name)" in content
+
+
+@pytest.mark.vllm
+def test_radio_layerscale_patch_is_idempotent(patched_radio_source, monkeypatch):
+    before = patched_radio_source.read_text()
+    monkeypatch.setattr(
+        patches, "_get_vllm_file", lambda _relative: str(patched_radio_source)
+    )
+
+    patches._patch_vllm_radio_layerscale_loader(logging.getLogger(__name__))
+
+    assert patched_radio_source.read_text() == before
+
+
+def test_radio_layerscale_patch_warns_on_unknown_source(monkeypatch, tmp_path, caplog):
+    radio_source = tmp_path / "radio.py"
+    radio_source.write_text("class RadioModel:\n    pass\n")
+    monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(radio_source))
+
+    with caplog.at_level(logging.WARNING):
+        patches._patch_vllm_radio_layerscale_loader(logging.getLogger(__name__))
+
+    assert radio_source.read_text() == "class RadioModel:\n    pass\n"
+    assert "vLLM 0.25.1 source shape was not found" in caplog.text
 
 
 @pytest.mark.vllm
@@ -168,10 +225,15 @@ def test_source_compat_applies_all_interpreter_independent_patches(monkeypatch):
         "_patch_vllm_invalid_mnnvl_workspace",
         lambda _logger: applied.append("mnnvl"),
     )
+    monkeypatch.setattr(
+        patches,
+        "_patch_vllm_radio_layerscale_loader",
+        lambda _logger: applied.append("radio"),
+    )
 
     patches.ensure_vllm_source_compat()
 
-    assert applied == ["tool-parser", "mnnvl"]
+    assert applied == ["tool-parser", "radio", "mnnvl"]
 
 
 @pytest.mark.parametrize(
