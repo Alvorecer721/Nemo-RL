@@ -302,7 +302,23 @@ if [[ "$HERMETIC_CACHE_TAG" != "rebuild" ]]; then
         /opt/nemo-rl/uv.lock | cut -d' ' -f1)
     HERMETIC_VLLM_VERSION=$(podman run --rm \
         --entrypoint /opt/nemo_rl_venv/bin/python "$HERMETIC_IMAGE" -c \
-        'import tomllib; lock = tomllib.load(open("/opt/nemo-rl/uv.lock", "rb")); print(next(package["version"] for package in lock["package"] if package["name"] == "vllm"))')
+        '
+import re
+import tomllib
+
+lock = tomllib.load(open("/opt/nemo-rl/uv.lock", "rb"))
+nemo_rl = next(package for package in lock["package"] if package["name"] == "nemo-rl")
+requirement = next(
+    requirement
+    for requirement in nemo_rl["metadata"]["requires-dist"]
+    if requirement["name"] == "vllm"
+    and "platform_machine == '\''aarch64'\''" in requirement.get("marker", "")
+    and "extra == '\''vllm'\''" in requirement.get("marker", "")
+)
+match = re.search(r"/v([^/]+)/vllm-([^-]+)-", requirement["url"])
+assert match and match.group(1) == match.group(2), requirement
+print(match.group(2))
+')
     echo "Hermetic pyproject MD5: $HERMETIC_PYPROJECT_MD5"
     echo "Hermetic lock MD5:      $HERMETIC_LOCK_MD5"
     echo "Hermetic vLLM version:  $HERMETIC_VLLM_VERSION"
