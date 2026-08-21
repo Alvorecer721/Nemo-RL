@@ -118,6 +118,8 @@ THEORETICAL_TFLOPS = {
     ("NVIDIA H100 80GB HBM3", torch.float32): 989 / 2 if is_using_tf32() else 67.0,
     ("NVIDIA H200", torch.bfloat16): 1979 / 2,
     ("NVIDIA H200", torch.float32): 989 / 2 if is_using_tf32() else 67.0,
+    ("NVIDIA GH200 120GB", torch.bfloat16): 1979 / 2,
+    ("NVIDIA GH200 120GB", torch.float32): 989 / 2 if is_using_tf32() else 67.0,
     ("NVIDIA B200", torch.bfloat16): 4500 / 2,
     ("NVIDIA B200", torch.float32): 2200 / 2 if is_using_tf32() else 80.0,
     ("NVIDIA B300", torch.bfloat16): 4500 / 2,
