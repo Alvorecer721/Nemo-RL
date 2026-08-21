@@ -285,7 +285,15 @@ if [[ "$HERMETIC_CACHE_TAG" != "rebuild" ]]; then
     curl --fail --silent --show-error --output /dev/null \
         -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
         "http://${LOCAL_REGISTRY}/v2/cache/manifests/${HERMETIC_CACHE_TAG}"
-    podman pull --tls-verify=false "$HERMETIC_IMAGE"
+    pull_rc=0
+    podman pull --tls-verify=false "$HERMETIC_IMAGE" || pull_rc=$?
+    if ((pull_rc != 0)); then
+        # Podman can report a post-copy cleanup failure after it has already
+        # written a complete manifest into the allocation-local graph. Only
+        # accept that case when Podman itself confirms the image is usable.
+        podman image exists "$HERMETIC_IMAGE" || exit "$pull_rc"
+        echo "Podman pull exited $pull_rc after materializing $HERMETIC_IMAGE; continuing with the verified local image" >&2
+    fi
     HERMETIC_PYPROJECT_MD5=$(podman run --rm \
         --entrypoint /usr/bin/md5sum "$HERMETIC_IMAGE" \
         /opt/nemo-rl/pyproject.toml | cut -d' ' -f1)
@@ -295,9 +303,21 @@ if [[ "$HERMETIC_CACHE_TAG" != "rebuild" ]]; then
     HERMETIC_VLLM_VERSION=$(podman run --rm \
         --entrypoint /opt/nemo_rl_venv/bin/python "$HERMETIC_IMAGE" -c \
         'import tomllib; lock = tomllib.load(open("/opt/nemo-rl/uv.lock", "rb")); print(next(package["version"] for package in lock["package"] if package["name"] == "vllm"))')
-    [[ "$HERMETIC_PYPROJECT_MD5" == "1e3fcef485b5ebf9d48deec104110d64" ]] # pragma: allowlist secret
-    [[ "$HERMETIC_LOCK_MD5" == "3b2857b69fafc927ad8d2183b176fa79" ]] # pragma: allowlist secret
-    [[ "$HERMETIC_VLLM_VERSION" == "$VLLM_VERSION" ]]
+    echo "Hermetic pyproject MD5: $HERMETIC_PYPROJECT_MD5"
+    echo "Hermetic lock MD5:      $HERMETIC_LOCK_MD5"
+    echo "Hermetic vLLM version:  $HERMETIC_VLLM_VERSION"
+    [[ "$HERMETIC_PYPROJECT_MD5" == "1e3fcef485b5ebf9d48deec104110d64" ]] || {
+        echo "Hermetic pyproject.toml does not match the pinned digest" >&2
+        exit 1
+    } # pragma: allowlist secret
+    [[ "$HERMETIC_LOCK_MD5" == "3b2857b69fafc927ad8d2183b176fa79" ]] || {
+        echo "Hermetic uv.lock does not match the pinned digest" >&2
+        exit 1
+    } # pragma: allowlist secret
+    [[ "$HERMETIC_VLLM_VERSION" == "$VLLM_VERSION" ]] || {
+        echo "Hermetic vLLM version does not match $VLLM_VERSION" >&2
+        exit 1
+    }
 
     BUILD_DOCKERFILE="$PODMAN_STORAGE_BASE/Dockerfile.release"
     sed "s|^FROM hermetic AS release$|FROM ${HERMETIC_IMAGE} AS release|" \
