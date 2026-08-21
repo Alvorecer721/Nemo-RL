@@ -37,6 +37,10 @@ from nemo_rl.algorithms.sft import MasterConfig as SFTMasterConfig
 from nemo_rl.algorithms.xtoken_off_policy_distillation import (
     MasterConfig as XTokenOffPolicyDistillationMasterConfig,
 )
+from nemo_rl.distributed.virtual_cluster import (
+    DEFAULT_GYM_PORT_RANGE_HIGH,
+    DEFAULT_GYM_PORT_RANGE_LOW,
+)
 from nemo_rl.evals.eval import MasterConfig as EvalMasterConfig
 from nemo_rl.utils.config import (
     load_config_with_inheritance,
@@ -183,6 +187,19 @@ def test_apertus_dpo_recipe_enables_supported_fused_linear_logprobs():
     assert megatron_cfg["use_fused_linear_logprobs"] is True
     assert megatron_cfg["fused_linear_logprobs_chunk_size"] == 256
     assert "use_linear_ce_fusion_loss" not in megatron_cfg
+
+
+def test_apertus_gym_recipe_uses_reserved_gym_port_band():
+    config_file = str(
+        configs_dir / "recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-gym.yaml"
+    )
+    config = load_config_with_inheritance(config_file)
+    gym_cfg = OmegaConf.to_container(config.env.nemo_gym, resolve=True)
+    port_range_low = gym_cfg.get("port_range_low", DEFAULT_GYM_PORT_RANGE_LOW)
+    port_range_high = gym_cfg.get("port_range_high", DEFAULT_GYM_PORT_RANGE_HIGH)
+
+    assert DEFAULT_GYM_PORT_RANGE_LOW <= port_range_low < port_range_high
+    assert port_range_high <= DEFAULT_GYM_PORT_RANGE_HIGH
 
 
 def test_multimodal_dedup_grpo_config_keys_default_off():
