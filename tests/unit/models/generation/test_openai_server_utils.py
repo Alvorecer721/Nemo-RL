@@ -11,11 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for the shared on-policy prefix splice used by the vLLM/TRT-LLM OpenAI servers."""
+"""Tests for the shared on-policy prefix splice used by OpenAI-compatible servers."""
 
 import pytest
 
-from nemo_rl.models.generation.openai_server_utils import replace_prefix_tokens
+from nemo_rl.models.generation.openai_server_utils import (
+    load_generation_eos_token_ids,
+    replace_prefix_tokens,
+)
+
+
+def test_load_generation_eos_token_ids_supports_multiple_ids(monkeypatch):
+    class _GenerationConfig:
+        eos_token_id = [2, 17, 19]
+
+    monkeypatch.setattr(
+        "transformers.GenerationConfig.from_pretrained",
+        lambda model_path: _GenerationConfig(),
+    )
+
+    assert load_generation_eos_token_ids("model-path") == [2, 17, 19]
 
 
 def test_replace_prefix_tokens_empty_model_prefix_returns_template():
@@ -73,6 +88,40 @@ def test_replace_prefix_tokens_tokenizer_without_eos_raises():
             template_prefix_token_ids=[1, 2],
             template_token_ids=[1, 2],
         )
+
+
+def test_replace_prefix_tokens_accepts_generation_config_eos_without_tokenizer_eos():
+    """Model-defined turn terminators are sufficient when tokenizer EOS is unset."""
+
+    class _T:
+        eos_token_id = None
+
+    result = replace_prefix_tokens(
+        tokenizer=_T(),
+        model_prefix_token_ids=[100, 17],
+        template_prefix_token_ids=[9, 17],
+        template_token_ids=[9, 17, 77, 88],
+        eos_token_ids=[17, 19],
+    )
+
+    assert result == [100, 17, 77, 88]
+
+
+def test_replace_prefix_tokens_counts_all_generation_config_eos_ids():
+    """Mixed valid terminators retain the correct multi-turn splice boundary."""
+
+    class _T:
+        eos_token_id = 2
+
+    result = replace_prefix_tokens(
+        tokenizer=_T(),
+        model_prefix_token_ids=[100, 17],
+        template_prefix_token_ids=[9, 2, 10, 17],
+        template_token_ids=[9, 2, 10, 17, 77, 88],
+        eos_token_ids=[2, 17, 19],
+    )
+
+    assert result == [100, 17, 77, 88]
 
 
 def test_replace_prefix_tokens_uses_last_eos_in_template_prefix():
