@@ -55,6 +55,7 @@ printf 'batch_host=%s\nrun_dir=%s\ncontainer_env=%s\n' \
 unset LD_PRELOAD
 srun \
   --mpi=pmix \
+  --cpu-bind=none \
   --environment="$CONTAINER_ENV" \
   --ntasks=1 \
   --gpus-per-task="$GPUS_PER_NODE" \

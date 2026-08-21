@@ -72,6 +72,7 @@ unset LD_PRELOAD
 
 srun \
   --mpi=pmix \
+  --cpu-bind=none \
   --environment="$CONTAINER_ENV" \
   --ntasks=1 \
   --gpus-per-task=4 \
