@@ -108,12 +108,14 @@ BUILD_INPUTS_SHA256=$(
 SOURCE_ID="${SOURCE_REV}-${BUILD_INPUTS_SHA256:0:12}"
 IMAGE="nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
 SQSH_PATH="${OUTPUT_DIR}/nemo-rl-apertus-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
-generate_build_fingerprint() {
+generate_hermetic_cache_fingerprint() {
     python tools/generate_fingerprint.py
     printf '\nbuild_trtllm=%s\n' "$BUILD_TRTLLM"
 }
-BUILD_FINGERPRINT_B64=$(generate_build_fingerprint | base64 -w0)
-CURRENT_FINGERPRINT_SHA256=$(generate_build_fingerprint | sha256sum | cut -d' ' -f1)
+# The runtime version check expects this file to contain exactly one JSON
+# document. BUILD_TRTLLM still participates in the separate hermetic cache key.
+BUILD_FINGERPRINT_B64=$(python tools/generate_fingerprint.py | base64 -w0)
+CURRENT_FINGERPRINT_SHA256=$(generate_hermetic_cache_fingerprint | sha256sum | cut -d' ' -f1)
 BUILD_TARGET=release
 if [[ "$HERMETIC_CACHE_TAG" == "rebuild" ]]; then
     BUILD_TARGET=hermetic
