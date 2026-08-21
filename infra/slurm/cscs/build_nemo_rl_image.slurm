@@ -59,8 +59,8 @@ esac
 # Podman's named-context identity bug that otherwise invalidates uv.lock when
 # an unrelated application source file changes. Set to "rebuild" only when
 # intentionally changing dependencies.
-HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-a25e913799d0e2bf6eb1cdc477b9cd97a3027f9e038bbc0fd30eae5dfb8595db}
-HERMETIC_FINGERPRINT_SHA256=aea5963c8cb4a2371fb7b05b6ea1b2ad8f419ce208c688ab7d9e63949071b569
+HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-f189ec651a8a976671a1bcc77d3487000999acde233786f8467ce759a08f6d52}
+HERMETIC_FINGERPRINT_SHA256=f189ec651a8a976671a1bcc77d3487000999acde233786f8467ce759a08f6d52
 # Use an explicit allocation-local store so the launcher does not depend on a
 # login-node containers/storage.conf. Large release layers are bounded in the
 # Dockerfile so they fit this node-local tmpfs.
@@ -295,8 +295,8 @@ if [[ "$HERMETIC_CACHE_TAG" != "rebuild" ]]; then
     HERMETIC_VLLM_VERSION=$(podman run --rm \
         --entrypoint /opt/nemo_rl_venv/bin/python "$HERMETIC_IMAGE" -c \
         'import tomllib; lock = tomllib.load(open("/opt/nemo-rl/uv.lock", "rb")); print(next(package["version"] for package in lock["package"] if package["name"] == "vllm"))')
-    [[ "$HERMETIC_PYPROJECT_MD5" == "97ef0774da410409aadeb5cb9abc73a2" ]] # pragma: allowlist secret
-    [[ "$HERMETIC_LOCK_MD5" == "f15bff1a3d93527478961a86c99efc14" ]] # pragma: allowlist secret
+    [[ "$HERMETIC_PYPROJECT_MD5" == "1e3fcef485b5ebf9d48deec104110d64" ]] # pragma: allowlist secret
+    [[ "$HERMETIC_LOCK_MD5" == "3b2857b69fafc927ad8d2183b176fa79" ]] # pragma: allowlist secret
     [[ "$HERMETIC_VLLM_VERSION" == "$VLLM_VERSION" ]]
 
     BUILD_DOCKERFILE="$PODMAN_STORAGE_BASE/Dockerfile.release"
