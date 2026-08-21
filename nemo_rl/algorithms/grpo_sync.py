@@ -53,6 +53,7 @@ from nemo_rl.algorithms.grpo import (
     _log_mixed_rewards_and_advantages_information,
     _placeholder_seq_logprob_error_metrics,
     _policy_dtype,
+    _raise_if_grpo_batch_has_no_valid_tokens,
     _resolve_logprob_skip_flags,
     _should_log_nemo_gym_responses,
     _validation_early_stop_message,
@@ -880,6 +881,15 @@ def grpo_train_sync(
                             seq_logprob_error_threshold=seq_logprob_error_threshold,
                         )
                     )
+
+                _raise_if_grpo_batch_has_no_valid_tokens(
+                    BatchedDataDict(
+                        {
+                            "sample_mask": sample_mask,
+                            "token_mask": token_mask,
+                        }
+                    )
+                )
 
                 with timer.time("advantage_calculation"):
                     print("▶ Computing advantages...", flush=True)

@@ -1314,6 +1314,44 @@ def mock_sync_grpo_infrastructure(policy):
     return stack
 
 
+def test_sync_grpo_rejects_fully_masked_batch_before_tq_train(
+    mock_grpo_components,
+):
+    master_config = mock_grpo_components["master_config"]
+    master_config.grpo.max_num_steps = 1
+    master_config.grpo.val_period = 0
+    master_config.grpo.val_at_start = False
+    master_config.grpo.val_at_end = False
+    master_config.grpo.use_dynamic_sampling = False
+    master_config.data_plane = {"enabled": True}
+    policy = mock_grpo_components["policy"]
+
+    with (
+        mock_sync_grpo_infrastructure(policy),
+        patch(
+            "nemo_rl.algorithms.grpo_sync._compute_seq_logprob_error_metrics",
+            return_value=(torch.zeros(1), _mock_seq_logprob_error_result()),
+        ),
+        pytest.raises(RuntimeError, match="no valid training tokens"),
+    ):
+        grpo_train_sync(
+            policy,
+            _mock_policy_generation(),
+            mock_grpo_components["train_dataloader"],
+            mock_grpo_components["val_dataloader"],
+            mock_grpo_components["tokenizer"],
+            mock_grpo_components["loss_fn"],
+            mock_grpo_components["task_to_env"],
+            mock_grpo_components["val_task_to_env"],
+            mock_grpo_components["logger"],
+            mock_grpo_components["checkpointer"],
+            _initial_grpo_save_state(),
+            master_config,
+        )
+
+    policy.train_from_meta.assert_not_called()
+
+
 def test_async_grpo_propagates_main_loop_collector_failure(mock_grpo_components):
     """A fatal collector health result aborts the trainer and still cleans up."""
     master_config = mock_grpo_components["master_config"]
