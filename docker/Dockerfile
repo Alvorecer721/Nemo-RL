@@ -100,19 +100,38 @@ RUN GITHUB_ARTIFACTORY=github.com \
     && CMAKE_VERSION=4.0.3 \
     && ARCH=$(uname -m) \
     && CMAKE_INSTALLER="cmake-${CMAKE_VERSION}-linux-${ARCH}" \
-    && curl --retry 3 --retry-delay 2 -fsSL -o "${CMAKE_INSTALLER}.tar.gz" \
+    && CMAKE_ARCHIVE="/tmp/${CMAKE_INSTALLER}.tar.gz" \
+    && curl --retry 3 --retry-delay 2 -fsSL -o "${CMAKE_ARCHIVE}" \
         "https://${GITHUB_ARTIFACTORY}/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_INSTALLER}.tar.gz" \
-    && tar -xzf "${CMAKE_INSTALLER}.tar.gz" \
-    && cp -r "${CMAKE_INSTALLER}/bin/"* /usr/local/bin/ \
-    && cp -r "${CMAKE_INSTALLER}/share/"* /usr/local/share/ \
-    && rm -rf "${CMAKE_INSTALLER}" "${CMAKE_INSTALLER}.tar.gz"
+    && tar -xzf "${CMAKE_ARCHIVE}" -C /usr/local --strip-components=1 \
+        "${CMAKE_INSTALLER}/bin" "${CMAKE_INSTALLER}/share" \
+    && rm -f "${CMAKE_ARCHIVE}"
 
 # Install uv and python
 ARG UV_VERSION=0.11.28
 ARG PYTHON_VERSION=3.13.14
+ENV UV="/root/.local/bin/uv"
 ENV PATH="/root/.local/bin:$PATH"
-RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh && \
-    uv python install ${PYTHON_VERSION}
+RUN set -eu; \
+    uv_installer=/tmp/uv-install.sh; \
+    curl --retry 3 --retry-delay 2 -LsSf -o "$uv_installer" \
+        "https://astral.sh/uv/${UV_VERSION}/install.sh"; \
+    sh "$uv_installer"; \
+    rm -f "$uv_installer"; \
+    uv_version=$("$UV" --version); \
+    case "$uv_version" in \
+        "uv ${UV_VERSION}"|"uv ${UV_VERSION} "*) ;; \
+        *) echo "Expected uv ${UV_VERSION}, found ${uv_version}" >&2; exit 1 ;; \
+    esac; \
+    for attempt in 1 2 3; do \
+        "$UV" python install "${PYTHON_VERSION}" && break; \
+        if [ "$attempt" -eq 3 ]; then \
+            echo "Failed to install Python ${PYTHON_VERSION} after ${attempt} attempts" >&2; \
+            exit 1; \
+        fi; \
+        echo "Retrying Python ${PYTHON_VERSION} download (attempt $((attempt + 1))/3)" >&2; \
+        sleep 5; \
+    done
 
 # Disable usage stats by default for users who are sensitive to sharing usage.
 # Users are encouraged to enable if the wish.
@@ -217,27 +236,72 @@ fi
 # without evaluating that absent local source; the late layer runs uv lock
 # --check with the complete workspace before starting the TRT-LLM build.
 
-# Sync each training + inference backend one at a time (since they may conflict)
-# to warm the uv cache, then at the end just sync the default dependencies.
-# Do everything in one layer to prevent large layers.
-
-# The venv is symlinked to avoid bloating the layer size
+# Install the common environment first. Later backend-specific syncs use
+# disposable environments so their conflicting package sets warm the uv cache
+# without bloating image layers.
 UV_LINK_MODE=hardlink uv sync --frozen --no-install-project
+EOF
+
+# Commit backend cache additions independently. This bounds the mutable overlay
+# Podman must snapshot at once and makes expensive native builds reusable after
+# an interrupted build.
+RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
-    UV_LINK_MODE=hardlink uv sync --frozen --extra vllm --no-install-project
+    source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
+    uv venv --seed /tmp/nemo-rl-warm-vllm
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
+        uv sync --frozen --no-install-project
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
+        uv sync --frozen --extra vllm --no-install-project
+    rm -rf /tmp/nemo-rl-warm-vllm
 fi
+EOF
+RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
-    UV_LINK_MODE=hardlink uv sync --frozen --extra sglang --no-install-project
+    uv venv --seed /tmp/nemo-rl-warm-sglang
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
+        uv sync --frozen --no-install-project
+    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
+        uv sync --frozen --extra sglang --no-install-project
+    rm -rf /tmp/nemo-rl-warm-sglang
 fi
-uv sync --link-mode symlink --frozen --extra mcore --no-install-project
-uv sync --link-mode symlink --frozen --extra automodel --no-install-project
-uv sync --link-mode symlink --frozen --extra modelopt --no-install-project
+EOF
+RUN <<"EOF" bash -exu
+uv venv --seed /tmp/nemo-rl-warm-mcore
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
+    uv sync --frozen --no-install-project
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
+    uv sync --frozen --extra mcore --no-install-project
+rm -rf /tmp/nemo-rl-warm-mcore
+EOF
+RUN <<"EOF" bash -exu
+uv venv --seed /tmp/nemo-rl-warm-automodel
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
+    uv sync --frozen --no-install-project
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
+    uv sync --frozen --extra automodel --no-install-project
+rm -rf /tmp/nemo-rl-warm-automodel
+EOF
+RUN <<"EOF" bash -exu
+uv venv --seed /tmp/nemo-rl-warm-modelopt
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
+    uv sync --frozen --no-install-project
+UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
+    uv sync --frozen --extra modelopt --no-install-project
+rm -rf /tmp/nemo-rl-warm-modelopt
+EOF
+
+# Assemble the image's actual project environment from the now-warm cache.
+RUN <<"EOF" bash -exu
+source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
 uv sync --link-mode symlink --frozen --all-groups --no-install-project
 
 # Remove the aiohttp in this uv cache dir to fully address CVE GHSA-mqqc-3gqh-h2x8
 # The ray install will include the older aiohttp version in its cache
 find /root/.cache/uv -type d -path "*ray/_private/runtime_env/agent/thirdparty_files/aiohttp*" -exec rm -rf {} +
 
+mkdir -p /root/.cache/uv
+CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}" | md5sum | cut -c1-12)
 echo "${CACHE_KEY}" > /root/.cache/uv/.cache-key
 EOF
 
@@ -250,7 +314,7 @@ COPY --from=nemo-rl --link 3rdparty/TensorRT-LLM-workspace/ ./3rdparty/TensorRT-
 RUN --mount=type=ssh \
     --mount=type=bind,from=trtllm-ccache-seed,source=.,target=/tmp/trtllm-ccache-seed \
     --mount=type=cache,id=trtllm-wheel-cache-${TARGETARCH}-${BASE_IMAGE},from=trtllm-wheel-cache-seed,source=.,target=/root/.cache/trtllm-wheels,sharing=locked \
-    --mount=type=cache,id=trtllm-ccache-${TARGETARCH}-${BASE_IMAGE},target=/root/.cache/ccache,sharing=locked <<"EOF" bash -exu
+    --mount=type=cache,id=trtllm-ccache-${TARGETARCH}-${BASE_IMAGE},target=/root/.cache/ccache,sharing=locked <<"EOF" bash -exu -o pipefail
 # Lock/pyproject consistency is verified LATE here, for the whole image. The
 # dependency syncs above run --frozen (read-only on uv.lock: they neither update
 # nor validate it), so this uv lock --check is the ONLY place a stale lock is
@@ -284,8 +348,12 @@ echo "TRT-LLM cache state before build:"
 du -sh /root/.cache/uv /root/.cache/trtllm-wheels
 
 TRTLLM_SYNC_LOG=$(mktemp /tmp/trtllm-sync.XXXXXX.log)
+TRTLLM_BUILD_VENV=/tmp/nemo-rl-build-trtllm
+rm -rf "${TRTLLM_BUILD_VENV}"
+uv venv --seed "${TRTLLM_BUILD_VENV}"
 set +e
 UV_CACHE_DIR=/root/.cache/uv \
+    UV_PROJECT_ENVIRONMENT="${TRTLLM_BUILD_VENV}" \
     TRTLLM_WHEEL_CACHE_DIR=/root/.cache/trtllm-wheels \
     uv sync --verbose --link-mode symlink --locked --extra trtllm --no-install-project \
     2>&1 | tee "$TRTLLM_SYNC_LOG" \
@@ -297,18 +365,16 @@ if [[ "${TRTLLM_SYNC_STATUS}" -ne 0 ]]; then
     echo "[ERROR] Last 200 lines of captured uv output:" >&2
     tail -n 200 "$TRTLLM_SYNC_LOG" >&2
     rm -f "$TRTLLM_SYNC_LOG"
+    rm -rf "${TRTLLM_BUILD_VENV}"
     exit "${TRTLLM_SYNC_STATUS}"
 fi
 rm -f "$TRTLLM_SYNC_LOG"
+rm -rf "${TRTLLM_BUILD_VENV}"
 
 echo "TRT-LLM cache state after build:"
 du -sh /root/.cache/uv /root/.cache/trtllm-wheels
 
-# Restore the intended default environment in the same layer so the transient
-# TRT-LLM installation does not add a large intermediate venv layer.
-uv sync --link-mode symlink --locked --all-groups --no-install-project
-
-# The final sync can repopulate the shared uv cache, so repeat the security
+# The TRT-LLM sync can repopulate the shared uv cache, so repeat the security
 # cleanup performed in the preceding dependency layer.
 find /root/.cache/uv -type d -path "*ray/_private/runtime_env/agent/thirdparty_files/aiohttp*" -exec rm -rf {} +
 EOF
@@ -332,6 +398,12 @@ WORKDIR /opt/nemo-rl
 
 FROM hermetic AS release
 
+# Release-stage venv materialization should normally be cache-only, but direct
+# wheel sources can still be fetched if a prior warm was interrupted. Tolerate
+# transient registry/GitHub HTTP failures without publishing a partial image.
+ENV UV_HTTP_RETRIES=10
+ENV UV_HTTP_TIMEOUT=60
+
 # Re-declare build args for this stage
 ARG SKIP_VLLM_BUILD
 ARG SKIP_SGLANG_BUILD
@@ -343,16 +415,23 @@ ARG NATS_VERSION=v2.11.6
 # Space-separated config paths whose NeMo Gym venvs are prefetched into the image
 # (empty default = skip). Consumed by the gym prefetch RUN below.
 ARG NEMO_GYM_PREFETCH_CONFIGS=
+ARG BASE_IMAGE
 ARG NEMO_RL_COMMIT
+ARG NEMO_RL_BUILD_INPUTS_SHA256
+ARG NEMO_RL_BUILD_FINGERPRINT_B64
 ARG NVIDIA_BUILD_ID
 ARG NVIDIA_BUILD_REF
 ARG RC_DATE=00.00
 ARG TARGETARCH
 ENV NEMO_RL_COMMIT=${NEMO_RL_COMMIT:-<unknown>}
+ENV NEMO_RL_BUILD_INPUTS_SHA256=${NEMO_RL_BUILD_INPUTS_SHA256:-<unknown>}
 ENV NVIDIA_BUILD_ID=${NVIDIA_BUILD_ID:-<unknown>}
 ENV NVIDIA_BUILD_REF=${NVIDIA_BUILD_REF:-<unknown>}
 LABEL com.nvidia.build.id="${NVIDIA_BUILD_ID}"
 LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
+LABEL org.opencontainers.image.revision="${NEMO_RL_COMMIT}"
+LABEL org.opencontainers.image.base.name="${BASE_IMAGE}"
+LABEL org.opencontainers.image.source-inputs="${NEMO_RL_BUILD_INPUTS_SHA256}"
 
 ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
 ENV NEMO_RL_DYNAMO_VENV_DIR=/opt/dynamo_venv
@@ -385,31 +464,61 @@ EOF
 # Potentially not necessary if the repo is passed in as a complete repository (w/ full git history),
 # so do a quick check before trying to unshallow.
 RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
-ARG BASE_IMAGE
-RUN --mount=type=cache,id=trtllm-wheel-cache-${TARGETARCH}-${BASE_IMAGE},from=trtllm-wheel-cache-seed,source=.,target=/root/.cache/trtllm-wheels,sharing=locked <<"EOF" bash -exu
-NEGATIVE_FILTERS=""
-if [[ -n "${SKIP_VLLM_BUILD:-}" ]]; then
-    NEGATIVE_FILTERS="$NEGATIVE_FILTERS vllm"
-fi
-if [[ -n "${SKIP_SGLANG_BUILD:-}" ]]; then
-    NEGATIVE_FILTERS="$NEGATIVE_FILTERS sglang"
-fi
-if [[ -n "${SKIP_TRTLLM_BUILD:-}" ]]; then
-    NEGATIVE_FILTERS="$NEGATIVE_FILTERS trtllm"
-fi
-# Reuse the custom wheel produced by the hermetic stage. Normal uv artifacts
-# stay in /root/.cache/uv, which remains available to symlinked environments.
-# Mirror only the current content-addressed TRT-LLM wheel into the image so
-# runtime `uv run --extra trtllm` calls do not fall back to a source build.
-export TRTLLM_WHEEL_CACHE_DIR=/root/.cache/trtllm-wheels
-export TRTLLM_WHEEL_CACHE_MIRROR_DIR=/opt/trtllm_wheels
-export TRTLLM_REQUIRE_CACHED_WHEEL=1
-if [[ -n "$NEGATIVE_FILTERS" ]]; then
-    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py --negative-filters $NEGATIVE_FILTERS
-else
-    UV_LINK_MODE=symlink uv run nemo_rl/utils/prefetch_venvs.py
+# Commit the frozen Ray environments in bounded groups. A single layer for all
+# workers temporarily requires Podman to hold the working tree, compressed
+# blob, and unpacked result at once, which exceeds Clariden's node-local tmpfs.
+# The larger training and utility environments are committed one actor at a
+# time: even the five-environment DTensor group exceeds the temporary space
+# available while Podman packs and then unpacks a cache layer. Positive filters
+# match actor FQNs and retain every non-system environment in the current actor
+# registry.
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
+    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs vllm
 fi
 EOF
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
+    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs sglang
+fi
+EOF
+ARG BASE_IMAGE
+RUN --mount=type=cache,id=trtllm-wheel-cache-${TARGETARCH}-${BASE_IMAGE},from=trtllm-wheel-cache-seed,source=.,target=/root/.cache/trtllm-wheels,sharing=locked <<"EOF" bash -exu
+if [[ -z "${SKIP_TRTLLM_BUILD:-}" ]]; then
+    # Reuse the custom wheel produced by the hermetic stage. Normal uv
+    # artifacts stay in /root/.cache/uv, which remains available to symlinked
+    # environments. Mirror only the current content-addressed TRT-LLM wheel so
+    # runtime `uv run --extra trtllm` calls cannot fall back to a source build.
+    export TRTLLM_WHEEL_CACHE_DIR=/root/.cache/trtllm-wheels
+    export TRTLLM_WHEEL_CACHE_MIRROR_DIR=/opt/trtllm_wheels
+    export TRTLLM_REQUIRE_CACHED_WHEEL=1
+    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs trtllm
+fi
+EOF
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    dtensor_policy_worker.DTensorPolicyWorker
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    dtensor_policy_worker_v2.DTensorPolicyWorkerV2
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    dtensor_value_worker_v2.DTensorValueWorkerV2
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    dtensor_quant_policy_worker.DTensorQuantPolicyWorker
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    megatron_policy_worker.MegatronPolicyWorker
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    megatron_value_worker.MegatronValueWorker
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    megatron_quant_policy_worker.MegatronQuantPolicyWorker
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    async_utils.AsyncTrajectoryCollector
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    async_utils.ReplayBuffer
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    sync_rollout_actor.SyncRolloutActor
+RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    nemo_gym.NemoGym
 
 # Prefetch NeMo Gym internal venvs (gym servers like code_gen, math_with_judge, etc.)
 # into the image. Gated on NEMO_GYM_PREFETCH_CONFIGS (no-op by default). Runs after the
@@ -426,13 +535,20 @@ if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
         "${NEMO_GYM_VLLM_VERSION}" "${NEMO_GYM_VLLM_VERSION}" "${WHEEL_ARCH}" > "${GYM_VLLM_OVERRIDE}"
     UV_TORCH_BACKEND="${NEMO_GYM_CUDA}" \
     UV_OVERRIDE="${GYM_VLLM_OVERRIDE}" \
-    UV_LINK_MODE=symlink uv run python examples/nemo_gym/prefetch_venvs.py $NEMO_GYM_PREFETCH_CONFIGS
+    UV_LINK_MODE=symlink uv run --no-sync python examples/nemo_gym/prefetch_venvs.py $NEMO_GYM_PREFETCH_CONFIGS
     rm -f "${GYM_VLLM_OVERRIDE}"
 fi
 EOF
-# Generate container fingerprint for frozen environment support
-# Store outside /opt/nemo-rl to avoid being overwritten by user mounts
-RUN python tools/generate_fingerprint.py > /opt/nemo_rl_container_fingerprint
+# Generate the container fingerprint for frozen environment support. A local
+# tracked-files-only build context intentionally has no .git directory, so its
+# launcher supplies the fingerprint captured from the exact source commit.
+# Remote/default builds retain the existing in-container fallback.
+RUN if [[ -n "${NEMO_RL_BUILD_FINGERPRINT_B64:-}" ]]; then \
+        printf '%s' "${NEMO_RL_BUILD_FINGERPRINT_B64}" \
+            | base64 -d > /opt/nemo_rl_container_fingerprint; \
+    else \
+        python tools/generate_fingerprint.py > /opt/nemo_rl_container_fingerprint; \
+    fi
 
 # NOTICES.txt file points to where the OSS source code is archived
 RUN echo "This distribution includes open source which is archived at the following URL: https://opensource.nvidia.com/oss/teams/nvidia/nemo-rl/${RC_DATE}:linux-${TARGETARCH}/index.html" > NOTICES.txt && \
