@@ -44,17 +44,22 @@ grep -Fq "apertus70b_async_config_preflight=OK" "$APERTUS70B_RUN_DIR/config_pref
 
 if [[ "${APERTUS70B_PREFLIGHT_ONLY:-0}" == "1" ]]; then
   /opt/nemo_rl_venv/bin/python -m pytest -q \
-    tests/unit/algorithms/test_utils.py::test_get_tokenizer_forwards_tokenizer_kwargs
+    tests/unit/algorithms/test_utils.py::test_get_tokenizer_forwards_tokenizer_kwargs \
+    tests/unit/infra/test_validate_apertus70b_async_smoke.py
   /opt/nemo_rl_venv/bin/ruff check \
     infra/slurm/cscs/autoresearch/preflight_apertus70b_async_config.py \
+    infra/slurm/cscs/autoresearch/validate_apertus70b_async_smoke.py \
     nemo_rl/algorithms/utils.py \
     nemo_rl/models/policy/__init__.py \
-    tests/unit/algorithms/test_utils.py
+    tests/unit/algorithms/test_utils.py \
+    tests/unit/infra/test_validate_apertus70b_async_smoke.py
   /opt/nemo_rl_venv/bin/ruff format --check \
     infra/slurm/cscs/autoresearch/preflight_apertus70b_async_config.py \
+    infra/slurm/cscs/autoresearch/validate_apertus70b_async_smoke.py \
     nemo_rl/algorithms/utils.py \
     nemo_rl/models/policy/__init__.py \
-    tests/unit/algorithms/test_utils.py
+    tests/unit/algorithms/test_utils.py \
+    tests/unit/infra/test_validate_apertus70b_async_smoke.py
   echo "apertus70b_async_preflight_only=OK"
   exit 0
 fi

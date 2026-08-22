@@ -12,7 +12,8 @@ REQUIRED_TAGS = {
     "valid_tokens": "train/global_valid_toks",
     "grad_norm": "train/grad_norm",
     "loss": "train/loss",
-    "reward_std": "train/total_reward/stddev",
+    "reward_min": "train/min_total_reward",
+    "reward_max": "train/max_total_reward",
     "advantage_min": "train/advantages/min",
     "advantage_max": "train/advantages/max",
     "trajectory_age": "train/avg_trajectory_age",
@@ -51,19 +52,11 @@ def _values(
     return {step: latest[step][1] for step in sorted(expected_steps)}
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--log-dir", type=Path, required=True)
-    parser.add_argument("--run-log", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--source-head", required=True)
-    parser.add_argument("--image", type=Path, required=True)
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--steps", type=int, default=3)
-    args = parser.parse_args()
-
-    expected_steps = set(range(1, args.steps + 1))
-    scalars = _load_scalars(args.log_dir)
+def validate_smoke_metrics(
+    scalars: dict[str, list[tuple[float, int, float]]], *, steps: int
+) -> dict[str, dict[int, float]]:
+    """Validate per-step learning evidence using NeMo-RL's emitted scalar tags."""
+    expected_steps = set(range(1, steps + 1))
     metrics = {
         name: _values(scalars, tag, expected_steps)
         for name, tag in REQUIRED_TAGS.items()
@@ -78,19 +71,41 @@ def main() -> None:
     if not any(abs(value) > 1e-12 for value in metrics["loss"].values()):
         raise AssertionError(f"Every loss is zero: {metrics['loss']}")
     if not all(
+        math.isfinite(metrics["reward_min"][step])
+        and math.isfinite(metrics["reward_max"][step])
+        and metrics["reward_max"][step] - metrics["reward_min"][step] > 1e-8
+        for step in expected_steps
+    ):
+        raise AssertionError("Every step must contain a nonzero reward range")
+    if not all(
         math.isfinite(metrics["advantage_min"][step])
         and math.isfinite(metrics["advantage_max"][step])
         and metrics["advantage_max"][step] - metrics["advantage_min"][step] > 1e-8
         for step in expected_steps
     ):
         raise AssertionError("Every step must contain a nonzero advantage range")
-    if not any(value > 0 for value in metrics["reward_std"].values()):
-        raise AssertionError(f"No reward variation: {metrics['reward_std']}")
     if not all(
         math.isfinite(value) and 0 <= value <= 1
         for value in metrics["trajectory_age"].values()
     ):
         raise AssertionError(f"Invalid trajectory ages: {metrics['trajectory_age']}")
+    return metrics
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--log-dir", type=Path, required=True)
+    parser.add_argument("--run-log", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--source-head", required=True)
+    parser.add_argument("--image", type=Path, required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--steps", type=int, default=3)
+    args = parser.parse_args()
+
+    scalars = _load_scalars(args.log_dir)
+    metrics = validate_smoke_metrics(scalars, steps=args.steps)
+    expected_steps = set(range(1, args.steps + 1))
 
     run_text = args.run_log.read_text(encoding="utf-8", errors="replace")
     if (
