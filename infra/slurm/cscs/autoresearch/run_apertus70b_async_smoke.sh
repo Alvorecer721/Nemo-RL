@@ -62,6 +62,7 @@ PY
     tests/unit/infra/test_validate_apertus70b_async_smoke.py
   /opt/nemo_rl_venv/bin/ruff check \
     infra/slurm/cscs/autoresearch/preflight_apertus70b_async_config.py \
+    infra/slurm/cscs/autoresearch/probe_apertus70b_direct_hf_math.py \
     infra/slurm/cscs/autoresearch/validate_apertus70b_async_smoke.py \
     nemo_rl/algorithms/utils.py \
     nemo_rl/models/policy/__init__.py \
@@ -69,6 +70,7 @@ PY
     tests/unit/infra/test_validate_apertus70b_async_smoke.py
   /opt/nemo_rl_venv/bin/ruff format --check \
     infra/slurm/cscs/autoresearch/preflight_apertus70b_async_config.py \
+    infra/slurm/cscs/autoresearch/probe_apertus70b_direct_hf_math.py \
     infra/slurm/cscs/autoresearch/validate_apertus70b_async_smoke.py \
     nemo_rl/algorithms/utils.py \
     nemo_rl/models/policy/__init__.py \
