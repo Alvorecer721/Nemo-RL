@@ -760,6 +760,8 @@ Refer to `examples/configs/evals/eval.yaml` for a full list of parameters that c
 
 For detailed instructions on how to set up and launch NeMo RL on Slurm or Kubernetes clusters, please refer to the dedicated [Set Up Clusters](docs/cluster.md) documentation.
 
+On CSCS Clariden (GH200), start instead at the [Apertus quickstart](docs/apertus-quickstart.md) — clone-and-run against the shared prebuilt images, with Slurm submission details in `infra/slurm/cscs/README.md`.
+
 ## Tips and Tricks
 - If you forget to initialize the NeMo and Megatron submodules when cloning the NeMo-RL repository, you may run into an error like this:
 
