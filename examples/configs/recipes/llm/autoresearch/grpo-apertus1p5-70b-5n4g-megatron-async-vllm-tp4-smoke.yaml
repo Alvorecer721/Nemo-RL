@@ -1,0 +1,127 @@
+defaults: ../../../grpo_math_1B.yaml
+
+# Bounded end-to-end async-GRPO correctness gate for Apertus-1.5 70B on GH200.
+# Megatron training owns four nodes (TP4/PP4); a separate vLLM TP4 replica owns
+# the fifth node. The matched DPO topology study selected TP4/PP4 before this
+# experiment.
+grpo:
+  num_prompts_per_step: 4
+  num_generations_per_prompt: 8
+  use_dynamic_sampling: false
+  skip_reference_policy_logprobs_calculation: true
+  max_num_epochs: 1
+  max_num_steps: 3
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: 1
+    in_flight_weight_updates: true
+    recompute_kv_cache_after_weight_updates: false
+
+loss_fn:
+  reference_policy_kl_penalty: 0.0
+  use_importance_sampling_correction: true
+
+checkpointing:
+  enabled: false
+  checkpoint_dir: ${oc.env:APERTUS70B_RUN_DIR}/checkpoints
+
+policy:
+  model_name: ${oc.env:APERTUS70B_CKPT}
+  tokenizer:
+    name: ${oc.env:APERTUS70B_TOKENIZER}
+  train_global_batch_size: 32
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  max_total_sequence_length: 1024
+  logprob_chunk_size: 256
+  dtensor_cfg:
+    enabled: false
+  sequence_packing:
+    enabled: false
+  make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
+  optimizer: null
+  scheduler: null
+  megatron_cfg:
+    enabled: true
+    tensor_model_parallel_size: 4
+    pipeline_model_parallel_size: 4
+    context_parallel_size: 1
+    sequence_parallel: true
+    activation_checkpointing: true
+    use_fused_linear_logprobs: true
+    fused_linear_logprobs_chunk_size: 256
+    bias_activation_fusion: false
+    distributed_data_parallel_config:
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+    optimizer:
+      lr: 5.0e-7
+      min_lr: 5.0e-8
+      weight_decay: 0.0
+      use_precision_aware_optimizer: true
+    scheduler:
+      lr_warmup_iters: 2
+      lr_warmup_init: 5.0e-8
+  generation:
+    max_new_tokens: 512
+    temperature: 1.0
+    top_p: 1.0
+    refit_transport: nccl_reshard
+    colocated:
+      enabled: false
+      resources:
+        num_nodes: 1
+        gpus_per_node: 4
+    vllm_cfg:
+      tensor_parallel_size: 4
+      pipeline_parallel_size: 1
+      gpu_memory_utilization: 0.80
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      enforce_eager: false
+      use_tqdm: false
+      enable_vllm_metrics_logger: true
+      vllm_metrics_logger_interval: 0.5
+
+data:
+  _override_: true
+  max_input_seq_length: 512
+  shuffle: false
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: examples.custom_dataloader.glm51_local_dapo.LocalFormattedDAPOSmokeDataset
+    data_path: ${oc.env:APERTUS70B_DAPO_ARROW}
+    split_validation_size: 0.0
+    seed: ${grpo.seed}
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: math_hf_data_processor
+    env_name: math
+
+env:
+  math:
+    num_workers: 16
+    math_verify_impl: dapo_math_verify
+
+logger:
+  log_dir: ${oc.env:APERTUS70B_RUN_DIR}/tb
+  wandb_enabled: false
+  tensorboard_enabled: true
+  monitor_gpus: true
+  wandb:
+    project: nemo-rl-apertus
+    name: apertus1p5-70b-async-tp4pp4-train-vllm-tp4-rollout-smoke
+  gpu_monitoring:
+    collection_interval: 2
+    flush_interval: 2
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 5
+  segment_size: null
