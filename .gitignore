@@ -6,6 +6,7 @@
 *.tar
 *.tar.gz
 .venv
+.venv-test
 venv
 venvs
 __pycache__/
@@ -49,3 +50,15 @@ code_snapshots*/
 
 # Claude Code review memory (local only)
 .claude/review-memory/
+
+# pytest run artifacts (written by tests/unit/conftest.py)
+tests/unit/unit_results.json
+tests/unit/unit_results/
+logs/
+xielu-builds/
+
+# Local recovery and crash artifacts
+/.tmp/
+/core_nid*
+
+# Machine-local EDF for the custom image produced by the CSCS builder
