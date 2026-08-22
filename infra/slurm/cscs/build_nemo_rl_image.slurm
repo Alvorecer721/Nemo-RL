@@ -41,6 +41,12 @@ NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS:-90}
 # This Apertus production image is validated with vLLM. Keep TensorRT-LLM an
 # explicit opt-in until its GH200 source build has independent evidence.
 BUILD_TRTLLM=${BUILD_TRTLLM:-0}
+# Clariden launches the delivered SquashFS through Slurm/Pyxis/Enroot. It does
+# not run a nested container engine, so avoid the default arm64 Apptainer
+# source build and its anonymous GitHub dependency downloads. Set this to a
+# script name only when deliberately producing an image that needs the
+# upstream custom-setup layer.
+CUSTOM_SETUP_FNAME=${CUSTOM_SETUP_FNAME-}
 VLLM_VERSION=0.25.1
 # Pin the arm64 manifest used on Clariden rather than resolving a mutable NGC
 # tag differently on a later rebuild. Override only when deliberately updating
@@ -101,6 +107,7 @@ BUILD_INPUTS_SHA256=$(
         printf 'max_jobs\0%s\0' "$MAX_JOBS"
         printf 'nvte_cuda_archs\0%s\0' "$NVTE_CUDA_ARCHS"
         printf 'build_trtllm\0%s\0' "$BUILD_TRTLLM"
+        printf 'custom_setup_fname\0%s\0' "$CUSTOM_SETUP_FNAME"
         printf 'platform\0linux/arm64\0'
         printf 'hermetic_cache_tag\0%s\0' "$HERMETIC_CACHE_TAG"
     } | sha256sum | cut -d' ' -f1
@@ -110,10 +117,12 @@ IMAGE="nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
 SQSH_PATH="${OUTPUT_DIR}/nemo-rl-apertus-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
 generate_hermetic_cache_fingerprint() {
     python tools/generate_fingerprint.py
-    printf '\nbuild_trtllm=%s\n' "$BUILD_TRTLLM"
+    printf '\nbase_image=%s\nnvte_cuda_archs=%s\nbuild_trtllm=%s\ncustom_setup_fname=%s\n' \
+        "$BASE_IMAGE" "$NVTE_CUDA_ARCHS" "$BUILD_TRTLLM" "$CUSTOM_SETUP_FNAME"
 }
 # The runtime version check expects this file to contain exactly one JSON
-# document. BUILD_TRTLLM still participates in the separate hermetic cache key.
+# document. Image-construction choices participate only in the separate
+# hermetic cache key above.
 BUILD_FINGERPRINT_B64=$(python tools/generate_fingerprint.py | base64 -w0)
 CURRENT_FINGERPRINT_SHA256=$(generate_hermetic_cache_fingerprint | sha256sum | cut -d' ' -f1)
 BUILD_TARGET=release
@@ -127,6 +136,7 @@ echo "Base image:  $BASE_IMAGE"
 echo "Inputs SHA:  $BUILD_INPUTS_SHA256"
 echo "Hermetic:    $HERMETIC_CACHE_TAG"
 echo "TensorRT-LLM build: $BUILD_TRTLLM"
+echo "Custom setup: ${CUSTOM_SETUP_FNAME:-disabled}"
 echo "Podman tag:  $IMAGE"
 echo "Layer cache: $CACHE_DIR"
 echo "SquashFS:    $SQSH_PATH"
@@ -360,6 +370,7 @@ podman build \
     --build-arg "MAX_JOBS=$MAX_JOBS" \
     --build-arg "NVTE_CUDA_ARCHS=$NVTE_CUDA_ARCHS" \
     --build-arg "SKIP_TRTLLM_BUILD=$SKIP_TRTLLM_BUILD" \
+    --build-arg "CUSTOM_SETUP_FNAME=$CUSTOM_SETUP_FNAME" \
     --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
     --build-arg "NEMO_RL_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
     --build-arg "NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64" \
