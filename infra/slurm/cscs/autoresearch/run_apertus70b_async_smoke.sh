@@ -43,6 +43,18 @@ cd "$APERTUS70B_EXPERIMENT_DIR"
 grep -Fq "apertus70b_async_config_preflight=OK" "$APERTUS70B_RUN_DIR/config_preflight.log"
 
 if [[ "${APERTUS70B_PREFLIGHT_ONLY:-0}" == "1" ]]; then
+  /opt/nemo_rl_venv/bin/python -m pytest -q \
+    tests/unit/algorithms/test_utils.py::test_get_tokenizer_forwards_tokenizer_kwargs
+  /opt/nemo_rl_venv/bin/ruff check \
+    infra/slurm/cscs/autoresearch/preflight_apertus70b_async_config.py \
+    nemo_rl/algorithms/utils.py \
+    nemo_rl/models/policy/__init__.py \
+    tests/unit/algorithms/test_utils.py
+  /opt/nemo_rl_venv/bin/ruff format --check \
+    infra/slurm/cscs/autoresearch/preflight_apertus70b_async_config.py \
+    nemo_rl/algorithms/utils.py \
+    nemo_rl/models/policy/__init__.py \
+    tests/unit/algorithms/test_utils.py
   echo "apertus70b_async_preflight_only=OK"
   exit 0
 fi
