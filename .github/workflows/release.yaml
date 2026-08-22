@@ -61,7 +61,7 @@ concurrency:
 
 jobs:
   release:
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.repository == 'NVIDIA-NeMo/RL' || github.event_name == 'workflow_dispatch') }}
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@d98ebd557712eeff155f3ab8e411abab629f4b0c # v1.6.0
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
@@ -84,7 +84,7 @@ jobs:
 
   release-summary:
     needs: [release]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.repository == 'NVIDIA-NeMo/RL' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     steps:
       - name: Result
