@@ -14,10 +14,10 @@
 
 """Tests for the Apertus runtime guard (nemo_rl_apertus/runtime_guard.py).
 
-The guard keys off ``is_apertus_model`` in ``nemo_rl.models.huggingface.common`` (present only in our
-nemo_rl) and a static check that the Bridge's ``apertus_bridge.py`` defines the refit-emit override.
-Cases drive the guard's signals explicitly — the marker via monkeypatch, the Bridge via a temp
-apertus_bridge.py behind the path seam — rather than depending on which nemo_rl or Bridge is loaded.
+The guard keys off ``is_apertus_model`` in ``nemo_rl.models.huggingface.common``
+and the Bridge's explicit engine-owned xIELU state contract.  Cases drive both
+signals explicitly instead of depending on whichever runtime happens to be
+installed on the test host.
 """
 
 from pathlib import Path
@@ -27,15 +27,25 @@ import pytest
 from nemo_rl_apertus import runtime_guard
 from nemo_rl_apertus.runtime_guard import assert_apertus_runtime
 
-BRIDGE_WITH_REFIT_EMIT = """
-class ApertusBridge:
-    def maybe_modify_converted_hf_weight(self):
-        pass
-"""
+BRIDGE_WITH_ENGINE_OWNERSHIP = """
+APERTUS_XIELU_STATIC_STATE_OWNER = "engine"
 
-BRIDGE_WITHOUT_REFIT_EMIT = """
 class ApertusBridge:
     pass
+"""
+
+BRIDGE_WITH_LEGACY_REFIT_EMIT = """
+class ApertusBridge:
+    def maybe_modify_converted_hf_weight(self):
+        return None
+"""
+
+BRIDGE_WITH_CONFLICTING_OWNERSHIP = """
+APERTUS_XIELU_STATIC_STATE_OWNER = "engine"
+
+class ApertusBridge:
+    def maybe_modify_converted_hf_weight(self):
+        return None
 """
 
 
@@ -59,8 +69,8 @@ def _point_guard_at_bridge_source(
 
 
 def test_guard_passes_when_deltas_present(marker_present, monkeypatch, tmp_path):
-    """Marker present and the Bridge source defines the refit-emit (a healthy checkout) -> no-op."""
-    _point_guard_at_bridge_source(monkeypatch, tmp_path, BRIDGE_WITH_REFIT_EMIT)
+    """A matching NeMo-RL and engine-owned Bridge contract pass."""
+    _point_guard_at_bridge_source(monkeypatch, tmp_path, BRIDGE_WITH_ENGINE_OWNERSHIP)
     assert_apertus_runtime()  # must not raise
 
 
@@ -73,12 +83,23 @@ def test_guard_raises_when_marker_absent(monkeypatch):
         assert_apertus_runtime()
 
 
-def test_guard_raises_when_bridge_lacks_refit_emit(
+def test_guard_raises_when_bridge_lacks_static_state_contract(
     marker_present, monkeypatch, tmp_path
 ):
-    """Marker present but a stale Bridge without the refit-emit override -> loud RuntimeError."""
-    _point_guard_at_bridge_source(monkeypatch, tmp_path, BRIDGE_WITHOUT_REFIT_EMIT)
-    with pytest.raises(RuntimeError, match="refit-emit"):
+    """The old synthetic-weight Bridge has no engine-ownership marker."""
+    _point_guard_at_bridge_source(monkeypatch, tmp_path, BRIDGE_WITH_LEGACY_REFIT_EMIT)
+    with pytest.raises(RuntimeError, match="engine-owned"):
+        assert_apertus_runtime()
+
+
+def test_guard_rejects_conflicting_static_state_owners(
+    marker_present, monkeypatch, tmp_path
+):
+    """A marker cannot hide the legacy synthetic-weight override."""
+    _point_guard_at_bridge_source(
+        monkeypatch, tmp_path, BRIDGE_WITH_CONFLICTING_OWNERSHIP
+    )
+    with pytest.raises(RuntimeError, match="legacy xIELU synthetic-weight"):
         assert_apertus_runtime()
 
 

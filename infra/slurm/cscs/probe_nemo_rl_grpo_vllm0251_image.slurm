@@ -55,6 +55,21 @@ MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-64}
 NUM_PROMPTS=${NUM_PROMPTS:-4}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 GPUS_PER_NODE=${GPUS_PER_NODE:-4}
+MEGATRON_PP_SIZE=${MEGATRON_PP_SIZE:-1}
+MEGATRON_TP_SIZE=${MEGATRON_TP_SIZE:-2}
+
+for parallel_var in GPUS_PER_NODE MEGATRON_TP_SIZE MEGATRON_PP_SIZE; do
+  parallel_value=${!parallel_var}
+  if [[ ! "$parallel_value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$parallel_var must be a positive integer, got $parallel_value" >&2
+    exit 1
+  fi
+done
+MODEL_PARALLEL_SIZE=$((MEGATRON_TP_SIZE * MEGATRON_PP_SIZE))
+if (( GPUS_PER_NODE % MODEL_PARALLEL_SIZE != 0 )); then
+  echo "TP*PP=$MODEL_PARALLEL_SIZE must divide GPUS_PER_NODE=$GPUS_PER_NODE" >&2
+  exit 1
+fi
 
 [[ -r "$CONTAINER_ENV" ]] || {
   echo "Container EDF not found at CONTAINER_ENV=$CONTAINER_ENV" >&2
@@ -92,6 +107,8 @@ srun \
     export NUM_PROMPTS='"$NUM_PROMPTS"'
     export NUM_GENERATIONS='"$NUM_GENERATIONS"'
     export GPUS_PER_NODE='"$GPUS_PER_NODE"'
+    export MEGATRON_PP_SIZE='"$MEGATRON_PP_SIZE"'
+    export MEGATRON_TP_SIZE='"$MEGATRON_TP_SIZE"'
     RECIPE='"$RECIPE"'
 
     mkdir -p "$RUN_DIR" "$HF_HOME" "$HF_DATASETS_CACHE"
@@ -131,6 +148,11 @@ print(f"baked_nemo_rl={root}")
 print("baked_grpo_worker_venvs=OK")
 PY
 
+    if [[ "$RECIPE" == *apertus* ]]; then
+      /opt/nemo_rl_venv/bin/python -c \
+        "from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()"
+    fi
+
     /opt/nemo_rl_venv/bin/python -m examples.run_grpo \
       --config "$RECIPE" \
       grpo.max_num_steps="$MAX_STEPS" \
@@ -138,6 +160,8 @@ PY
       grpo.num_generations_per_prompt="$NUM_GENERATIONS" \
       grpo.seq_logprob_error_threshold=1.02 \
       policy.train_global_batch_size="$((NUM_PROMPTS * NUM_GENERATIONS))" \
+      policy.megatron_cfg.tensor_model_parallel_size="$MEGATRON_TP_SIZE" \
+      policy.megatron_cfg.pipeline_model_parallel_size="$MEGATRON_PP_SIZE" \
       policy.generation.max_new_tokens="$MAX_NEW_TOKENS" \
       "${extra_overrides[@]}" \
       logger.log_dir="$RUN_DIR/tb" \
