@@ -1,0 +1,4 @@
+runs/
+slurm_*.out
+slurm_*.err
+__pycache__/
