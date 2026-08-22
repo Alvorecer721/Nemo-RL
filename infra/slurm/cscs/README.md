@@ -149,10 +149,13 @@ sbatch --chdir="$PWD" infra/slurm/cscs/build_nemo_rl_image.slurm
 
 Useful environment overrides are `SCRATCH_ROOT`, `CACHE_DIR`, `OUTPUT_DIR`,
 `REGISTRY_IMAGE_ARCHIVE`, `BASE_IMAGE`, `MAX_JOBS`, `NVTE_CUDA_ARCHS`, and
-`PODMAN_STORAGE_BASE`. `HERMETIC_CACHE_TAG=rebuild` deliberately rebuilds all
-dependencies instead of resuming the pinned hermetic image. The default
-architecture is arm64/GH200, the NGC base is digest-pinned, and Transformer
-Engine is limited to `NVTE_CUDA_ARCHS=90`.
+`PODMAN_STORAGE_BASE`. `CUSTOM_SETUP_FNAME` is empty by default because CSCS
+launches SquashFS images through Pyxis/Enroot and does not need Apptainer
+inside the image; set it explicitly only for a nested-container use case.
+`HERMETIC_CACHE_TAG=rebuild` deliberately rebuilds all dependencies instead of
+resuming the pinned hermetic image. The default architecture is arm64/GH200,
+the NGC base is digest-pinned, and Transformer Engine is limited to
+`NVTE_CUDA_ARCHS=90`.
 
 The build has two different stores:
 
