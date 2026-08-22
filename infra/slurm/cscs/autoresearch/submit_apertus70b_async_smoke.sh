@@ -12,6 +12,7 @@ APERTUS70B_RUN_ROOT=${APERTUS70B_RUN_ROOT:-$EXPERIMENT_DIR/logs/apertus70b_async
 APERTUS70B_RUN_ID=${APERTUS70B_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)_$$}
 APERTUS70B_VENV_DIR=${APERTUS70B_VENV_DIR:-/opt/ray_venvs/apertus70b_async_e9416845542a}
 APERTUS70B_MEGATRON_CACHE=${APERTUS70B_MEGATRON_CACHE:-/iopsstor/scratch/cscs/xyixuan/.cache/huggingface/nemo_rl_apertus70b_perf_a2de}
+APERTUS70B_XIELU_SITE=${APERTUS70B_XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}
 APERTUS70B_RECIPE=$EXPERIMENT_DIR/examples/configs/recipes/llm/autoresearch/grpo-apertus1p5-70b-5n4g-megatron-async-vllm-tp4-smoke.yaml
 APERTUS70B_PREFLIGHT_ONLY=${APERTUS70B_PREFLIGHT_ONLY:-0}
 NODES=5
@@ -24,6 +25,7 @@ fi
 [[ -r "$IMAGE" ]] || { echo "Missing image: $IMAGE" >&2; exit 1; }
 [[ -r "$APERTUS70B_CKPT/model.safetensors.index.json" ]] || { echo "Missing checkpoint: $APERTUS70B_CKPT" >&2; exit 1; }
 [[ -r "$APERTUS70B_DAPO_ARROW" ]] || { echo "Missing dataset: $APERTUS70B_DAPO_ARROW" >&2; exit 1; }
+[[ -f "$APERTUS70B_XIELU_SITE/xielu/__init__.py" ]] || { echo "Missing CUDA xIELU site: $APERTUS70B_XIELU_SITE" >&2; exit 1; }
 [[ -r "$APERTUS70B_RECIPE" ]] || { echo "Missing recipe: $APERTUS70B_RECIPE" >&2; exit 1; }
 [[ -r "$RAY_SUB" ]] || { echo "Missing ray.sub: $RAY_SUB" >&2; exit 1; }
 mkdir -p "$APERTUS70B_RUN_ROOT"
@@ -35,6 +37,7 @@ export APERTUS70B_CKPT APERTUS70B_DAPO_ARROW APERTUS70B_EXPECTED_SOURCE_HEAD
 export APERTUS70B_EXPERIMENT_DIR=$EXPERIMENT_DIR APERTUS70B_IMAGE=$IMAGE
 export APERTUS70B_MEGATRON_CACHE APERTUS70B_PREFLIGHT_ONLY APERTUS70B_RECIPE
 export APERTUS70B_RUN_ID APERTUS70B_RUN_ROOT APERTUS70B_TOKENIZER APERTUS70B_VENV_DIR
+export APERTUS70B_XIELU_SITE
 export COMMAND=infra/slurm/cscs/autoresearch/run_apertus70b_async_smoke.sh
 export CONTAINER=$IMAGE
 export GPUS_PER_NODE=4
