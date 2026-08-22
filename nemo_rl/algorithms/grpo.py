@@ -395,6 +395,21 @@ def _validate_multimodal_dedup_capability(master_config: MasterConfig) -> None:
         )
 
 
+def _validate_async_dynamic_sampling_capability(master_config: MasterConfig) -> None:
+    """Reject dynamic sampling where the selected training loop ignores it."""
+    async_config = master_config.grpo.async_grpo
+    if (
+        async_config is not None
+        and async_config.enabled
+        and master_config.grpo.use_dynamic_sampling
+    ):
+        raise NotImplementedError(
+            "grpo.use_dynamic_sampling=true is not supported by async_grpo_train; "
+            "the async loop does not filter zero-variance prompt groups, so the "
+            "setting would be silently ignored. Disable it or use synchronous GRPO."
+        )
+
+
 def _needs_hf_refit_handshake(
     generation_backend: str,
     nccl_reshard_refit_enabled: bool,
@@ -504,6 +519,7 @@ def setup(
         generation_config = DynamoConfig.model_validate(generation_config).model_dump()
         policy_config["generation"] = generation_config
     _validate_multimodal_dedup_capability(master_config)
+    _validate_async_dynamic_sampling_capability(master_config)
 
     # Validation-only sampling is honored only on the NeMo-Gym vLLM rollout
     # path; everywhere else validation must sample exactly like training.
