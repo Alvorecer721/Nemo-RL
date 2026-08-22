@@ -44,10 +44,13 @@ from nemo_rl.algorithms.grpo import (
     _needs_hf_refit_handshake,
     _raise_if_reward_penalties_enabled_without_nemo_gym,
     _resolve_logprob_skip_flags,
+    _raise_if_grpo_batch_has_no_valid_tokens,
+    _raise_for_collector_error,
     _resolve_message_level_advantage_penalties,
     _save_async_replay_buffer_checkpoint,
     _validate_multimodal_dedup_capability,
     _validate_use_kl_in_reward_compat,
+    _start_async_trajectory_collection,
     aggregate_rollout_metrics,
     async_grpo_train,
     compute_and_apply_seq_logprob_error_masking,
@@ -197,6 +200,31 @@ def test_initial_policy_generation_stale() -> None:
     assert _initial_policy_generation_stale(generation, completed_steps=0)
 
 
+def test_raise_if_grpo_batch_has_no_valid_tokens_accepts_valid_batch():
+    train_data = {
+        "sample_mask": torch.tensor([1.0, 0.0]),
+        "token_mask": torch.tensor([[0.0, 1.0], [0.0, 1.0]]),
+    }
+
+    _raise_if_grpo_batch_has_no_valid_tokens(train_data)
+
+
+@pytest.mark.parametrize(
+    ("sample_mask", "token_mask"),
+    [
+        (torch.zeros(2), torch.ones(2, 3)),
+        (torch.ones(2), torch.zeros(2, 3)),
+    ],
+)
+def test_raise_if_grpo_batch_has_no_valid_tokens_rejects_empty_signal(
+    sample_mask, token_mask
+):
+    train_data = {"sample_mask": sample_mask, "token_mask": token_mask}
+
+    with pytest.raises(RuntimeError, match="no valid training tokens"):
+        _raise_if_grpo_batch_has_no_valid_tokens(train_data)
+
+
 @pytest.fixture
 def mock_grpo_components():
     # Create mock components
@@ -234,6 +262,12 @@ def mock_grpo_components():
                         "role": "user",
                         "content": "test",
                         "token_ids": torch.tensor([1, 2, 3]),
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "answer",
+                        "token_ids": torch.tensor([4, 5]),
+                        "generation_logprobs": torch.tensor([0.1, 0.2]),
                     },
                 ]
             ],
@@ -1321,6 +1355,37 @@ def test_async_grpo_propagates_main_loop_collector_failure(mock_grpo_components)
 
     mock_grpo_components["checkpointer"].shutdown.assert_called_once()
     mock_grpo_components["policy"].shutdown.assert_called_once()
+
+
+def test_start_async_trajectory_collection_waits_for_actor_startup():
+    collector = MagicMock()
+    dataloader = MagicMock(spec=StatefulDataLoader)
+    startup_ref = object()
+    collector.start_collection.remote.return_value = startup_ref
+
+    with patch("nemo_rl.algorithms.grpo.ray.get") as mock_get:
+        _start_async_trajectory_collection(collector, dataloader)
+
+    collector.start_collection.remote.assert_called_once_with(dataloader)
+    mock_get.assert_called_once_with(startup_ref)
+
+
+def test_raise_for_collector_error_preserves_original_diagnostics():
+    status = {
+        "running": False,
+        "data_exhausted": False,
+        "errored": True,
+        "error": "collection blew up\nCollection traceback:\ntrace details",
+        "inflight_workers": 0,
+    }
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _raise_for_collector_error(status, context="during buffer fill")
+
+    message = str(exc_info.value)
+    assert "during buffer fill" in message
+    assert "collection blew up" in message
+    assert "trace details" in message
 
 
 @pytest.mark.parametrize(

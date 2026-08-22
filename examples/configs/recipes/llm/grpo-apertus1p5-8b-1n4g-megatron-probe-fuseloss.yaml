@@ -1,0 +1,9 @@
+# GRPO probe + sequence_packing.fuse_loss: the packed fused-loss wrapper
+# (SequencePackingFusionLossWrapper, upstream-tested) — the fusion-class
+# memory win available to packed GRPO, since linear-CE fusion is asserted
+# incompatible with packing. Same gate as the base probe: gen-KL ~0.0003.
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe.yaml
+
+policy:
+  sequence_packing:
+    fuse_loss: true

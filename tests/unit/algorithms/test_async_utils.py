@@ -1333,6 +1333,32 @@ class TestAsyncTrajectoryCollector:
         assert status["errored"] is False
         assert status["running"] is False
 
+    def test_generation_limit_wakeup_is_not_lost(self):
+        """A target release between the predicate and wait must wake collection."""
+
+        class CheckedEvent(threading.Event):
+            def wait(self, timeout: float | None = None) -> bool:
+                assert self.is_set(), "generation-limit wakeup was lost"
+                return super().wait(timeout)
+
+        collector = self.create_local_collector()
+        self._prime_collection_loop(collector)
+        generation_event = CheckedEvent()
+        collector._generation_limit_cleared = generation_event
+
+        def release_target_during_check() -> bool:
+            generation_event.set()
+            return True
+
+        collector._should_pause_for_generation_limits = release_target_during_check
+        processed = []
+        collector._process_batch = lambda batch: processed.append(batch)
+        collector.dataloader = [{"b": 0}]
+
+        collector._collection_loop()
+
+        assert processed == [{"b": 0}]
+
     @pytest.mark.asyncio
     async def test_drain_payload_metrics_returns_collector_interval(self, monkeypatch):
         collector = self.create_local_collector()
@@ -1358,6 +1384,43 @@ class TestAsyncTrajectoryCollector:
         assert metrics["payload_bytes/nemo_gym_return/logical_media"] == 150
         assert metrics["payload_ratio/nemo_gym_return/physical_to_logical"] == 0.2
 
+    def test_collection_loop_drains_inflight_workers_before_natural_stop(self):
+        """The final scheduled prompt group may publish after dataloader EOF."""
+        collector = self.create_local_collector()
+        self._prime_collection_loop(collector)
+        worker_started = threading.Event()
+        allow_worker_to_finish = threading.Event()
+        published = []
+
+        def _process_batch(batch):
+            def _worker():
+                worker_started.set()
+                assert allow_worker_to_finish.wait(timeout=3)
+                if collector.running:
+                    published.append(batch)
+
+            worker = threading.Thread(target=_worker)
+            with collector._threads_lock:
+                collector._inflight_threads.add(worker)
+            worker.start()
+
+        collector._process_batch = _process_batch
+        collector.dataloader = [{"final": True}]
+        collection_thread = threading.Thread(target=collector._collection_loop)
+        collection_thread.start()
+
+        assert worker_started.wait(timeout=3)
+        assert collection_thread.is_alive()
+        assert collector.running is True
+
+        allow_worker_to_finish.set()
+        collection_thread.join(timeout=3)
+
+        assert not collection_thread.is_alive()
+        assert published == [{"final": True}]
+        assert collector.data_exhausted is True
+        assert collector.running is False
+
     def test_collection_loop_marks_errored_on_crash(self):
         """A crash sets errored (not data_exhausted) so driver guards fail fast."""
         collector = self.create_local_collector()
@@ -1378,6 +1441,9 @@ class TestAsyncTrajectoryCollector:
         assert status["error"] == "RuntimeError: collection blew up"
         assert status["data_exhausted"] is False
         assert status["running"] is False
+        assert "collection blew up" in status["error"]
+        with pytest.raises(RuntimeError, match="collection blew up"):
+            collector.check_health()
 
     def test_collection_loop_no_exhaustion_on_manual_stop(self):
         """Breaking out (running=False) must not set data_exhausted/errored."""
@@ -1765,7 +1831,8 @@ class TestAsyncTrajectoryCollector:
             FailingThread,
         )
 
-        collector._process_batch(FakeBatch())
+        with pytest.raises(RuntimeError, match="thread start failed"):
+            collector._process_batch(FakeBatch())
 
         assert target_weight not in collector._generating_targets
 
@@ -2366,8 +2433,8 @@ class TestAsyncTrajectoryCollector:
         assert collector._failure_count == 1
         collector.check_health()
 
-    def test_worker_shutdown_error_is_not_counted(self, monkeypatch):
-        """An in-flight worker stopping after exhaustion is not a generation failure."""
+    def test_worker_error_after_collection_stops_is_fatal(self, monkeypatch):
+        """Collector liveness must not suppress an in-flight worker failure."""
         collector = self.create_local_collector(max_generation_failures=0)
         collector.running = False
         collector.data_exhausted = True
@@ -2391,12 +2458,13 @@ class TestAsyncTrajectoryCollector:
             )
         )
 
-        assert collector._failure_count == 0
-        assert collector._fatal_error_message is None
-        assert not collector._generation_limit_cleared.is_set()
+        assert collector._failure_count == 1
+        assert collector._fatal_error_message is not None
+        assert collector._generation_limit_cleared.is_set()
         assert target_weight not in collector._generating_targets
         assert threading.current_thread() not in collector._inflight_threads
-        collector.check_health()
+        with pytest.raises(RuntimeError, match="Trajectory collection stopped"):
+            collector.check_health()
 
 
 class TestAsyncUtilsIntegration:

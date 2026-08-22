@@ -1,0 +1,59 @@
+defaults: ../../dpo.yaml
+dpo:
+  max_num_steps: 100000
+  seed: 5315
+  val_period: 200
+  val_global_batch_size: 128
+  val_at_start: false
+  reference_policy_kl_penalty: 25.0
+  preference_average_log_probs: true
+checkpointing:
+  checkpoint_dir: results/dpo-apertus1p5-8b-maxmin
+  save_period: 150
+  keep_top_k: 5
+data:
+  max_input_seq_length: 4096
+  dataset_name: BinaryPreferenceDataset
+  train:
+    dataset_name: BinaryPreferenceDataset
+    data_path: /capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-FD-nemo-rl-binpref-full/train.parquet
+  validation:
+    dataset_name: BinaryPreferenceDataset
+    data_path: /capstor/store/cscs/swissai/infra01/datasets/alignment/preference_datasets/MaxMin_Tr_3600-FD-nemo-rl-binpref
+policy:
+  model_name: /capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200  # pragma: allowlist secret
+  tokenizer:
+    name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official
+  train_micro_batch_size: 1
+  max_total_sequence_length: 4096
+  max_grad_norm: 20.0
+  make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
+  optimizer: null
+  dtensor_cfg:
+    enabled: false
+  megatron_cfg:
+    use_fused_linear_logprobs: true
+    fused_linear_logprobs_chunk_size: 256
+    distributed_data_parallel_config:
+      overlap_param_gather: false
+    enabled: true
+    sequence_parallel: false
+    bias_activation_fusion: false
+    optimizer:
+      lr: 1.0e-06
+      min_lr: 0.0
+      weight_decay: 0.0
+      adam_beta2: 0.999
+    scheduler:
+      lr_warmup_iters: 192
+      lr_decay_iters: 1921
+      lr_decay_style: linear
+logger:
+  wandb_enabled: true
+  tensorboard_enabled: true
+  log_dir: logs/dpo-apertus1p5-8b-maxmin
+  wandb:
+    project: apertus-nemo-rl
+    name: dpo-apertus1p5-8b-maxmin-beta25-lr1e-6
+cluster:
+  gpus_per_node: 4

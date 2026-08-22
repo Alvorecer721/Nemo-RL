@@ -45,6 +45,7 @@ from nemo_rl.environments.games.sliding_puzzle import (
     SlidingPuzzleMetadata,
 )
 from nemo_rl.environments.interfaces import EnvironmentReturn
+from nemo_rl.experience import rollouts as rollouts_module
 from nemo_rl.experience.metric_utils import calculate_single_metric, pct
 from nemo_rl.experience.rollout_manager import (
     AsyncNemoGymRolloutImpl,
@@ -52,6 +53,7 @@ from nemo_rl.experience.rollout_manager import (
 )
 from nemo_rl.experience.rollouts import (
     _add_multimodal_generation_payload,
+    _compute_generation_quality_metrics,
     _reattach_original_multimodal_payloads,
     async_generate_response_for_sample_turn,
     generate_responses_async,
@@ -448,6 +450,40 @@ def test_dedup_generation_keeps_policy_media_for_unconsumed_native_metadata():
 
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_async_rollout_propagates_generation_failure(monkeypatch):
+    """Generation RPC failures must reach the collector instead of becoming samples."""
+
+    async def _fail_generation(*args, **kwargs):
+        raise RuntimeError("generation RPC failed")
+
+    monkeypatch.setattr(
+        rollouts_module,
+        "async_generate_response_for_sample_turn",
+        _fail_generation,
+    )
+    input_batch = BatchedDataDict[DatumSpec](
+        {
+            "message_log": [[{"role": "user", "content": "prompt"}]],
+            "extra_env_info": [{}],
+            "task_name": ["test"],
+            "loss_multiplier": torch.ones(1),
+        }
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Error in sample 0 rollout: Generation failed for sample 0 on turn 1",
+    ):
+        run_async_multi_turn_rollout(
+            policy_generation=object(),
+            input_batch=input_batch,
+            tokenizer=object(),
+            task_to_env={},
+            max_seq_len=128,
+            max_rollout_turns=1,
+        )
 
 
 class TestCalculateSingleMetric:
@@ -1078,6 +1114,7 @@ base_vllm_test_config: VllmConfig = {
     "stop_token_ids": None,
     "stop_strings": None,
     "vllm_cfg": {
+        "sleep_level": 1,
         "async_engine": False,
         "precision": "bfloat16",
         "tensor_parallel_size": 1,
@@ -1635,7 +1672,13 @@ def test_native_rollout_groups_match_whole_batch(monkeypatch):
         captured_calls.append((sample_idx, initial_sample_state, kwargs))
         final_state = {
             "message_log": initial_sample_state["message_log"]
-            + [{"role": "assistant", "content": f"answer-{sample_idx}"}],
+            + [
+                {
+                    "role": "assistant",
+                    "content": f"answer-{sample_idx}",
+                    "token_ids": torch.arange(sample_idx + 2),
+                }
+            ],
             "extra_env_info": initial_sample_state["extra_env_info"],
             "task_name": initial_sample_state["task_name"],
             "total_reward": torch.tensor(float(sample_idx - 1)),
@@ -1913,6 +1956,7 @@ def test_run_async_nemo_gym_rollout_streams_complete_prompt_groups(monkeypatch):
 
     def _postprocess_group(**kwargs):
         assert kwargs["log_full_result_tables"] is False
+        assert kwargs["cot_token_ids"] == (10, 11)
         task_index = int(kwargs["nemo_gym_rows"][0]["_ng_task_index"])
         for result, original_log in zip(
             kwargs["results"], kwargs["input_batch"]["message_log"]
@@ -1981,6 +2025,7 @@ def test_run_async_nemo_gym_rollout_streams_complete_prompt_groups(monkeypatch):
             log_full_result_tables=False,
             deduplicate_multimodal_data=True,
             debug_payload_metrics=True,
+            cot_token_ids=(10, 11),
         ):
             results.append(result)
             if len(results) == 1:
@@ -2121,6 +2166,7 @@ def test_run_nemo_gym_rollout_sync_drains_entire_batch(monkeypatch):
         assert kwargs["log_full_result_tables"] is False
         assert kwargs["deduplicate_multimodal_data"] is True
         assert kwargs["debug_payload_metrics"] is True
+        assert kwargs["cot_token_ids"] == (10, 11)
         yield expected
 
     monkeypatch.setattr(rollouts_mod, "run_async_nemo_gym_rollout", fake_stream)
@@ -2134,6 +2180,7 @@ def test_run_nemo_gym_rollout_sync_drains_entire_batch(monkeypatch):
         log_full_result_tables=False,
         deduplicate_multimodal_data=True,
         debug_payload_metrics=True,
+        cot_token_ids=(10, 11),
     )
 
     assert actual is expected
@@ -2476,3 +2523,72 @@ def test_run_async_nemo_gym_rollout(
     1. In nemo_rl/experience/rollouts.py::run_async_nemo_gym_rollout, the sampling params are passed appropriately
     2. In nemo_rl/models/generation/vllm/vllm_worker_async.py::VllmAsyncGenerationWorker::_setup_vllm_server::create_chat_completion, the sampling params (like top_k) are set as appropriate
     """
+
+
+class TestComputeGenerationQualityMetrics:
+    """Unit tests for the shared TTR + CoT-length metric helper."""
+
+    def test_think_cases_and_truncation_split(self):
+        # ids: <think>=32, </think>=33
+        parts = [
+            [torch.tensor([5, 32, 10, 11, 12, 33, 40, 41])],
+            [torch.tensor([5, 32, 10, 11, 12, 13, 14])],
+            [torch.tensor([5, 32, 10, 11])],
+            [torch.tensor([5, 6, 7, 8])],
+        ]
+        truncated = [False, True, False, False]
+        metrics = _compute_generation_quality_metrics(
+            parts, truncated, cot_token_ids=(32, 33)
+        )
+        assert metrics["mean_cot_tokens_per_sample"] == pytest.approx(
+            (3 + 5 + 2 + 0) / 4
+        )
+        assert metrics["max_cot_tokens_per_sample"] == pytest.approx(5.0)
+        assert metrics["unclosed_think_rate"] == pytest.approx(2 / 4)
+        assert metrics["max_tokens_while_thinking_rate"] == pytest.approx(1 / 4)
+        assert metrics["eos_while_thinking_rate"] == pytest.approx(1 / 4)
+
+    def test_truncated_accepts_tensor_or_list(self):
+        # sync path passes a bool tensor; gym path passes a python list[bool].
+        parts = [[torch.tensor([32, 1, 2, 3])]]  # unclosed think
+        tensor_metrics = _compute_generation_quality_metrics(
+            parts, torch.tensor([True]), (32, 33)
+        )
+        list_metrics = _compute_generation_quality_metrics(parts, [True], (32, 33))
+        assert tensor_metrics["max_tokens_while_thinking_rate"] == pytest.approx(1.0)
+        assert list_metrics["max_tokens_while_thinking_rate"] == pytest.approx(1.0)
+
+    def test_ttr_and_cot_disabled(self):
+        parts = [[torch.tensor([7, 7, 7, 7])], [torch.tensor([1, 2, 3, 4])]]
+        metrics = _compute_generation_quality_metrics(
+            parts, [False, False], cot_token_ids=None
+        )
+        assert metrics["mean_type_token_ratio"] == pytest.approx((0.25 + 1.0) / 2)
+        assert "mean_cot_tokens_per_sample" not in metrics
+
+    def test_empty_and_multi_part_sample(self):
+        parts = [[], [torch.tensor([1, 2]), torch.tensor([2, 3])]]
+        metrics = _compute_generation_quality_metrics(parts, [False, False], (32, 33))
+        assert metrics["mean_type_token_ratio"] == pytest.approx((0.0 + 3 / 4) / 2)
+        assert metrics["unclosed_think_rate"] == pytest.approx(0.0)
+
+    def test_ngram_repetition_rate(self):
+        # n=3: windows {123,231,312,123} -> unique 3 / total 4 -> rate 0.25.
+        repetition_metrics = _compute_generation_quality_metrics(
+            [[torch.tensor([1, 2, 3, 1, 2, 3])]],
+            [False],
+            cot_token_ids=None,
+            ngram_size=3,
+        )
+        assert repetition_metrics["mean_ngram_repetition_rate"] == pytest.approx(0.25)
+        # n=4 (the default): block 1234 repeated -> windows 1234,2341,3412,4123,1234
+        # -> unique 4 / total 5 -> rate 0.2.
+        n4_metrics = _compute_generation_quality_metrics(
+            [[torch.tensor([1, 2, 3, 4, 1, 2, 3, 4])]], [False], cot_token_ids=None
+        )
+        assert n4_metrics["mean_ngram_repetition_rate"] == pytest.approx(0.2)
+        # all windows distinct -> rate 0.0.
+        distinct_metrics = _compute_generation_quality_metrics(
+            [[torch.tensor([1, 2, 3, 4, 5, 6])]], [False], cot_token_ids=None
+        )
+        assert distinct_metrics["mean_ngram_repetition_rate"] == pytest.approx(0.0)

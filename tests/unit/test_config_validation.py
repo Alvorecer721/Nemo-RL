@@ -163,6 +163,28 @@ def test_all_config_files_have_required_keys(config_file):
     validate_config_section(config_dict, master_config_class, config_file)
 
 
+def test_grpo_rejects_seq_logprob_error_threshold_below_one():
+    config_file = str(configs_dir / "grpo_math_1B.yaml")
+    config = load_config_with_inheritance(config_file)
+    config.grpo.seq_logprob_error_threshold = 0.02
+    config_dict = OmegaConf.to_container(config, resolve=True)
+
+    with pytest.raises(AssertionError, match="greater than or equal to 1"):
+        validate_config_section(config_dict, GRPOMasterConfig, config_file)
+
+
+def test_apertus_dpo_recipe_enables_supported_fused_linear_logprobs():
+    config_file = str(
+        configs_dir / "recipes/llm/dpo-apertus1p5-8b-maxmin-megatron.yaml"
+    )
+    config = load_config_with_inheritance(config_file)
+    megatron_cfg = OmegaConf.to_container(config.policy.megatron_cfg, resolve=True)
+
+    assert megatron_cfg["use_fused_linear_logprobs"] is True
+    assert megatron_cfg["fused_linear_logprobs_chunk_size"] == 256
+    assert "use_linear_ce_fusion_loss" not in megatron_cfg
+
+
 def test_multimodal_dedup_grpo_config_keys_default_off():
     """Older recipes keep flag-off behavior without duplicating default keys."""
     assert GRPOConfig.model_fields["deduplicate_multimodal_data"].default is False
@@ -312,3 +334,30 @@ def test_all_config_no_tp_size_accuracy_issues(config_file):
             f"Config file {config_file} has TP size >= 4 accuracy issues. "
             "Please set policy.train_micro_batch_size and policy.logprob_batch_size to be the same value."
         )
+
+
+@pytest.mark.parametrize("config_file", config_files)
+def test_metric_denylist_patterns_are_valid_globs(config_file):
+    """Every logger.metric_denylist entry is a clean fnmatch glob, not a typo that silently no-ops."""
+    config = load_config_with_inheritance(config_file)
+    config_dict = OmegaConf.to_container(config, resolve=True)
+    if not isinstance(config_dict, dict):
+        return
+    denylist = (config_dict.get("logger") or {}).get("metric_denylist")
+    if not denylist:
+        return
+    seen: set[str] = set()
+    for pat in denylist:
+        assert isinstance(pat, str) and pat, (
+            f"{config_file}: empty/non-string metric_denylist entry {pat!r}"
+        )
+        assert pat == pat.strip(), (
+            f"{config_file}: metric_denylist entry has surrounding whitespace: {pat!r}"
+        )
+        assert not any(c in pat for c in "()"), (
+            f"{config_file}: metric_denylist entry looks like a regex, not an fnmatch glob: {pat!r}"
+        )
+        assert pat not in seen, (
+            f"{config_file}: duplicate metric_denylist entry: {pat!r}"
+        )
+        seen.add(pat)

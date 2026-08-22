@@ -21,13 +21,11 @@ so no actual policy model is needed.
 """
 
 import argparse
-import os
 import sys
 
 import ray
 from omegaconf import OmegaConf
 
-from nemo_rl.distributed.ray_actor_environment_registry import get_actor_python_env
 from nemo_rl.distributed.virtual_cluster import init_ray
 from nemo_rl.environments.nemo_gym import (
     NemoGym,
@@ -36,7 +34,7 @@ from nemo_rl.environments.nemo_gym import (
     get_nemo_gym_venv_dir,
 )
 from nemo_rl.utils.config import load_config
-from nemo_rl.utils.venvs import create_local_venv_on_each_node
+from nemo_rl.utils.venvs import make_actor_runtime_env
 
 OmegaConf.register_new_resolver("mul", lambda a, b: a * b)
 
@@ -50,11 +48,9 @@ def prefetch_nemo_gym_venvs(config_paths: list[str]) -> None:
     """
     init_ray()
 
-    nemo_gym_py_exec = get_actor_python_env("nemo_rl.environments.nemo_gym.NemoGym")
-    if nemo_gym_py_exec.startswith("uv"):
-        nemo_gym_py_exec = create_local_venv_on_each_node(
-            nemo_gym_py_exec, "nemo_rl.environments.nemo_gym.NemoGym"
-        )
+    nemo_gym_runtime_env = make_actor_runtime_env(
+        "nemo_rl.environments.nemo_gym.NemoGym"
+    )
 
     succeeded = []
     failed = []
@@ -92,14 +88,7 @@ def prefetch_nemo_gym_venvs(config_paths: list[str]) -> None:
                 # Don't restart to surface any issue from a failed build.
                 "max_restarts": 0,
                 "max_task_retries": 0,
-                "runtime_env": {
-                    "py_executable": nemo_gym_py_exec,
-                    "env_vars": {
-                        **os.environ,
-                        "VIRTUAL_ENV": nemo_gym_py_exec,
-                        "UV_PROJECT_ENVIRONMENT": nemo_gym_py_exec,
-                    },
-                },
+                "runtime_env": nemo_gym_runtime_env,
             }
 
             print("Creating NeMo Gym environment (dry_run=True)...")

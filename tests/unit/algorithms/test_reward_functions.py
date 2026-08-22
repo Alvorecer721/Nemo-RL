@@ -410,3 +410,101 @@ def test_stop_properly_penalty_error_cases():
     config.stop_properly_penalty_coef = 1.5
     with pytest.raises(AssertionError, match="stop_properly_penalty_coef must be in"):
         apply_reward_shaping(batch, config)
+
+
+def test_reward_shaping_alp():
+    """ALP: total_reward = rewards - alp_coef * pass_rate * resp_len / max_response_length."""
+    batch = create_mock_batch_with_responses(
+        num_samples=3,
+        response_lengths=[100, 200, 400],
+        initial_rewards=[1.0, 1.0, 0.0],
+    )
+
+    config = RewardShapingConfig(
+        enabled=True,
+        alp_coef=1.0,
+        max_response_length=1000,
+    )
+    pass_rate = torch.tensor([0.5, 0.5, 0.25])
+
+    result_batch = apply_reward_shaping(batch, config, pass_rate=pass_rate)
+
+    # r - alp_coef * pass_rate * len / max_response_length:
+    #   1.0 - 1.0 * 0.5  * 100/1000 = 0.95
+    #   1.0 - 1.0 * 0.5  * 200/1000 = 0.90
+    #   0.0 - 1.0 * 0.25 * 400/1000 = -0.10
+    expected = torch.tensor([0.95, 0.90, -0.10])
+    assert torch.allclose(result_batch["total_reward"], expected)
+
+
+def test_reward_shaping_alp_missing_pass_rate():
+    """ALP requires pass_rate; omitting it raises a descriptive AssertionError."""
+    batch = create_mock_batch_with_responses(
+        num_samples=2, response_lengths=[10, 20], initial_rewards=[1.0, 0.0]
+    )
+    config = RewardShapingConfig(enabled=True, alp_coef=1.0, max_response_length=1000)
+
+    with pytest.raises(AssertionError, match="pass_rate was not provided"):
+        apply_reward_shaping(batch, config)
+
+
+def test_reward_shaping_alp_missing_max_response_length():
+    """ALP requires max_response_length; omitting it raises a descriptive error."""
+    batch = create_mock_batch_with_responses(
+        num_samples=2, response_lengths=[10, 20], initial_rewards=[1.0, 0.0]
+    )
+    config = RewardShapingConfig(enabled=True, alp_coef=1.0)
+    pass_rate = torch.tensor([0.5, 0.5])
+
+    with pytest.raises(ValueError, match="max_response_length must be > 0"):
+        apply_reward_shaping(batch, config, pass_rate=pass_rate)
+
+
+@pytest.mark.parametrize("max_response_length", [0, -1])
+def test_reward_shaping_alp_rejects_nonpositive_max_response_length(
+    max_response_length,
+):
+    batch = create_mock_batch_with_responses(
+        num_samples=2, response_lengths=[10, 20], initial_rewards=[1.0, 0.0]
+    )
+    config = RewardShapingConfig(
+        enabled=True,
+        alp_coef=1.0,
+        max_response_length=max_response_length,
+    )
+
+    with pytest.raises(ValueError, match="max_response_length must be > 0"):
+        apply_reward_shaping(batch, config, pass_rate=torch.tensor([0.5, 0.5]))
+
+
+def test_reward_shaping_alp_rejects_negative_coefficient():
+    batch = create_mock_batch_with_responses(
+        num_samples=2, response_lengths=[10, 20], initial_rewards=[1.0, 0.0]
+    )
+    config = RewardShapingConfig(
+        enabled=True,
+        alp_coef=-1.0,
+        max_response_length=1000,
+    )
+
+    with pytest.raises(ValueError, match="alp_coef must be >= 0"):
+        apply_reward_shaping(batch, config, pass_rate=torch.tensor([0.5, 0.5]))
+
+
+def test_reward_shaping_alp_data_plane_lengths():
+    """ALP reads response_token_lengths when the slice carries no message_log (data-plane path)."""
+    batch = create_mock_batch_with_responses(
+        num_samples=3,
+        response_lengths=[100, 200, 400],
+        initial_rewards=[1.0, 1.0, 0.0],
+    )
+    del batch["message_log"]
+    batch["response_token_lengths"] = torch.tensor([100, 200, 400])
+
+    config = RewardShapingConfig(enabled=True, alp_coef=1.0, max_response_length=1000)
+    pass_rate = torch.tensor([0.5, 0.5, 0.25])
+
+    result_batch = apply_reward_shaping(batch, config, pass_rate=pass_rate)
+
+    expected = torch.tensor([0.95, 0.90, -0.10])
+    assert torch.allclose(result_batch["total_reward"], expected)

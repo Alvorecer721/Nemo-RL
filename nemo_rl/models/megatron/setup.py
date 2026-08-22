@@ -884,6 +884,17 @@ def _apply_parallelism_config(model_cfg: Any, config: PolicyConfig) -> None:
             "Context Parallelism is not supported with linear CE fusion loss, please set use_fused_linear_logprobs to false"
         )
 
+    if config["megatron_cfg"].get("use_fused_linear_logprobs", False):
+        # The fused hidden->logprob path has no cu_seqlens plumbing: get_logprobs
+        # returns one row per packed microbatch instead of per sequence, and the
+        # packed training wrappers expect vocab-parallel logits, not fused
+        # logprobs. Packed runs have their own fused-loss knob
+        # (sequence_packing.fuse_loss).
+        assert not config["sequence_packing"]["enabled"], (
+            "Sequence packing is not supported with linear CE fusion loss; "
+            "disable one of them (packed runs can use sequence_packing.fuse_loss instead)."
+        )
+
 
 def _apply_moe_config(model_cfg: Any, config: PolicyConfig) -> None:
     """Apply Mixture of Experts configuration."""

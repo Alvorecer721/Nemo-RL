@@ -34,7 +34,6 @@ from nemo_rl.data.multimodal_utils import (
     resolve_to_image,
     uses_image_placeholder,
 )
-from nemo_rl.distributed.ray_actor_environment_registry import get_actor_python_env
 from nemo_rl.distributed.virtual_cluster import (
     DEFAULT_GYM_PORT_RANGE_HIGH,
     DEFAULT_GYM_PORT_RANGE_LOW,
@@ -51,7 +50,7 @@ from nemo_rl.models.generation.interfaces import should_use_async_rollouts
 from nemo_rl.models.policy import PolicyConfig, TokenizerConfig
 from nemo_rl.utils.routed_experts_codec import decode_routed_experts
 from nemo_rl.utils.timer import Timer
-from nemo_rl.utils.venvs import create_local_venv_on_each_node
+from nemo_rl.utils.venvs import make_actor_runtime_env, pin_uv_to_path
 
 # Kept local so the Gym actor does not depend on model-config dtype resolution.
 # Must cover every name resolve_routed_experts_dtype can produce.
@@ -170,7 +169,8 @@ def get_nemo_gym_uv_cache_dir() -> str | None:
     """
     if not os.environ.get("NRL_CONTAINER"):
         return None
-    return subprocess.check_output(["uv", "cache", "dir"]).decode().strip()
+    uv = os.environ.get("UV", "uv")
+    return subprocess.check_output([uv, "cache", "dir"]).decode().strip()
 
 
 def get_nemo_gym_venv_dir() -> str | None:
@@ -539,6 +539,9 @@ class NemoGym(EnvironmentInterface):
         scheduled onto reserved nodes) and spun up explicitly once the vLLM
         server URLs are available, overlapping with vLLM model loading.
         """
+        # Ray prepends the actor venv to PATH after applying runtime_env. Re-pin
+        # uv inside the actor before Gym spawns its own component environments.
+        pin_uv_to_path()
         self.node_ip = _get_node_ip_local()
         _gym_port_low = self.cfg.get("port_range_low", DEFAULT_GYM_PORT_RANGE_LOW)
         _gym_port_high = self.cfg.get("port_range_high", DEFAULT_GYM_PORT_RANGE_HIGH)
@@ -1200,26 +1203,15 @@ def spinup_nemo_gym_actor(
         **multimodal_flags,
     )
 
-    nemo_gym_py_exec = get_actor_python_env("nemo_rl.environments.nemo_gym.NemoGym")
-    if nemo_gym_py_exec.startswith("uv"):
-        nemo_gym_py_exec = create_local_venv_on_each_node(
-            nemo_gym_py_exec, "nemo_rl.environments.nemo_gym.NemoGym"
-        )
-
     nemo_gym_opts: dict[str, Any] = {}
     if nemo_gym_dict.get("num_gpu_nodes", 0):
         nemo_gym_opts["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(),
             soft=True,
         )
-    nemo_gym_opts["runtime_env"] = {
-        "py_executable": nemo_gym_py_exec,
-        "env_vars": {
-            **os.environ,
-            "VIRTUAL_ENV": nemo_gym_py_exec,
-            "UV_PROJECT_ENVIRONMENT": nemo_gym_py_exec,
-        },
-    }
+    nemo_gym_opts["runtime_env"] = make_actor_runtime_env(
+        "nemo_rl.environments.nemo_gym.NemoGym"
+    )
 
     actor = NemoGym.options(**nemo_gym_opts).remote(nemo_gym_cfg)
     ray.get(actor._spinup.remote())

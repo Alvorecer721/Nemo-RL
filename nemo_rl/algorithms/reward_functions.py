@@ -46,9 +46,48 @@ class RewardShapingConfig(BaseModel, extra="allow"):
     # When set to 1, no penalty is applied (default behavior).
     stop_properly_penalty_coef: float | None = None
 
+    # Adaptive Length Penalty coefficient (Xiang et al. 2025): reward -= alp_coef * pass_rate *
+    # response_length / max_response_length. Difficulty-aware — harder prompts (lower pass rate)
+    # are penalized less. Mutually exclusive with the DAPO overlong / stop-properly penalties.
+    alp_coef: float | None = None
+
+
+def ngram_rate(gen_ids: torch.Tensor, ngram_size: int) -> float:
+    """Distinct-n-gram repetition rate of one sample's generated tokens."""
+    if gen_ids.numel() < ngram_size:
+        return 0.0
+    windows = gen_ids.unfold(0, ngram_size, 1)
+    return 1.0 - torch.unique(windows, dim=0).shape[0] / windows.shape[0]
+
+
+def _response_lengths(batch: BatchedDataDict) -> list[int]:
+    """Per-sample assistant response lengths.
+
+    Prefer the slim per-sample tensor (data-plane path: message_log lives in
+    TQ, slice carries response_token_lengths). Fall back to scanning
+    message_log for the legacy non-data-plane caller.
+    """
+    response_token_lengths = batch.get("response_token_lengths")
+    if response_token_lengths is not None:
+        if isinstance(response_token_lengths, torch.Tensor):
+            return response_token_lengths.tolist()
+        return list(response_token_lengths)
+    response_lengths = []
+    for message_log in batch["message_log"]:
+        length = None
+        for message in message_log:
+            if message["role"] == "assistant":
+                length = message["token_ids"].shape[0]
+                break
+        assert length is not None, "Assistant response not found during reward shaping"
+        response_lengths.append(length)
+    return response_lengths
+
 
 def apply_reward_shaping(
-    batch: BatchedDataDict, cfg: RewardShapingConfig
+    batch: BatchedDataDict,
+    cfg: RewardShapingConfig,
+    pass_rate: torch.Tensor | None = None,
 ) -> BatchedDataDict:
     """Process rewards by applying penalties for responses exceeding max_response_length. Currently, this function only supports DAPO reward shaping as illustrated in the DAPO paper : https://arxiv.org/pdf/2503.14476.
 
@@ -62,6 +101,43 @@ def apply_reward_shaping(
     # dynamic sampling) can filter prompt groups on the raw task metric
     # rather than on length-dependent shaped rewards.
     batch["unshaped_total_reward"] = rewards.clone()
+    # Adaptive Length Penalty (Xiang et al. 2025): difficulty-aware length penalty.
+    alp_coef = cfg.alp_coef
+    if alp_coef is not None:
+        if alp_coef < 0:
+            raise ValueError(f"reward_shaping.alp_coef must be >= 0, got {alp_coef}")
+        assert pass_rate is not None, (
+            "reward_shaping.alp_coef is set but pass_rate was not provided"
+        )
+        ell_max = cfg.max_response_length
+        if ell_max is None or ell_max <= 0:
+            raise ValueError(
+                "reward_shaping.alp_coef is set but max_response_length must be > 0, "
+                f"got {ell_max}"
+            )
+        shadowed = [
+            k
+            for k in (
+                "stop_properly_penalty_coef",
+                "overlong_buffer_length",
+                "overlong_buffer_penalty",
+            )
+            if getattr(cfg, k) is not None
+        ]
+        if shadowed:
+            print(
+                f"[WARN] alp_coef is set, so the following penalties are ignored: {', '.join(shadowed)}.",
+                flush=True,
+            )
+        resp_lengths = torch.tensor(
+            _response_lengths(batch),
+            dtype=rewards.dtype,
+            device=rewards.device,
+        )
+        batch["total_reward"] = (
+            rewards - alp_coef * pass_rate.to(rewards.device) * resp_lengths / ell_max
+        )
+        return batch
 
     # Apply stop properly penalty if configured
     if cfg.stop_properly_penalty_coef is not None:
@@ -118,11 +194,12 @@ def apply_reward_shaping(
     overlong_buffer_length = cfg.overlong_buffer_length
     overlong_buffer_penalty = cfg.overlong_buffer_penalty
     max_response_length = cfg.max_response_length
-    if (
-        overlong_buffer_length is None
-        or overlong_buffer_penalty is None
-        or max_response_length is None
-    ):
+    dapo_fields = (
+        overlong_buffer_length,
+        overlong_buffer_penalty,
+        max_response_length,
+    )
+    if any(field is None for field in dapo_fields):
         raise ValueError(
             "Reward function is enabled but only DAPO reward shaping is currently supported. Please ensure overlong_buffer_length, overlong_buffer_penalty, and max_response_length are properly configured."
         )
@@ -131,27 +208,7 @@ def apply_reward_shaping(
     # Calculate the expected response length
     expected_response_length = max_response_length - overlong_buffer_length
 
-    # Prefer slim per-sample tensor (data-plane path: message_log lives in
-    # TQ, slice carries response_token_lengths). Fall back to scanning
-    # message_log for the legacy non-data-plane caller.
-    response_token_lengths = batch.get("response_token_lengths")
-    if response_token_lengths is not None:
-        if isinstance(response_token_lengths, torch.Tensor):
-            response_lengths = response_token_lengths.tolist()
-        else:
-            response_lengths = list(response_token_lengths)
-    else:
-        response_lengths = []
-        for message_log in batch["message_log"]:
-            length = None
-            for message in message_log:
-                if message["role"] == "assistant":
-                    length = message["token_ids"].shape[0]
-                    break
-            assert length is not None, (
-                "Assistant response not found during reward shaping"
-            )
-            response_lengths.append(length)
+    response_lengths = _response_lengths(batch)
 
     assert len(response_lengths) == len(rewards), (
         "The number of messages in the batch must match the number of rewards"

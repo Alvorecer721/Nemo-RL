@@ -246,6 +246,84 @@ def _patch_vllm_tool_parser_namespace_tool(logger) -> None:
     logger.info("Successfully patched vLLM NamespaceTool import for openai compat.")
 
 
+def _patch_vllm_invalid_mnnvl_workspace(logger) -> None:
+    """Reject FlashInfer MNNVL workspaces without multicast support.
+
+    vLLM 0.25.1 can construct an MNNVL workspace on a topology where NVSwitch
+    multicast is unavailable. The object is returned with a null ``mc_ptr``
+    and is then selected for the compiled all-reduce/RMSNorm fusion. Its first
+    profile run corrupts the following GEMM and fails with a cuBLAS error.
+
+    This is an exact backport of vLLM #49043, merged after v0.25.1:
+    https://github.com/vllm-project/vllm/commit/81962bb6995eaebd1e49998c2a91c9e01e24da27
+    On a single node, returning ``None`` lets vLLM's existing caller fall back
+    to the TRT-LLM FlashInfer workspace instead.
+    """
+    try:
+        file_to_patch = _get_vllm_file(
+            "distributed/device_communicators/flashinfer_all_reduce.py"
+        )
+    except RuntimeError:
+        logger.warning(
+            "Could not locate flashinfer_all_reduce.py; invalid MNNVL workspace "
+            "patch NOT applied. Compiled TP engines may fail on topologies "
+            "without NVSwitch multicast."
+        )
+        return
+
+    marker = 'backend == "mnnvl" and not getattr(workspace, "mc_ptr", 0)'
+    old_snippet = (
+        "        workspace = flashinfer_comm.create_allreduce_fusion_workspace(\n"
+        "            backend=backend,\n"
+        "            world_size=world_size,\n"
+        "            rank=rank,\n"
+        "            max_token_num=max_token_num,\n"
+        "            hidden_dim=hidden_dim,\n"
+        "            dtype=dtype,\n"
+        "            comm_backend=comm_backend,\n"
+        "            group=group,\n"
+        "        )\n"
+        "    except Exception as e:\n"
+    )
+    new_snippet = (
+        "        workspace = flashinfer_comm.create_allreduce_fusion_workspace(\n"
+        "            backend=backend,\n"
+        "            world_size=world_size,\n"
+        "            rank=rank,\n"
+        "            max_token_num=max_token_num,\n"
+        "            hidden_dim=hidden_dim,\n"
+        "            dtype=dtype,\n"
+        "            comm_backend=comm_backend,\n"
+        "            group=group,\n"
+        "        )\n"
+        '        if backend == "mnnvl" and not getattr(workspace, "mc_ptr", 0):\n'
+        "            workspace.destroy()\n"
+        "            logger.warning_once(\n"
+        '                "FlashInfer MNNVL multicast is unavailable on the current topology."\n'
+        "            )\n"
+        "            return None\n"
+        "    except Exception as e:\n"
+    )
+
+    with _locked_file_patch(file_to_patch) as (content, write_back):
+        if marker in content:
+            logger.info("vLLM invalid MNNVL workspace patch already applied.")
+            return
+
+        if old_snippet not in content:
+            logger.warning(
+                "Could not apply invalid MNNVL workspace patch: expected "
+                "snippet not found in %s. The vLLM version may have changed. "
+                "Compiled TP engines may fail without NVSwitch multicast.",
+                file_to_patch,
+            )
+            return
+
+        write_back(content.replace(old_snippet, new_snippet, 1))
+
+    logger.info("Successfully patched vLLM invalid MNNVL workspace handling.")
+
+
 def _patch_vllm_ray_executor_v2_tcpstore_port(logger) -> None:
     """Keep RayExecutorV2's TCPStore port out of the MessageQueue's scan range.
 
@@ -572,14 +650,16 @@ def ensure_vllm_source_compat() -> None:
     Safe to call from any process that imports vLLM directly (e.g. the
     tools/model_diagnostics scripts, which construct ``vllm.LLM`` without
     going through a NeMo-RL generation worker). Must be called BEFORE the
-    first ``import vllm`` submodule that pulls in ``vllm.tool_parsers``.
-    Worker processes get this via ``_apply_vllm_patches`` at init.
+    first ``import vllm`` submodule that pulls in ``vllm.tool_parsers`` or
+    ``vllm.distributed.device_communicators.flashinfer_all_reduce``. Worker
+    processes get these patches via ``_apply_vllm_patches`` at init.
     """
     from vllm.logger import init_logger
 
     patch_logger = init_logger("vllm_patch")
     _patch_vllm_tool_parser_namespace_tool(patch_logger)
     _patch_vllm_radio_layerscale_loader(patch_logger)
+    _patch_vllm_invalid_mnnvl_workspace(patch_logger)
 
 
 def _apply_vllm_patches(
@@ -631,6 +711,7 @@ def _apply_vllm_patches(
 
     _patch_vllm_llama_eagle3_own_lm_head(patch_logger)
     _patch_vllm_tool_parser_namespace_tool(patch_logger)
+    _patch_vllm_invalid_mnnvl_workspace(patch_logger)
     _patch_vllm_ray_executor_v2_tcpstore_port(patch_logger)
     _patch_vllm_shm_broadcast_bind_retry(patch_logger)
     _patch_vllm_radio_layerscale_loader(patch_logger)

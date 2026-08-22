@@ -69,6 +69,7 @@ def _make_vllm_config(
         "stop_strings": None,
         "quant_cfg": quant_cfg,
         "vllm_cfg": {
+            "sleep_level": 1,
             "precision": "bfloat16",
             "tensor_parallel_size": 1,
             "pipeline_parallel_size": 1,

@@ -334,6 +334,14 @@ def setup(
     loss_config: ClippedPGLossConfig = master_config.loss_fn
     ppo_config = master_config.ppo
     data_config = master_config.data
+
+    reward_shaping_config = ppo_config["reward_shaping"]
+    if reward_shaping_config.enabled and reward_shaping_config.alp_coef:
+        raise ValueError(
+            "reward_shaping.alp_coef is not supported for PPO: the adaptive length "
+            "penalty scales by per-prompt pass_rate, which requires grouped rollouts "
+            "(num_generations_per_prompt); PPO/GAE samples one trajectory per prompt."
+        )
     logger_config = master_config.logger
     cluster_config = master_config.cluster
 
@@ -1913,7 +1921,7 @@ def ppo_train(
                         # policy's async write needs to be awaited before rename.
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
             # Logging

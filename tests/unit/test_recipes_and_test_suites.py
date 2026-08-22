@@ -341,6 +341,20 @@ def test_all_tests_can_find_config_if_dryrun(all_test_suites):
         )
 
 
+def test_test_suite_line_continuations_use_one_backslash():
+    """Reject `\\\\` endings, which pass bash -n but split the command."""
+    for script_path in glob.glob(
+        os.path.join(test_suites_dir, "**", "*.sh"), recursive=True
+    ):
+        with open(script_path) as script:
+            for line_number, line in enumerate(script, start=1):
+                assert not line.rstrip("\n").endswith("\\\\"), (
+                    f"{script_path}:{line_number} ends with two backslashes; "
+                    "the shell passes a literal backslash argument and runs the "
+                    "following override as a separate command"
+                )
+
+
 def test_all_recipes_start_with_algo_hyphen(all_recipe_yaml_rel_paths):
     expected_algos = set(ALGO_MAPPING_TO_BASE_YAML.keys())
     for recipe_yaml in all_recipe_yaml_rel_paths:

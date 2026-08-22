@@ -39,3 +39,17 @@ tests/test_suites/vlm/mopd-nemotron-super-omni-120ba12b-4n8g-smoke.v1.sh
 # nightly budget is at 3922 of its 3928 GPU-hour cap and this run's ~27
 # GPU-hours would exceed it. Move to nightly.txt when the budget has room.
 tests/test_suites/llm/grpo-llama3.1-8b-instruct-2n8g-ready-first-single-controller.sh
+
+# Apertus recipes (CSCS Clariden): model/tokenizer paths and the container EDF
+# are cluster-specific, so nightly automation cannot run them. Operational
+# probes and launchers live in infra/slurm/cscs/, but inclusion here is recipe
+# accounting rather than certification evidence for every listed topology.
+tests/test_suites/llm/grpo-apertus1p5-8b-1n4g-megatron-probe.sh
+tests/test_suites/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-async.sh
+tests/test_suites/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-fuseloss.sh
+tests/test_suites/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-gym.sh
+tests/test_suites/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-gym-reasoning.sh
+tests/test_suites/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-gym-reasoning-alp.sh
+tests/test_suites/llm/grpo-apertus-omni-reasoning-alp-smoke.sh
+tests/test_suites/llm/grpo-apertus-omni-reasoning-alp-8n.sh
+tests/test_suites/llm/dpo-apertus1p5-8b-maxmin-megatron.sh
