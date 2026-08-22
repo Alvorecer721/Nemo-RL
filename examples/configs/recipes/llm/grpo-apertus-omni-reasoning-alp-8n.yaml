@@ -1,0 +1,91 @@
+defaults: ../../grpo_math_8B_megatron.yaml
+grpo:
+  num_generations_per_prompt: 8
+  max_num_steps: 2000
+  val_period: 50
+  val_at_start: true
+  max_val_samples: 500
+  cot_think_token_ids:
+  - 32
+  - 33
+  reward_shaping:
+    enabled: true
+    alp_coef: 1.0
+    max_response_length: 6000
+policy:
+  model_name: /capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200  # pragma: allowlist secret
+  tokenizer:
+    name: /capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official
+    chat_template_kwargs:
+      enable_thinking: true
+  logprob_batch_size: 2
+  max_total_sequence_length: 8192
+  megatron_cfg:
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
+    bias_activation_fusion: false
+  generation:
+    max_new_tokens: 6000
+    stop_token_ids:
+    - 2
+    - 68
+    - 72
+    vllm_cfg:
+      env_vars:
+        PYTHONPATH: ''
+      gpu_memory_utilization: 0.55
+      max_model_len: 8192
+      sleep_level: 2
+data:
+  _override_: true
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: RLPromptDataset
+    data_path: /capstor/store/cscs/swissai/infra01/vision-datasets/tokenized/alignment/deepvision_rl
+    split: train
+    max_prompt_len: 2048
+    processor: mmididx_grpo_data_processor
+    task_name: rl_prompt
+    env_name: single_turn_verifier
+  validation:
+    dataset_name: math500
+    processor: math_data_processor
+    task_name: math
+    env_name: math
+  default:
+    prompt_file: examples/prompts/cot.txt
+    system_prompt_file: null
+env:
+  single_turn_verifier:
+    num_workers: 8
+    math_verify_impl: hf_math_verify
+cluster:
+  num_nodes: 8
+  gpus_per_node: 4
+checkpointing:
+  enabled: true
+  checkpoint_dir: results/grpo-apertus-omni-reasoning-alp-8n
+  save_period: 50
+  keep_top_k: 5
+logger:
+  wandb_enabled: true
+  log_dir: logs/grpo-apertus-omni-reasoning-alp-8n
+  metric_denylist:
+  - '*/natural_termination_rate'
+  - '*/mean_gen_tokens_per_sample'
+  - '*/num_valid_samples'
+  - '*/turns_per_sample/*'
+  - '*_per_sec'
+  - '*_per_sec_per_gpu'
+  - train/kl_penalty
+  - train/vllm/spec_*
+  - train/num_masked_seqs_by_logprob_error
+  - train/masked_correct_pct
+  - train/probs_ratio_clamped*
+  - train/wd
+  wandb:
+    project: grpo-apertus
+    name: omni-reasoning-alp-8n

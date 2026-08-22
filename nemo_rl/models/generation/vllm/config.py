@@ -53,6 +53,8 @@ class VllmSpecificArgs(TypedDict):
     # Optional video contract. When present, NeMo RL registers its TorchCodec
     # loader and uses these exact sampling values on both sides of GRPO.
     video: NotRequired[VllmVideoConfig]
+    # vLLM sleep level when offloading between generation phases: 1 backs weights up to host RAM, 2 discards them (lower host memory, correct when weights are refit every step).
+    sleep_level: int
     load_format: NotRequired[str]
     precision: NotRequired[str]
     # Whether vLLM returns logprobs before or after generation-time logit

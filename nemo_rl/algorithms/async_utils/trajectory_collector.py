@@ -18,6 +18,7 @@ import asyncio
 import concurrent.futures
 import threading as _threading
 import time
+import traceback
 from collections import defaultdict, deque
 from collections.abc import AsyncGenerator
 from typing import Any, Optional, cast
@@ -211,8 +212,7 @@ class AsyncTrajectoryCollector:
         self.running = False
         self.data_exhausted = False
         self.collection_failed = False
-        self.collection_error: Optional[str] = None
-        self._failure_lock: _threading.Lock = _threading.Lock()
+        self._collection_error_message: str | None = None
 
         self._pg_lock: _threading.Lock = _threading.Lock()
 
@@ -291,7 +291,9 @@ class AsyncTrajectoryCollector:
         # Timer for efficiency metrics
         self._efficiency_timer = ThreadSafeTimer(context={"worker": "collector"})
 
-        # Failure tracking for rollout batch workers.
+        # Failure tracking for the collection loop and rollout batch workers.
+        # _failure_lock guards every stored error and the consecutive counter.
+        self._failure_lock: _threading.Lock = _threading.Lock()
         self._failure_count: int = 0
         self._fatal_error_message: str | None = None
 
@@ -430,7 +432,7 @@ class AsyncTrajectoryCollector:
                 f"⏸️ All target weights {target_weights} already generated or in progress, pausing"
             )
             return True
-        except Exception:
+        except Exception as e:
             return False
 
     def start_collection(
@@ -438,6 +440,10 @@ class AsyncTrajectoryCollector:
     ) -> None:
         """Start collecting trajectories from dataloader."""
         self.running = True
+        self.data_exhausted = False
+        with self._failure_lock:
+            self.collection_failed = False
+            self._collection_error_message = None
         self.dataloader = dataloader
 
         print("Started continuous trajectory collection")
@@ -460,24 +466,30 @@ class AsyncTrajectoryCollector:
             inflight_workers = len(self._inflight_threads)
         with self._failure_lock:
             collection_failed = self.collection_failed
-            collection_error = self.collection_error
+            error_message = self._fatal_error_message or self._collection_error_message
         with self._generation_check_lock:
             generating_targets = sorted(self._generating_targets)
         return {
             "running": self.running,
             "data_exhausted": self.data_exhausted,
             "errored": collection_failed,
-            "error": collection_error,
+            "error": error_message,
             "inflight_workers": inflight_workers,
             "generating_targets": generating_targets,
         }
 
     def _mark_collection_failed(self, error: Exception) -> None:
-        """Record the first collection-loop failure."""
+        """Record the first collection-loop failure with its traceback."""
+        import traceback
+
+        failure_traceback = traceback.format_exc()
         with self._failure_lock:
             if not self.collection_failed:
                 self.collection_failed = True
-                self.collection_error = f"{type(error).__name__}: {error}"
+                self._collection_error_message = (
+                    f"{type(error).__name__}: {error}\n"
+                    f"Collection traceback:\n{failure_traceback}"
+                )
 
     def _collection_loop(self):
         """Run the collection loop in background thread.
@@ -519,10 +531,10 @@ class AsyncTrajectoryCollector:
                         self._refit_pause_cleared.wait()
                     print("▶️ Refit completed, resuming collection")
 
-                # Check if generation limits require pausing collection
+                # Clear before checking the predicate so a worker wakeup cannot
+                # land between the check and clear and then be lost.
+                self._generation_limit_cleared.clear()
                 if self._should_pause_for_generation_limits() and self.running:
-                    self._generation_limit_cleared.clear()
-
                     # Only log warning once per weight version
                     if self._last_limit_warning_version != self.current_weight_version:
                         target_weights = self._calculate_target_weights(
@@ -546,6 +558,8 @@ class AsyncTrajectoryCollector:
                     # Double-check we're still running after being woken up
                     if not self.running:
                         break
+                else:
+                    self._generation_limit_cleared.set()
 
                 if not self.running:
                     break
@@ -1023,7 +1037,7 @@ class AsyncTrajectoryCollector:
         every time once one is.
         """
         with self._failure_lock:
-            error_message = self._fatal_error_message
+            error_message = self._fatal_error_message or self._collection_error_message
         if error_message is not None:
             raise RuntimeError(error_message)
 
@@ -1598,15 +1612,10 @@ class AsyncTrajectoryCollector:
                 if self._fatal_error_message is None:
                     self._failure_count = 0
         except Exception as error:
-            if not self.running:
-                return
-
             self._efficiency_timer.record(
                 "wasted/failed_trajectory", time.perf_counter() - worker_start
             )
             backend = "NeMo-Gym" if use_nemo_gym else "native"
-            import traceback
-
             failure_traceback = traceback.format_exc()
             with self._failure_lock:
                 self._failure_count += 1

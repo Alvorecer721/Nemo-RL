@@ -241,9 +241,16 @@ def _prune_equal(a: Any, b: Any) -> Any:
     - Else: if equal, return a sentinel indicating removal; otherwise return `a`.
     """
     if _dict_like(a) and _dict_like(b):
-        out: dict[str, Any] = {}
         a_dict: dict[str, Any] = a  # type: ignore[assignment]
         b_dict: dict[str, Any] = b  # type: ignore[assignment]
+
+        # An override mapping replaces its inherited counterpart instead of
+        # merging with it. Values equal to the base are therefore still
+        # required and must not be pruned.
+        if a_dict.get("_override_", False):
+            return a_dict
+
+        out: dict[str, Any] = {}
         for key, a_val in a_dict.items():
             if key in b_dict:
                 pruned = _prune_equal(a_val, b_dict[key])

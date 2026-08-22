@@ -14,6 +14,7 @@
 import gc
 import json
 import os
+import sys
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -58,6 +59,7 @@ from nemo_rl.algorithms.reward_functions import (
 )
 from nemo_rl.algorithms.utils import (
     WALL_CLOCK_EFFICIENCY_CATEGORIES,
+    alp_pass_rate,
     calculate_baseline_and_std_per_prompt,
     get_gdpo_reward_component_keys,
     log_generation_metrics,
@@ -362,7 +364,7 @@ class GRPOConfig(BaseModel, extra="allow"):
     calculate_advantages_on_gpu: bool = False
     # Sequence-level logprob error masking for training stability. If set, mask sequences with mult_prob_error exceeding this threshold (same scale as token_mult_prob_error metric, e.g., 1.5)
     # Note that this is slightly different than Masked Importance Sampling (MIS) because this uses the absolute value of the difference between the training and generation logprobs, whereas MIS just uses the difference between the training and generation logprobs.
-    seq_logprob_error_threshold: float | None = None
+    seq_logprob_error_threshold: float | None = Field(default=None, ge=1.0)
     # Advantage value to assign to invalid tool call tokens. When set (e.g. -5.0), overwrites the
     # computed advantage for those tokens to penalize them; absent/None disables the penalty.
     invalid_tool_call_advantage: float | None = None
@@ -376,6 +378,8 @@ class GRPOConfig(BaseModel, extra="allow"):
     deduplicate_multimodal_data: bool = False
     # Emit exact-boundary and logical-vs-physical payload metrics.
     debug_payload_metrics: bool = False
+    # (start, end) token ids of the thinking span, for chain-of-thought length logging
+    cot_think_token_ids: list[int] | None = None
 
 
 @dataclass
@@ -2832,6 +2836,25 @@ def compute_and_apply_seq_logprob_error_masking(
     }
 
 
+def _raise_if_grpo_batch_has_no_valid_tokens(train_data: BatchedDataDict) -> None:
+    """Reject a fully masked GRPO batch before the optimizer can advance.
+
+    A zero-gradient optimizer step is not necessarily a no-op: optimizer momentum,
+    weight decay, and the learning-rate scheduler can still update state. Fully
+    masked batches therefore need to fail before ``policy.train`` instead of being
+    treated as successful zero-loss steps.
+    """
+    sample_mask = train_data["sample_mask"]
+    token_mask = train_data["token_mask"]
+    valid_token_mask = token_mask * sample_mask.unsqueeze(-1)
+    if torch.count_nonzero(valid_token_mask).item() == 0:
+        raise RuntimeError(
+            "GRPO batch has no valid training tokens after rollout filtering; "
+            "refusing to advance the optimizer. Inspect rollout masks and the "
+            "sequence logprob error metrics/threshold."
+        )
+
+
 # ===============================================================================
 # Training & Validation
 # ===============================================================================
@@ -3188,6 +3211,11 @@ def grpo_train(
                             debug_payload_metrics=(
                                 master_config.grpo.debug_payload_metrics
                             ),
+                            cot_token_ids=(
+                                tuple(master_config.grpo.cot_think_token_ids)
+                                if master_config.grpo.cot_think_token_ids
+                                else None
+                            ),
                         )
                         input_ids = nemo_gym_rollout_result.input_ids
                         repeated_batch = nemo_gym_rollout_result.final_batch
@@ -3212,6 +3240,11 @@ def grpo_train(
                             deduplicate_multimodal_data=(
                                 master_config.grpo.deduplicate_multimodal_data
                             ),
+                            cot_token_ids=(
+                                tuple(master_config.grpo.cot_think_token_ids)
+                                if master_config.grpo.cot_think_token_ids
+                                else None
+                            ),
                         )
                     else:
                         repeated_batch, rollout_metrics = run_multi_turn_rollout(
@@ -3227,6 +3260,11 @@ def grpo_train(
                             deduplicate_multimodal_data=(
                                 master_config.grpo.deduplicate_multimodal_data
                             ),
+                            cot_token_ids=(
+                                tuple(master_config.grpo.cot_think_token_ids)
+                                if master_config.grpo.cot_think_token_ids
+                                else None
+                            ),
                         )
                     policy_generation.finish_generation()
                     # Collect generation logger metrics for performance reporting after each generation step
@@ -3241,13 +3279,19 @@ def grpo_train(
                     )
                     logger.log_metrics(rollout_metrics, total_steps + 1, prefix="train")
 
+                reward_shaping_cfg = master_config.grpo.reward_shaping
+                pass_rate = None
+                if reward_shaping_cfg.enabled:
+                    pass_rate = alp_pass_rate(
+                        input_ids, repeated_batch["total_reward"], reward_shaping_cfg
+                    )
                 repeated_batch = scale_rewards(
                     repeated_batch, master_config.grpo.reward_scaling
                 )
                 # Process rewards with custom reward function
-                if master_config.grpo.reward_shaping.enabled:
+                if reward_shaping_cfg.enabled:
                     repeated_batch = apply_reward_shaping(
-                        repeated_batch, master_config.grpo.reward_shaping
+                        repeated_batch, reward_shaping_cfg, pass_rate=pass_rate
                     )
 
                 # Calculate rewards & advantages
@@ -3521,6 +3565,8 @@ def grpo_train(
                         seq_logprob_error_metrics[
                             "num_masked_seqs_by_logprob_error"
                         ] = seq_logprob_error_metrics.pop("num_masked_seqs")
+
+                _raise_if_grpo_batch_has_no_valid_tokens(train_data)
 
                 # Compute advantages with adv_estimator using correct mask and logprobs
                 with (
@@ -3877,7 +3923,7 @@ def grpo_train(
                         # (shutdown).
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
                         # Record last-successful-checkpoint time/step for external
@@ -4169,6 +4215,11 @@ def validate(
                         master_config.grpo.deduplicate_multimodal_data
                     ),
                     debug_payload_metrics=master_config.grpo.debug_payload_metrics,
+                    cot_token_ids=(
+                        tuple(master_config.grpo.cot_think_token_ids)
+                        if master_config.grpo.cot_think_token_ids
+                        else None
+                    ),
                 )
                 val_batch = nemo_gym_rollout_result.final_batch
                 gen_metrics = nemo_gym_rollout_result.rollout_metrics
@@ -4185,6 +4236,11 @@ def validate(
                     deduplicate_multimodal_data=(
                         master_config.grpo.deduplicate_multimodal_data
                     ),
+                    cot_token_ids=(
+                        tuple(master_config.grpo.cot_think_token_ids)
+                        if master_config.grpo.cot_think_token_ids
+                        else None
+                    ),
                 )
             else:
                 val_batch, gen_metrics = run_multi_turn_rollout(
@@ -4197,6 +4253,11 @@ def validate(
                     greedy=False,
                     deduplicate_multimodal_data=(
                         master_config.grpo.deduplicate_multimodal_data
+                    ),
+                    cot_token_ids=(
+                        tuple(master_config.grpo.cot_think_token_ids)
+                        if master_config.grpo.cot_think_token_ids
+                        else None
                     ),
                 )
 
@@ -4421,6 +4482,26 @@ def _raise_if_collector_stopped(
         f"Training cannot {action} without the required trajectories. "
         f"Collector status: {collector_status}. "
         f"{recovery_advice}"
+    )
+
+
+def _start_async_trajectory_collection(
+    trajectory_collector: Any, dataloader: StatefulDataLoader
+) -> None:
+    """Start collection and surface actor-side startup failures immediately."""
+    ray.get(trajectory_collector.start_collection.remote(dataloader))
+
+
+def _raise_for_collector_error(
+    collector_status: dict[str, Any], *, context: str
+) -> None:
+    """Raise a collector's original background-loop failure, if present."""
+    if not collector_status.get("errored", False):
+        return
+
+    error = collector_status.get("error") or "original collector error unavailable"
+    raise RuntimeError(
+        f"Trajectory collector failed {context}. Original collector error:\n{error}"
     )
 
 
@@ -4753,6 +4834,60 @@ def async_grpo_train(
         f"max_generation_failures={max_generation_failures}"
     )
 
+    async_resources_shutdown = False
+
+    def shutdown_async_resources() -> None:
+        """Finalize async work and stop resources owned by this training run."""
+        nonlocal async_resources_shutdown
+        if async_resources_shutdown:
+            return
+        async_resources_shutdown = True
+
+        finalize_error: BaseException | None = None
+        try:
+            checkpointer.shutdown()
+        except Exception as error:
+            finalize_error = error
+
+        print("🛑 Stopping trajectory collection...")
+        _flush_collector_telemetry()
+        try:
+            ray.kill(trajectory_collector)
+        except Exception as error:
+            print(f"Error stopping trajectory collector: {error}")
+
+        try:
+            ray.kill(replay_buffer)
+        except Exception as error:
+            print(f"Error stopping replay buffer: {error}")
+
+        shutdown_environments(task_to_env, val_task_to_env)
+
+        print("🛑 Shutting down generation workers...")
+        try:
+            policy_generation.shutdown()
+        except Exception as error:
+            print(f"Error shutting down generation workers: {error}")
+
+        if policy is not policy_generation:
+            print("🛑 Shutting down policy workers...")
+            try:
+                policy.shutdown()
+            except Exception as error:
+                print(f"Error shutting down policy workers: {error}")
+
+        print("Async GRPO training complete!")
+
+        if finalize_error is not None:
+            if sys.exc_info()[0] is not None:
+                warnings.warn(
+                    "Checkpoint finalization failed during error teardown: "
+                    f"{finalize_error}",
+                    stacklevel=2,
+                )
+            else:
+                raise finalize_error
+
     print("⏳ Preparing policy generation for training...", flush=True)
     if POLICY_GENERATION_STALE:
         print("🔄 Refitting policy generation with actual model weights...", flush=True)
@@ -4769,8 +4904,10 @@ def async_grpo_train(
             import traceback
 
             traceback.print_exc()
-            _flush_collector_telemetry()
-            return
+            # A failed refit means the generator never received real weights;
+            # returning here would end the run with zero steps and exit code 0.
+            shutdown_async_resources()
+            raise
     else:
         print("🔄 Preparing policy generation for inference...")
         try:
@@ -4781,14 +4918,18 @@ def async_grpo_train(
             import traceback
 
             traceback.print_exc()
-            _flush_collector_telemetry()
-            return
+            shutdown_async_resources()
+            raise
 
     # Generation must hold the policy's real weights before any backend starts
     # collecting. In particular, vLLM and Dynamo start with dummy weights when
     # the first refit supplies model parameters.
     ray.get(trajectory_collector.set_weight_version.remote(weight_version))
-    trajectory_collector.start_collection.remote(dataloader)
+    try:
+        _start_async_trajectory_collection(trajectory_collector, dataloader)
+    except Exception:
+        shutdown_async_resources()
+        raise
     print("📦 Started continuous background trajectory collection")
 
     print("✅ Policy generation setup complete, proceeding to validation...")
@@ -4848,19 +4989,7 @@ def async_grpo_train(
         )
         if stop_message is not None:
             print(stop_message, flush=True)
-            # Flush pending checkpoint finalization and stop rollout
-            # generation; the remaining actors are reaped when the driver
-            # exits right after this return.
-            checkpointer.shutdown()
-            _flush_collector_telemetry()
-            try:
-                ray.kill(trajectory_collector)
-            except Exception as e:
-                print(f"Error stopping trajectory collector: {e}")
-            try:
-                ray.kill(replay_buffer)
-            except Exception as e:
-                print(f"Error stopping replay buffer: {e}")
+            shutdown_async_resources()
             return
 
     print("✅ All setup complete, starting buffer wait...")
@@ -4920,12 +5049,18 @@ def async_grpo_train(
             )
 
         awaited_target = step + 1 if current_step_ready else step
-        _raise_if_collector_stopped(
-            collector_status,
-            awaited_target=f"target={awaited_target}",
-            awaited_work="lookahead claim" if current_step_ready else "buffer fill",
-            action="start",
-        )
+        try:
+            _raise_if_collector_stopped(
+                collector_status,
+                awaited_target=f"target={awaited_target}",
+                awaited_work=(
+                    "lookahead claim" if current_step_ready else "buffer fill"
+                ),
+                action="start",
+            )
+        except Exception:
+            shutdown_async_resources()
+            raise
 
         wait_iterations += 1
         time.sleep(1.0)
@@ -5296,6 +5431,8 @@ def async_grpo_train(
                         seq_logprob_error_metrics[
                             "num_masked_seqs_by_logprob_error"
                         ] = seq_logprob_error_metrics.pop("num_masked_seqs")
+
+                _raise_if_grpo_batch_has_no_valid_tokens(train_data)
 
                 # Pad teacher logprobs to match train_data sequence length.
                 if trajectory_teacher_logprobs is not None:
@@ -5762,7 +5899,7 @@ def async_grpo_train(
                         # completes; flushed at the next save or on training exit.
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
                         # Record last-successful-checkpoint time/step for external
@@ -5953,38 +6090,4 @@ def async_grpo_train(
         raise
 
     finally:
-        # Finalize any pending async checkpoint before tearing down workers.
-        try:
-            checkpointer.shutdown()
-        except Exception as e:
-            print(f"Error finalizing pending checkpoint: {e}")
-
-        print("🛑 Stopping trajectory collection...")
-        _flush_collector_telemetry()
-        try:
-            ray.kill(trajectory_collector)
-        except Exception as e:
-            print(f"Error stopping trajectory collector: {e}")
-
-        try:
-            ray.kill(replay_buffer)
-        except Exception as e:
-            print(f"Error stopping replay buffer: {e}")
-
-        # Environments can have in-flight HTTP requests to generation workers.
-        shutdown_environments(task_to_env, val_task_to_env)
-
-        print("🛑 Shutting down generation workers...")
-        try:
-            policy_generation.shutdown()
-        except Exception as e:
-            print(f"Error shutting down generation workers: {e}")
-
-        if policy is not policy_generation:
-            print("🛑 Shutting down policy workers...")
-            try:
-                policy.shutdown()
-            except Exception as e:
-                print(f"Error shutting down policy workers: {e}")
-
-        print("Async GRPO training complete!")
+        shutdown_async_resources()

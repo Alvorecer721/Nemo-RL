@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import ABC, abstractmethod
-from typing import Any, Optional, TypedDict
+from typing import Any, Callable, Optional, TypedDict
 
 import ray
 import torch
@@ -157,6 +157,16 @@ class PolicyInterface(ABC):
     @abstractmethod
     def save_checkpoint(self, *args: Any, **kwargs: Any) -> None:
         pass
+
+    def submit_async_save_finalization(self) -> Callable[[], None]:
+        """Return a waiter for any asynchronously written checkpoint data.
+
+        Synchronous policy implementations have nothing to submit and inherit
+        this no-op waiter. Async implementations must submit work to every rank
+        before returning so the caller can wait in a background thread without
+        racing the next distributed policy operation.
+        """
+        return lambda: None
 
     @abstractmethod
     def shutdown(self) -> bool:

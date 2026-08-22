@@ -17,7 +17,7 @@ import copy
 import enum
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import ray.exceptions
 import torch
@@ -52,6 +52,7 @@ from nemo_rl.experience.rollouts import (
     EffortLevelsConfig,
     _apply_effort_shaping,
     _attach_routed_experts_to_message_log_prefix,
+    _compute_generation_quality_metrics,
     _dummy_routed_experts_for_tokens,
     _effort_shaping_metrics,
     _find_routed_experts_template,
@@ -387,6 +388,7 @@ class AsyncRolloutImpl:
         max_rollout_turns: int,
         policy_generation: GenerationInterface,
         timeouts: RolloutTimeouts = RolloutTimeouts(),
+        cot_token_ids: Optional[tuple[int, int]] = None,
         **kwargs: Any,
     ) -> None:
         self._tokenizer = tokenizer
@@ -396,6 +398,7 @@ class AsyncRolloutImpl:
         self._max_rollout_turns = max_rollout_turns
         self._policy_generation = policy_generation
         self._timeouts = timeouts
+        self._cot_token_ids = cot_token_ids
 
     async def run_rollout(self, input_sample: DatumSpec) -> PromptGroupRecord:
         """Run num_generations_per_prompt rollouts for one prompt.
@@ -742,6 +745,20 @@ class AsyncRolloutImpl:
             t for m in all_sample_metrics for t in m["turn_total_tokens"]
         ]
 
+        quality_metrics = _compute_generation_quality_metrics(
+            [
+                [
+                    cast(torch.Tensor, m["token_ids"])
+                    for m in c.message_log
+                    if m["role"] == "assistant"
+                ]
+                for c in completions
+            ],
+            truncated,
+            self._cot_token_ids,
+        )
+        rollout_metrics.update(quality_metrics)
+
         # Necessary for downstream nemo rl logging/printing.
         rollout_metrics["mean_gen_tokens_per_sample"] = rollout_metrics[
             "gen_tokens_per_sample/mean"
@@ -774,6 +791,7 @@ class AsyncNemoGymRolloutImpl:
         stats: Optional[RolloutStats] = None,
         # Length-based reward shaping for low-effort prompts; None disables it.
         effort_config: Optional[EffortLevelsConfig] = None,
+        cot_token_ids: Optional[tuple[int, int]] = None,
         **kwargs: Any,
     ) -> None:
         self._tokenizer = tokenizer
@@ -791,6 +809,7 @@ class AsyncNemoGymRolloutImpl:
         ).max_gym_row_attempts
         self._stats = stats
         self._effort_config = effort_config
+        self._cot_token_ids = cot_token_ids
 
         self._validate_init_params()
 
@@ -1116,6 +1135,20 @@ class AsyncNemoGymRolloutImpl:
             "truncation_rate": sum(truncated) / n,
         }
 
+        quality_metrics = _compute_generation_quality_metrics(
+            [
+                [
+                    cast(torch.Tensor, m["token_ids"])
+                    for m in c.message_log
+                    if m["role"] == "assistant"
+                ]
+                for c in completions
+            ],
+            truncated,
+            self._cot_token_ids,
+        )
+        rollout_metrics.update(quality_metrics)
+
         # Agent-level metrics.
         agent_extras = [c.env_extras for c in completions]
         for key in agent_extras[0].keys():
@@ -1158,6 +1191,7 @@ class RolloutManager:
         timeouts: Optional[RolloutTimeouts] = None,
         retry_policy: Optional[RolloutRetryPolicy] = None,
         effort_config: Optional[EffortLevelsConfig] = None,
+        cot_token_ids: Optional[tuple[int, int]] = None,
     ) -> None:
         assert num_generations_per_prompt >= 1, (
             "num_generations_per_prompt must be >= 1"
@@ -1200,6 +1234,7 @@ class RolloutManager:
             retry_policy=self._retry_policy,
             stats=self._stats,
             effort_config=effort_config,
+            cot_token_ids=cot_token_ids,
         )
         self._tokenizer = tokenizer
         self._num_generations_per_prompt = num_generations_per_prompt

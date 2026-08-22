@@ -15,6 +15,7 @@ import os
 import warnings
 from collections import defaultdict
 from dataclasses import asdict, dataclass, fields
+from enum import Enum
 from functools import partial
 from typing import Any, Optional
 
@@ -55,6 +56,13 @@ class DPOSaveState:
     total_steps: int  # Track total number of steps across all epochs
     consumed_samples: int
     total_valid_tokens: int  # Track total number of non-padding tokens during training
+
+
+class DPOTrainStatus(Enum):
+    """Reason the DPO training loop stopped."""
+
+    COMPLETED = "completed"
+    TIMED_OUT = "timed_out"
 
 
 def _initial_dpo_save_state() -> DPOSaveState:
@@ -549,8 +557,16 @@ def dpo_train(
     logger,
     checkpointer,
     dpo_save_state: DPOSaveState,
-) -> None:
+) -> DPOTrainStatus:
     # Run dpo training
+    if (
+        master_config.checkpointing["checkpoint_must_save_by"] is not None
+        and not master_config.checkpointing["enabled"]
+    ):
+        raise ValueError(
+            "checkpointing must be enabled when checkpoint_must_save_by is set"
+        )
+
     timer = Timer()
     _telemetry = get_telemetry_handle()
     _tracer = _telemetry.tracer if _telemetry is not None else None
@@ -788,7 +804,7 @@ def dpo_train(
                         )
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
             timing_metrics = timer.get_timing_metrics(reduction_op="sum")
@@ -839,17 +855,18 @@ def dpo_train(
             current_step += 1
             total_steps += 1
 
+            if is_last_step:
+                checkpointer.shutdown()
+                if total_steps >= master_config.dpo.max_num_steps:
+                    print(
+                        "Max number of steps has been reached, stopping training early",
+                        flush=True,
+                    )
+                return DPOTrainStatus.COMPLETED
             if should_save_by_timeout:
                 checkpointer.shutdown()
                 print("Timeout has been reached, stopping training early", flush=True)
-                return
-            if total_steps >= master_config.dpo.max_num_steps:
-                checkpointer.shutdown()
-                print(
-                    "Max number of steps has been reached, stopping training early",
-                    flush=True,
-                )
-                return
+                return DPOTrainStatus.TIMED_OUT
 
         current_epoch += 1
         current_step = 0  # Reset step counter for new epoch
@@ -860,3 +877,4 @@ def dpo_train(
     # so without this the daemon finalization thread could be killed before the
     # final tmp_step_N is renamed.
     checkpointer.shutdown()
+    return DPOTrainStatus.COMPLETED

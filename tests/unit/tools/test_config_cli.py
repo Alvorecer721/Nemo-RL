@@ -73,6 +73,65 @@ def test__prune_equal_basic(cli: Any) -> None:
     assert cli._prune_equal(5, 6) == 5
 
 
+def test__prune_equal_preserves_override_subtree(cli: Any) -> None:
+    override = {
+        "_override_": True,
+        "required_equal_value": 1,
+        "nested": {"equal_value": 2},
+    }
+    base = {
+        "required_equal_value": 1,
+        "nested": {"equal_value": 2, "base_only": 3},
+    }
+
+    assert cli._prune_equal(override, base) == override
+
+
+def test_minimize_preserves_override_round_trip(cli: Any, tmp_path: Path) -> None:
+    """Minimization must not change replacement-section semantics."""
+    parent = tmp_path / "parent.yaml"
+    child = tmp_path / "child.yaml"
+    parent.write_text(
+        dedent(
+            """
+            data:
+              max_input_seq_length: 8192
+              shuffle: true
+              num_workers: 1
+              default:
+                prompt_file: inherited.txt
+            """
+        ).strip()
+    )
+    child.write_text(
+        dedent(
+            """
+            defaults: parent.yaml
+            data:
+              _override_: true
+              max_input_seq_length: 8192
+              shuffle: true
+              num_workers: 1
+              default:
+                prompt_file: child.txt
+            """
+        ).strip()
+    )
+    before = OmegaConf.to_container(cli.load_config(child), resolve=True)
+
+    ns = type("NS", (), {"configs": [str(child)], "base": None, "in_place": True})
+    assert cli.minimize(ns) == 0
+
+    minimized = child.read_text()
+    assert "_override_: true" in minimized
+    assert "max_input_seq_length: 8192" in minimized
+    assert "shuffle: true" in minimized
+    assert "num_workers: 1" in minimized
+    assert "prompt_file: child.txt" in minimized
+    after = OmegaConf.to_container(cli.load_config(child), resolve=True)
+    assert after == before
+
+
 def test__ensure_defaults_relative_variants(cli: Any, tmp_path: Path) -> None:
     base = tmp_path / "configs" / "base.yaml"
     child = tmp_path / "recipes" / "child.yaml"
