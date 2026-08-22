@@ -304,6 +304,9 @@ guides/sft-openmathinstruct2.md
 :caption: Guides
 
 adding-new-models.md
+apertus-quickstart.md
+apertus-traps-and-invariants.md
+apertus-xielu.md
 guides/sft.md
 guides/dpo.md
 guides/dapo.md
@@ -386,6 +389,8 @@ design-docs/modelopt-real-quant-architecture.md
 design-docs/nccl-reshard-refit.md
 design-docs/media-token-validity-mask.md
 design-docs/automodel-context-parallel.md
+design-docs/apertus-mm-onpolicy-dpo-data.md
+design-docs/apertus-omni-grpo-rl.md
 ```
 
 ```{toctree}
