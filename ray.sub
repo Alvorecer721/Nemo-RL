@@ -96,10 +96,26 @@ detect_cpus_per_node() {
 # User defined variables
 ########################################################
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-16}
-CONTAINER=$CONTAINER
-MOUNTS=$MOUNTS
+CONTAINER=${CONTAINER:-}
+CONTAINER_ENV=${CONTAINER_ENV:-}
+MOUNTS=${MOUNTS:-}
 COMMAND=${COMMAND:-}  # This is a script relative to the SLURM_SUBMIT_DIR. If left empty, it will leave the cluster idle after it's brought up.
 SETUP_COMMAND=${SETUP_COMMAND:-}  # Setup commands to run on all nodes before starting Ray.
+
+# The batch ingress may use a strict sbatch export allowlist. Once inside that
+# clean job, each srun must inherit the environment assembled by this script.
+export SLURM_EXPORT_ENV=ALL
+
+if [[ -n "$CONTAINER" && -n "$CONTAINER_ENV" ]]; then
+  echo "Error: Set exactly one of CONTAINER or CONTAINER_ENV, not both." >&2
+  exit 1
+elif [[ -z "$CONTAINER" && -z "$CONTAINER_ENV" ]]; then
+  echo "Error: Set exactly one of CONTAINER or CONTAINER_ENV." >&2
+  exit 1
+elif [[ -n "$CONTAINER_ENV" && ! -r "$CONTAINER_ENV" ]]; then
+  echo "Error: Container EDF is not readable: $CONTAINER_ENV" >&2
+  exit 1
+fi
 ########################################################
 # Ports for all nodes (should be odd numbers since we place head/worker[0] on the same node) so all workers get the odd ports, but the head will get +1 the ports
 NODE_MANAGER_PORT=${NODE_MANAGER_PORT:-1301}
@@ -230,6 +246,7 @@ fi
 # Number of GPUs per worker node
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 DEDICATED_RAY_HEAD=${DEDICATED_RAY_HEAD:-0}
+RAY_SINGLE_SRUN=${RAY_SINGLE_SRUN:-0}
 case "$DEDICATED_RAY_HEAD" in
   0|1) ;;
   *)
@@ -237,6 +254,21 @@ case "$DEDICATED_RAY_HEAD" in
     exit 1
     ;;
 esac
+case "$RAY_SINGLE_SRUN" in
+  0|1) ;;
+  *)
+    echo "Error: RAY_SINGLE_SRUN must be 0 or 1, got '$RAY_SINGLE_SRUN'." >&2
+    exit 1
+    ;;
+esac
+if [[ "$RAY_SINGLE_SRUN" == "1" && -z "$COMMAND" ]]; then
+  echo "Error: RAY_SINGLE_SRUN=1 currently requires a non-interactive COMMAND." >&2
+  exit 1
+fi
+if [[ "$RAY_SINGLE_SRUN" == "1" && ( -n "${SANDBOX_CONTAINER:-}" || -n "${SANDBOX_COMMAND:-}" ) ]]; then
+  echo "Error: RAY_SINGLE_SRUN=1 cannot launch a sandbox in a second Slurm step." >&2
+  exit 1
+fi
 
 # Detect GRES support and set GRES_ARG
 log_phase "detecting GRES support (sinfo)"
@@ -250,8 +282,14 @@ fi
 COMMON_SRUN_ARGS="$GRES_ARG"
 COMMON_SRUN_ARGS+=" --no-container-mount-home"
 COMMON_SRUN_ARGS+=" --mpi=pmix"
-COMMON_SRUN_ARGS+=" --container-mounts=$MOUNTS"
-COMMON_SRUN_ARGS+=" --container-image=$CONTAINER"
+if [[ -n "$MOUNTS" ]]; then
+  COMMON_SRUN_ARGS+=" --container-mounts=$MOUNTS"
+fi
+if [[ -n "$CONTAINER_ENV" ]]; then
+  COMMON_SRUN_ARGS+=" --environment=$CONTAINER_ENV"
+else
+  COMMON_SRUN_ARGS+=" --container-image=$CONTAINER"
+fi
 COMMON_SRUN_ARGS+=" --container-workdir=$SLURM_SUBMIT_DIR"
 # Pass partition/account explicitly for overlapping srun calls.
 COMMON_SRUN_ARGS+=" -p $SLURM_JOB_PARTITION"
@@ -516,11 +554,14 @@ if [[ -n "\${SLURM_TOPOLOGY_ADDR:-}" && "\${SLURM_TOPOLOGY_ADDR_PATTERN:-}" == "
     TOPO_RANK=\$(( 10#\$_block_digits * 10000000000 + 10#\$_node_digits ))
   fi
 elif [[ -n "\${SLURM_PROCID:-}" ]]; then
-  # Head srun and worker srun each start their own SLURM_PROCID counter at 0.
-  # Head hardcoded to 1; workers get +2 so worker[0]=2, worker[62]=64 -- keeps
-  # all nodes at unique values >=1 (Ray drops value-0 custom resources).
+  # Head is hardcoded to 1. In the traditional split-step mode the worker srun
+  # restarts SLURM_PROCID at 0, so workers use +2. In single-step mode proc 0 is
+  # the head and worker proc IDs start at 1, so +1 preserves the same 1-based,
+  # unique resource values (Ray drops value-0 custom resources).
   if [[ "\$SLURMD_NODENAME" == "$head_node" ]]; then
     TOPO_RANK=1
+  elif [[ "$RAY_SINGLE_SRUN" == "1" ]]; then
+    TOPO_RANK=\$(( 10#\$SLURM_PROCID + 1 ))
   else
     TOPO_RANK=\$(( 10#\$SLURM_PROCID + 2 ))
   fi
@@ -971,6 +1012,10 @@ while [[ \$count -lt $WORKER_NUM_RETRIES ]]; do
     bash "$SETUP_COMMAND_FILE"
   fi
   echo "[INFO][\$(date '+%Y-%m-%dT%H:%M:%S%z')] Worker \$SLURM_PROCID: starting Ray worker (attempt \$((count+1))/$WORKER_NUM_RETRIES)..."
+  WORKER_BLOCK_ARG="--block"
+  if [[ "$RAY_SINGLE_SRUN" == "1" ]]; then
+    WORKER_BLOCK_ARG=""
+  fi
   cat <<EOFINNER | bash
 ray start --address "$ip_head" \
           --disable-usage-stats \
@@ -986,8 +1031,19 @@ ray start --address "$ip_head" \
           --metrics-export-port=${METRICS_EXPORT_PORT} \
           $RAY_DEBUGGER_ARGS \
           \
-          --block
+          \$WORKER_BLOCK_ARG
 EOFINNER
+  ray_start_rc=\$?
+  if [[ "$RAY_SINGLE_SRUN" == "1" && \$ray_start_rc -eq 0 ]]; then
+    # In a shared srun the worker task must remain alive without blocking inside
+    # `ray start`, so it can observe the head's completion signal and exit 0.
+    # That lets the whole Slurm step finish cleanly after the driver terminates.
+    while [[ ! -f "$LOG_DIR/ENDED" ]]; do
+      sleep 2
+    done
+    ray stop --force || true
+    exit 0
+  fi
   count=\$((count+1))
   echo "[WARN] Worker \$SLURM_PROCID failed \$count/$WORKER_NUM_RETRIES times, restarting in 10 seconds..."
   sleep 10
@@ -1000,6 +1056,15 @@ EOF
 # Validate the generated head/worker scripts before submitting them to the cluster.
 bash -n <(printf '%s' "$head_cmd") || { echo "[FATAL] Head script has syntax errors" >&2; exit 1; }
 bash -n <(printf '%s' "$worker_cmd") || { echo "[FATAL] Worker script has syntax errors" >&2; exit 1; }
+
+# Materialize the generated commands on the shared filesystem. Split-step mode
+# still passes the strings directly to bash; single-step mode dispatches one of
+# these files per task so every Ray daemon inherits the same Slurm step/VNI.
+HEAD_COMMAND_FILE="$LOG_DIR/ray_head_command.sh"
+WORKER_COMMAND_FILE="$LOG_DIR/ray_worker_command.sh"
+printf '%s\n' "$head_cmd" > "$HEAD_COMMAND_FILE"
+printf '%s\n' "$worker_cmd" > "$WORKER_COMMAND_FILE"
+chmod +x "$HEAD_COMMAND_FILE" "$WORKER_COMMAND_FILE"
 
 ########################################################
 # Optional sandbox sidecar for NeMo-Skills-backed Gym resources.
@@ -1062,32 +1127,77 @@ else
   echo "[INFO] SANDBOX_CONTAINER or SANDBOX_COMMAND not defined, skipping sandbox startup"
 fi
 
-# Start the Ray head.
-log_phase "launching Ray head + worker sruns"
-srun $COMMON_SRUN_ARGS --container-name=ray-head --nodes=1 --ntasks=1 --cpus-per-task=$CPUS_PER_WORKER -w "$head_node" -o $LOG_DIR/ray-head.log bash -x -c "$head_cmd" &
-SRUN_PIDS["ray-head"]=$!
-
-# Start the Ray workers (all nodes except the head) with a single batched srun, so
-# the number of srun/slurmctld RPCs stays constant regardless of node count. In
-# single-node mode there are no workers: the head already registers its GPUs as Ray
-# resources.
+# Start Ray. Alps/Slingshot authorizes OFI per Slurm step, so every node that may
+# participate in one NCCL communicator must be inside the same srun. Other
+# clusters retain the established split-step behavior unless they opt in.
 _num_workers=$((SLURM_JOB_NUM_NODES - 1))
-if [[ $_num_workers -gt 0 ]]; then
-  # srun -o with %t produces per-task log files; zero-pad to the worker-count
-  # width so ray-worker-*.log filenames sort naturally (e.g. ray-worker-007.log).
+if [[ "$RAY_SINGLE_SRUN" == "1" ]]; then
+  log_phase "launching Ray head + workers in one srun"
   _task_digits=${#_num_workers}
-  srun $COMMON_SRUN_ARGS --container-name=ray-worker --exact \
-    --nodes=$_num_workers \
-    --ntasks=$_num_workers \
+  CLUSTER_DISPATCH_FILE="$LOG_DIR/ray_cluster_dispatch.sh"
+  cat > "$CLUSTER_DISPATCH_FILE" <<EOF
+#!/bin/bash
+set -uo pipefail
+
+if [[ "\$SLURM_PROCID" -eq 0 ]]; then
+  if [[ "\$SLURMD_NODENAME" != "$head_node" ]]; then
+    echo "[ERROR] Slurm task 0 landed on \$SLURMD_NODENAME, expected Ray head $head_node." >&2
+    exit 1
+  fi
+  set +e
+  bash -x "$HEAD_COMMAND_FILE" > "$LOG_DIR/ray-head.log" 2>&1
+  _head_rc=\$?
+  set -e
+  printf '%s\n' "\$_head_rc" > "$LOG_DIR/.ray_head_exit_code.tmp"
+  mv "$LOG_DIR/.ray_head_exit_code.tmp" "$LOG_DIR/RAY_HEAD_EXIT_CODE"
+  touch "$LOG_DIR/RAY_HEAD_FINISHED"
+  exit "\$_head_rc"
+fi
+
+if [[ "\$SLURMD_NODENAME" == "$head_node" ]]; then
+  echo "[ERROR] Nonzero Slurm task \$SLURM_PROCID landed on Ray head $head_node." >&2
+  exit 1
+fi
+_worker_index=\$((SLURM_PROCID - 1))
+printf -v _worker_log 'ray-worker-%0${_task_digits}d.log' "\$_worker_index"
+exec bash -x "$WORKER_COMMAND_FILE" > "$LOG_DIR/\$_worker_log" 2>&1
+EOF
+  chmod +x "$CLUSTER_DISPATCH_FILE"
+
+  srun $COMMON_SRUN_ARGS --container-name=ray-cluster --exact \
+    --nodes="$SLURM_JOB_NUM_NODES" \
+    --ntasks="$SLURM_JOB_NUM_NODES" \
     --ntasks-per-node=1 \
-    --cpus-per-task=$CPUS_PER_WORKER \
-    --kill-on-bad-exit=0 \
-    --exclude="$head_node" \
-    -o "$LOG_DIR/ray-worker-%0${_task_digits}t.log" \
-    bash -x -c "$worker_cmd" &
-  SRUN_PIDS["ray-workers"]=$!
+    --cpus-per-task="$CPUS_PER_WORKER" \
+    --kill-on-bad-exit=1 \
+    -o "$LOG_DIR/ray-cluster-%0${_task_digits}t.log" \
+    bash "$CLUSTER_DISPATCH_FILE" &
+  SRUN_PIDS["ray-cluster"]=$!
 else
-  echo "[INFO] Single-node mode: head node is the only compute node, no workers to launch"
+  log_phase "launching Ray head + worker sruns"
+  srun $COMMON_SRUN_ARGS --container-name=ray-head --nodes=1 --ntasks=1 --cpus-per-task=$CPUS_PER_WORKER -w "$head_node" -o $LOG_DIR/ray-head.log bash -x -c "$head_cmd" &
+  SRUN_PIDS["ray-head"]=$!
+
+  # Start the Ray workers (all nodes except the head) with a single batched srun,
+  # so the number of srun/slurmctld RPCs stays constant regardless of node count.
+  # In single-node mode there are no workers: the head already registers its GPUs.
+  if [[ $_num_workers -gt 0 ]]; then
+    # srun -o with %t produces per-task log files; zero-pad to the worker-count
+    # width so ray-worker-*.log filenames sort naturally.
+    _task_digits=${#_num_workers}
+    srun $COMMON_SRUN_ARGS --container-name=ray-worker --exact \
+      --nodes=$_num_workers \
+      --ntasks=$_num_workers \
+      --ntasks-per-node=1 \
+      --cpus-per-task=$CPUS_PER_WORKER \
+      --kill-on-bad-exit=0 \
+      --exclude="$head_node" \
+      -o "$LOG_DIR/ray-worker-%0${_task_digits}t.log" \
+      bash -x -c "$worker_cmd" &
+    SRUN_PIDS["ray-workers"]=$!
+  else
+    echo "[INFO] Single-node mode: head node is the only compute node, no workers to launch"
+  fi
 fi
 
 # Wait for the head container to report, via a shared-FS file, that the Ray head
@@ -1107,22 +1217,48 @@ if [[ -n "$COMMAND" ]]; then
   # during bringup (e.g. a failed node), signal ENDED and stop promptly instead of
   # stalling until the head's 30-min worker deadline. check_srun_processes isn't used
   # here because it also watches the head, whose exit is the normal success path.
-  set +e
-  while kill -0 "${SRUN_PIDS["ray-head"]}" 2>/dev/null; do
-    for _name in ray-workers sandbox; do
-      _pid="${SRUN_PIDS[$_name]:-}"
-      if [[ -n "$_pid" ]] && ! kill -0 "$_pid" 2>/dev/null; then
-        echo "[ERROR] Background srun '$_name' (pid=$_pid) exited before the head; failing fast." >&2
-        touch "$LOG_DIR/ENDED"
-        break 2
-      fi
+  if [[ "$RAY_SINGLE_SRUN" == "1" ]]; then
+    # The dispatcher records the driver's status before task 0 exits. Signal the
+    # non-blocking worker tasks to stop Ray, then require both the driver and the
+    # shared Slurm step to terminate successfully.
+    set +e
+    while kill -0 "${SRUN_PIDS["ray-cluster"]}" 2>/dev/null && \
+          [[ ! -f "$LOG_DIR/RAY_HEAD_FINISHED" ]]; do
+      sleep 2
     done
-    sleep 2
-  done
-  wait "${SRUN_PIDS["ray-head"]}"
-  exit_code=$?
-  set -e
-  exit $exit_code
+    if [[ -f "$LOG_DIR/RAY_HEAD_EXIT_CODE" ]]; then
+      exit_code=$(cat "$LOG_DIR/RAY_HEAD_EXIT_CODE")
+    else
+      echo "[ERROR] Shared Ray srun exited before the head recorded driver status." >&2
+      exit_code=1
+    fi
+    touch "$LOG_DIR/ENDED"
+    wait "${SRUN_PIDS["ray-cluster"]}"
+    cluster_exit_code=$?
+    set -e
+    if [[ "$exit_code" -eq 0 && "$cluster_exit_code" -ne 0 ]]; then
+      echo "[ERROR] Driver passed but shared Ray srun exited $cluster_exit_code." >&2
+      exit "$cluster_exit_code"
+    fi
+    exit "$exit_code"
+  else
+    set +e
+    while kill -0 "${SRUN_PIDS["ray-head"]}" 2>/dev/null; do
+      for _name in ray-workers sandbox; do
+        _pid="${SRUN_PIDS[$_name]:-}"
+        if [[ -n "$_pid" ]] && ! kill -0 "$_pid" 2>/dev/null; then
+          echo "[ERROR] Background srun '$_name' (pid=$_pid) exited before the head; failing fast." >&2
+          touch "$LOG_DIR/ENDED"
+          break 2
+        fi
+      done
+      sleep 2
+    done
+    wait "${SRUN_PIDS["ray-head"]}"
+    exit_code=$?
+    set -e
+    exit $exit_code
+  fi
 else
   # Interactive: poll for workers from the submit host by reading the file the
   # head's ray-status-sidecar publishes, then write the attach helper and idle.

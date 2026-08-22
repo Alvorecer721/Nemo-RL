@@ -76,6 +76,16 @@ pressure from the sibling's venv build into tmpfs is the alternate suspect).
 Serialize containerized steps — or give a concurrent step a different EDF —
 until the mechanism is pinned down.
 
+**Use one Ray `srun` for multi-node OFI jobs.** Slingshot authorizes the CXI VNI
+per Slurm step. The upstream `ray.sub` topology starts the Ray head and workers
+in separate steps, which is valid on clusters without step-scoped fabric
+credentials but cannot back one cross-node NCCL/OFI communicator on Alps. Set
+`RAY_SINGLE_SRUN=1` for non-interactive multi-node jobs here. This dispatches
+the Ray head as task 0 and one worker per remaining task inside a single step,
+so every later Ray actor inherits the same VNI. The mode rejects interactive
+and sandbox-sidecar launches until those lifecycles can also preserve the
+single-step invariant.
+
 ## Custom vLLM 0.25.1 GH200 image
 
 The machine-local `docker/nemo_rl_vllm0251.toml` EDF selects the custom arm64
