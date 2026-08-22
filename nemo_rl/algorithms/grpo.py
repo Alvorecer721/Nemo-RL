@@ -2967,6 +2967,12 @@ def grpo_train(
     val_period = master_config.grpo.val_period
     val_start_at = master_config.grpo.val_start_at
     colocated_inference = master_config.policy["generation"]["colocated"]["enabled"]
+    generation_discards_weights_on_finish = (
+        colocated_inference
+        and master_config.policy["generation"]["backend"] == "vllm"
+        and master_config.policy["generation"].get("vllm_cfg", {}).get("sleep_level", 1)
+        >= 2
+    )
     refit_buffer_size_gb = master_config.policy.get("refit_buffer_size_gb")
     stop_at_validation_threshold = master_config.grpo.stop_at_validation_threshold
     stop_at_validation_metric = master_config.grpo.stop_at_validation_metric
@@ -3001,6 +3007,10 @@ def grpo_train(
             processor=processor,
         )
         policy_generation.finish_generation()
+        # finish_generation may discard weights on sleep (vllm sleep_level>=2), so
+        # the pre-loop refit is consumed: mark generation stale to refit before step 1.
+        if generation_discards_weights_on_finish:
+            POLICY_GENERATION_STALE = True
         logger.log_metrics(val_metrics, current_step, prefix="validation")
         logger.log_metrics(validation_timings, current_step, prefix="timing/validation")
         if master_config.grpo.debug_payload_metrics:
@@ -3711,6 +3721,8 @@ def grpo_train(
                         processor=processor,
                     )
                     policy_generation.finish_generation()
+                    if generation_discards_weights_on_finish:
+                        POLICY_GENERATION_STALE = True
                     logger.log_metrics(
                         validation_timings, total_steps + 1, prefix="timing/validation"
                     )
