@@ -8,14 +8,13 @@ When you add a model variant or bump a dependency, re-read this page.
 
 ## 1. vLLM dummy-load orphans non-trainable state  ⚠ fixed, stays fixable
 
-NeMo-RL forces `load_format="dummy"` for training-mode vLLM engines (`nemo_rl/models/generation/__init__.py`) — engines start as noise and rely on refit to deliver real weights.
-Refit streams **trainable parameters only** (`bridge.export_hf_weights`).
-Any architecture whose checkpoint carries forward-load-bearing **buffers** is silently corrupted: for Apertus, the 64 xIELU `act_fn.{beta,eps}` buffers (32 layers × 2) stayed at noise → Generation KL Error 0.7935 ≈ a genuinely off-policy generator.
+NeMo-RL forces `load_format="dummy"` for training-mode vLLM engines (`nemo_rl/models/generation/__init__.py`) — engines start as noise and rely on refit to deliver trained weights. Apertus originally exposed the xIELU `act_fn.{beta,eps}` architecture constants as persistent buffers, so dummy loading randomized them. The first workaround synthesized fake refit keys for those constants; that restored PP1 parity but made the weight manifest depend on pipeline topology and failed at PP>1.
 
-- **Fix (shipped)**: the bridge emits the xIELU `beta`/`eps` buffers into the HF refit stream (`apertus_bridge.maybe_modify_converted_hf_weight`, in the pinned Apertus bridge fork), so vLLM may dummy-load and the step-0 refit still delivers correct constants. Verified originally via disk-load parity: gen KL 0.7935 → **0.0003**.
-- **Posture**: prefer `load_format=auto` for any new architecture until its buffer inventory is audited (`state_dict` keys vs `named_parameters`).
-- **Upstream asks**: (a) NeMo-RL: auto-refuse dummy when the checkpoint carries buffers absent from the refit stream; (b) vLLM: `XIELU`'s Python path should read the init-captured scalars like its CUDA path does — makes the class unconstructible.
-- **Masking hazard**: the vLLM CUDA xielu path hides this bug (scalars captured at `__init__`). An environment with the kernel installed shows nothing; one without it shows 0.79. Never debug this class by comparing environments with different kernel availability.
+- **Fix (shipped)**: xIELU `beta`/`eps` are engine-owned architecture constants. The vLLM patch registers them as non-persistent buffers, validates legacy checkpoint keys without loading them, and fails if the patch cannot be applied. The Bridge declares `APERTUS_XIELU_STATIC_STATE_OWNER = "engine"` and no longer emits synthetic refit weights.
+- **Transport contract**: every policy rank must expose the same logical refit manifest. Both the HF-schema and NCCL-reshard setup paths now compare rank manifests and fail before transfer on missing, unexpected, duplicate, or shape/dtype-drifted keys.
+- **Evidence**: PP2 is the permanent regression rung; the 70B PP4/NCCL-reshard run completed three refits with generation KL 0.00094–0.00103.
+- **Posture**: for any new architecture, inventory `state_dict` versus `named_parameters`. Put fixed constructor values in engine state, trained tensors in the weight stream, and reject ambiguous ownership.
+- **Masking hazard**: the optional CUDA xIELU path snapshots scalars at initialization, while the Python path reads buffers. Testing only one implementation can hide a corrupted-buffer design.
 
 ## 2. llama3 RoPE scaling: 4 parameters, 1 exposed  ⚠ latent
 

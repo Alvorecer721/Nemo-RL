@@ -54,6 +54,12 @@ _RADIO_MARKER = "initializer_factor = self.config.initializer_factor"
 _GLM_DSA_SOURCE = "model_executor/models/deepseek_v2.py"
 _GLM_DSA_PATCH_FN = "_patch_vllm_glm_decoder_sequence_parallel_moe"
 _GLM_DSA_MARKER = 'getattr(config, "model_type", None) != "glm_moe_dsa"'
+_XIELU_SOURCE = "model_executor/layers/activation.py"
+_XIELU_PATCH_FN = "_patch_vllm_xielu_static_constants"
+_XIELU_MARKER = '"beta", torch.tensor(beta, dtype=dtype), persistent=False'
+_APERTUS_SOURCE = "model_executor/models/apertus.py"
+_APERTUS_PATCH_FN = "_patch_vllm_apertus_static_xielu_loader"
+_APERTUS_MARKER = "Apertus xIELU architecture constant"
 
 
 @pytest.fixture
@@ -82,6 +88,32 @@ def patched_glm_dsa_source(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
     patches._patch_vllm_glm_decoder_sequence_parallel_moe(logging.getLogger(__name__))
+    return copied
+
+
+@pytest.fixture
+def patched_xielu_source(tmp_path, monkeypatch):
+    """The installed vLLM xIELU op, unpatched then patched in tmp."""
+    copied = write_unpatched_copy(
+        _XIELU_SOURCE,
+        _XIELU_PATCH_FN,
+        tmp_path / "activation.py",
+    )
+    monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
+    patches._patch_vllm_xielu_static_constants(logging.getLogger(__name__))
+    return copied
+
+
+@pytest.fixture
+def patched_apertus_source(tmp_path, monkeypatch):
+    """The installed vLLM Apertus loader, unpatched then patched in tmp."""
+    copied = write_unpatched_copy(
+        _APERTUS_SOURCE,
+        _APERTUS_PATCH_FN,
+        tmp_path / "apertus.py",
+    )
+    monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
+    patches._patch_vllm_apertus_static_xielu_loader(logging.getLogger(__name__))
     return copied
 
 
@@ -140,6 +172,73 @@ def test_radio_layerscale_patch_anchor_still_matches_installed_vllm(
     content = patched_radio_source.read_text()
     assert _RADIO_MARKER in content
     assert "Skip layer-scale entries that vLLM doesn't use" not in content
+
+
+@pytest.mark.vllm
+def test_xielu_constants_are_non_persistent(patched_xielu_source):
+    content = patched_xielu_source.read_text()
+    assert _XIELU_MARKER in content
+    assert '"eps", torch.tensor(eps, dtype=dtype), persistent=False' in content
+    assert 'if "beta" in self.state_dict() or "eps" in self.state_dict():' in content
+    ast.parse(content)
+
+
+@pytest.mark.vllm
+def test_apertus_loader_validates_instead_of_overwriting_static_xielu(
+    patched_apertus_source,
+):
+    content = patched_apertus_source.read_text()
+    assert _APERTUS_MARKER in content
+    assert 'getattr(self, "_nrl_xielu_static_buffers", None)' in content
+    assert 'if name.endswith((".beta", ".eps")) and name in static_buffers:' in content
+    assert "if not torch.equal(expected, received):" in content
+    ast.parse(content)
+
+
+@pytest.mark.vllm
+def test_xielu_constants_patch_is_idempotent(patched_xielu_source, monkeypatch):
+    before = patched_xielu_source.read_text()
+    monkeypatch.setattr(
+        patches, "_get_vllm_file", lambda _relative: str(patched_xielu_source)
+    )
+    patches._patch_vllm_xielu_static_constants(logging.getLogger(__name__))
+    assert patched_xielu_source.read_text() == before
+
+
+@pytest.mark.vllm
+def test_apertus_loader_patch_is_idempotent(patched_apertus_source, monkeypatch):
+    before = patched_apertus_source.read_text()
+    monkeypatch.setattr(
+        patches, "_get_vllm_file", lambda _relative: str(patched_apertus_source)
+    )
+    patches._patch_vllm_apertus_static_xielu_loader(logging.getLogger(__name__))
+    assert patched_apertus_source.read_text() == before
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    ("patch_fn_name", "message"),
+    [
+        (_XIELU_PATCH_FN, "Required vLLM xIELU static-constant patch"),
+        (_APERTUS_PATCH_FN, "Required vLLM Apertus static xIELU loader patch"),
+    ],
+)
+def test_apertus_xielu_patch_anchor_miss_is_fatal(
+    patch_fn_name,
+    message,
+    tmp_path,
+    monkeypatch,
+):
+    unrelated_source = tmp_path / "unexpected_vllm_source.py"
+    unrelated_source.write_text("# incompatible vLLM source shape\n")
+    monkeypatch.setattr(
+        patches,
+        "_get_vllm_file",
+        lambda _relative: str(unrelated_source),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        getattr(patches, patch_fn_name)(logging.getLogger(__name__))
 
 
 _FLASHINFER_AR_SOURCE = "distributed/device_communicators/flashinfer_all_reduce.py"
@@ -288,10 +387,27 @@ def test_source_compat_applies_all_interpreter_independent_patches(monkeypatch):
         "_patch_vllm_glm_decoder_sequence_parallel_moe",
         lambda _logger: applied.append("glm-dsa"),
     )
+    monkeypatch.setattr(
+        patches,
+        "_patch_vllm_xielu_static_constants",
+        lambda _logger: applied.append("xielu"),
+    )
+    monkeypatch.setattr(
+        patches,
+        "_patch_vllm_apertus_static_xielu_loader",
+        lambda _logger: applied.append("apertus"),
+    )
 
     patches.ensure_vllm_source_compat()
 
-    assert applied == ["tool-parser", "radio", "glm-dsa", "mnnvl"]
+    assert applied == [
+        "tool-parser",
+        "xielu",
+        "apertus",
+        "radio",
+        "glm-dsa",
+        "mnnvl",
+    ]
 
 
 @pytest.mark.parametrize(

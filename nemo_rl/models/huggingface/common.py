@@ -80,9 +80,9 @@ def is_apertus_model(model_name: str) -> bool:
     Matches the whole family by prefix: the local checkpoints report
     ``apertus`` while the released swiss-ai/Apertus-v1.5-* report ``apertus1p5``.
 
-    xIELU's beta/eps constants now flow through the Megatron-Bridge refit
-    (apertus_bridge.maybe_modify_converted_hf_weight), so Apertus no longer
-    needs load_format="auto" — it dummy-loads like other refit-fed models.
+    xIELU's beta/eps values are engine-owned architecture constants rather than
+    trained weight state.  The vLLM compatibility patch keeps them out of dummy
+    loading and refit, so Apertus can use the standard dummy-load path safely.
     """
     hf_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     return (getattr(hf_config, "model_type", None) or "").startswith("apertus")

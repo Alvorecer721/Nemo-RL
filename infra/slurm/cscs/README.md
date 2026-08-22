@@ -248,6 +248,11 @@ sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
 sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
   infra/slurm/cscs/probe_nemo_rl_grpo_vllm0251_image.slurm
 
+# Permanent Apertus pipeline-parallel refit regression: TP2 / PP2 on 4 GH200s.
+sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
+  --export=ALL,MEGATRON_TP_SIZE=2,MEGATRON_PP_SIZE=2 \
+  infra/slurm/cscs/probe_nemo_rl_grpo_vllm0251_image.slurm
+
 sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
   infra/slurm/cscs/probe_nemo_rl_grpo_async_vllm0251_image.slurm
 
