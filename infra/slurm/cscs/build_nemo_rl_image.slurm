@@ -65,8 +65,8 @@ esac
 # Podman's named-context identity bug that otherwise invalidates uv.lock when
 # an unrelated application source file changes. Set to "rebuild" only when
 # intentionally changing dependencies.
-HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-f189ec651a8a976671a1bcc77d3487000999acde233786f8467ce759a08f6d52}
-HERMETIC_FINGERPRINT_SHA256=f189ec651a8a976671a1bcc77d3487000999acde233786f8467ce759a08f6d52
+HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-ae440a7e8b2ab39353e47d5d879e9cfcbb3f6bdda5ca3133015592611772141d}
+HERMETIC_FINGERPRINT_SHA256=ae440a7e8b2ab39353e47d5d879e9cfcbb3f6bdda5ca3133015592611772141d
 # Use an explicit allocation-local store so the launcher does not depend on a
 # login-node containers/storage.conf. Large release layers are bounded in the
 # Dockerfile so they fit this node-local tmpfs.
@@ -334,11 +334,11 @@ print(match.group(2))
     echo "Hermetic pyproject MD5: $HERMETIC_PYPROJECT_MD5"
     echo "Hermetic lock MD5:      $HERMETIC_LOCK_MD5"
     echo "Hermetic vLLM version:  $HERMETIC_VLLM_VERSION"
-    [[ "$HERMETIC_PYPROJECT_MD5" == "1e3fcef485b5ebf9d48deec104110d64" ]] || {
+    [[ "$HERMETIC_PYPROJECT_MD5" == "f0d45e9e7c2b755b28f92dcf03b33bae" ]] || {
         echo "Hermetic pyproject.toml does not match the pinned digest" >&2
         exit 1
     } # pragma: allowlist secret
-    [[ "$HERMETIC_LOCK_MD5" == "3b2857b69fafc927ad8d2183b176fa79" ]] || {
+    [[ "$HERMETIC_LOCK_MD5" == "6b479359053820191dea5e3cffd5af07" ]] || {
         echo "Hermetic uv.lock does not match the pinned digest" >&2
         exit 1
     } # pragma: allowlist secret
