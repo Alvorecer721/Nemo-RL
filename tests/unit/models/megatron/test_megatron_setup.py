@@ -1840,8 +1840,10 @@ class TestCreateCheckpointConfig:
         from nemo_rl.models.megatron.setup import _create_checkpoint_config
 
         ckpt_cfg = {
+            "fully_parallel_save": False,
             "async_save": True,
             "ckpt_assume_constant_structure": True,
+            "ckpt_load_validate_sharding_integrity": False,
             "ckpt_fully_parallel_save_process_group": "ep_dp",
             "ckpt_fully_parallel_load_process_group": "ep_dp",
             "ckpt_fully_parallel_load_exchange_algo": "broadcast",
@@ -1854,8 +1856,10 @@ class TestCreateCheckpointConfig:
             ckpt_cfg=ckpt_cfg,
         )
 
+        assert checkpoint_config.fully_parallel_save is False
         assert checkpoint_config.async_save is True
         assert checkpoint_config.ckpt_assume_constant_structure is True
+        assert checkpoint_config.ckpt_load_validate_sharding_integrity is False
         assert checkpoint_config.ckpt_fully_parallel_save_process_group == "ep_dp"
         assert checkpoint_config.ckpt_fully_parallel_load_process_group == "ep_dp"
         assert checkpoint_config.ckpt_fully_parallel_load_exchange_algo == "broadcast"
