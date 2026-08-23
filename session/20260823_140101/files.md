@@ -14,3 +14,9 @@
 - `tests/unit/distributed/test_numa_utils.py`: preferred-memory-policy regression coverage.
 - `examples/configs/recipes/llm/autoresearch/grpo-glm5.1-152n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml`: capacity-only DP32 restore recipe; TP1/PP18 and the eight-node rollout pool remain unchanged.
 - `infra/slurm/cscs/autoresearch/{submit,run}_glm51_cross_allocation_checkpoint.sh`: now accept an explicit node count, recipe, Phase-A terminal artifact and optional reservation without changing the certified 80-node defaults.
+
+## TP2 no-fix diagnostic
+
+- `examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-checkpoint-{save,resume}.yaml`: fresh TP2/PP18/ETP1/EP16 Phase A/B pair on the 80-node reservation; dense DP8 and expert DP1.
+- `infra/slurm/cscs/autoresearch/run_glm51_cross_allocation_checkpoint.sh`: validates both certified TP1 and diagnostic TP2 grids and prints dense/expert DP explicitly.
+- `tests/unit/infra/test_glm51_cross_allocation_checkpoint.py`: covers both TP2 phases plus existing TP1/DP32 recipes; 9/9 focused tests pass.

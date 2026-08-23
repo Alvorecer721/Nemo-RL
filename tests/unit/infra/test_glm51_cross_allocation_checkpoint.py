@@ -12,23 +12,58 @@ RECIPE_ROOT = REPO_ROOT / "examples/configs/recipes/llm/autoresearch"
 
 
 @pytest.mark.parametrize(
-    ("nodes", "phase", "expected_nodes"),
-    [(80, "save", 80), (80, "resume", 80), (152, "resume", 152)],
+    ("recipe_name", "phase", "expected_nodes", "expected_topology", "expected_dp"),
+    [
+        (
+            "grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml",
+            "save",
+            80,
+            (1, 18, 1, 16),
+            (16, 1),
+        ),
+        (
+            "grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml",
+            "resume",
+            80,
+            (1, 18, 1, 16),
+            (16, 1),
+        ),
+        (
+            "grpo-glm5.1-152n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml",
+            "resume",
+            152,
+            (1, 18, 1, 16),
+            (32, 2),
+        ),
+        (
+            "grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-checkpoint-save.yaml",
+            "save",
+            80,
+            (2, 18, 1, 16),
+            (8, 1),
+        ),
+        (
+            "grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-checkpoint-resume.yaml",
+            "resume",
+            80,
+            (2, 18, 1, 16),
+            (8, 1),
+        ),
+    ],
 )
 def test_glm51_checkpoint_recipe_contract(
-    nodes: int,
+    recipe_name: str,
     phase: str,
     expected_nodes: int,
+    expected_topology: tuple[int, int, int, int],
+    expected_dp: tuple[int, int],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GLM_CKPT", "/models/glm-5.1")
     monkeypatch.setenv("GLM_RESUME_CHECKPOINT_DIR", "/checkpoints")
     monkeypatch.setenv("GLM_RUN_DIR", "/run")
     register_omegaconf_resolvers()
-    recipe = (
-        RECIPE_ROOT
-        / f"grpo-glm5.1-{nodes}n4g-megatron-async-vllm-tp32-checkpoint-{phase}.yaml"
-    )
+    recipe = RECIPE_ROOT / recipe_name
     config = MasterConfig(**OmegaConf.to_container(load_config(recipe), resolve=True))
     megatron = config.policy["megatron_cfg"]
     generation = config.policy["generation"]
@@ -42,8 +77,22 @@ def test_glm51_checkpoint_recipe_contract(
     assert (
         megatron["tensor_model_parallel_size"],
         megatron["pipeline_model_parallel_size"],
+        megatron["expert_tensor_parallel_size"],
         megatron["expert_model_parallel_size"],
-    ) == (1, 18, 16)
+    ) == expected_topology
+    trainer_ranks = (expected_nodes - 8) * 4
+    dense_dp = trainer_ranks // (
+        megatron["tensor_model_parallel_size"]
+        * megatron["pipeline_model_parallel_size"]
+    )
+    expert_dp = trainer_ranks // (
+        megatron["expert_tensor_parallel_size"]
+        * megatron["expert_model_parallel_size"]
+        * megatron["pipeline_model_parallel_size"]
+    )
+    assert (dense_dp, expert_dp) == expected_dp
+    if megatron["tensor_model_parallel_size"] > 1:
+        assert megatron["sequence_parallel"] is True
     assert (vllm["tensor_parallel_size"], vllm["expert_parallel_size"]) == (
         32,
         32,
@@ -113,5 +162,11 @@ def test_glm51_checkpoint_runner_validates_scaled_data_parallelism() -> None:
     assert 'recipe = Path(os.environ["GLM_RECIPE"])' in runner
     assert 'expected_nodes = int(os.environ["GLM_NUM_NODES"])' in runner
     assert "trainer_ranks = (expected_nodes - 8) * 4" in runner
-    assert "data_parallel_size = trainer_ranks // model_parallel_size" in runner
-    assert 'data_parallel_size % megatron["expert_model_parallel_size"] == 0' in runner
+    assert (
+        "dense_data_parallel_size = trainer_ranks // dense_model_parallel_size"
+        in runner
+    )
+    assert (
+        "expert_data_parallel_size = trainer_ranks // expert_model_parallel_size"
+        in runner
+    )
