@@ -93,13 +93,13 @@ image built from this checkout. It runs the baked `/opt/nemo-rl` tree and
 frozen environments under `/opt/ray_venvs`; it does not require checkout-local
 `.venv` or `venvs` directories.
 
-The current SquashFS is a clean, standalone build from `7c68228e4f09`. It
-contains the `packed_broadcast` stream joins, RayExecutorV2 TCPStore and
-MessageQueue port patches, the post-v0.25.1 invalid-MNNVL-workspace fix, FP8
-in-place refit fix, and dependency-aware frozen environment markers. It
-supersedes the earlier
-`336136c10490-dirty-fd360335e307` artifact, which required a checkout overlay
-and must not be used for multi-node startup or refit certification.
+The current SquashFS is the clean, standalone release build from
+`8f22e59195f547c5715ed250cd49d4776cda5d43`. Public `main` additionally contains
+four dependency-neutral lint corrections in `d2e1e082f`; no image rebuild is
+required for that delta. The artifact includes the Apertus PP-safe refit fix,
+rank-manifest validation, single-step Ray startup for CSCS Slingshot, and the
+frozen vLLM, SGLang, DTensor, Megatron, quantized-policy, and trajectory-worker
+environments.
 
 The EDF ships with the checkout and points at the shared certified copy below
 (no build needed, readable by all of `infra01`). To run your own build instead,
@@ -108,12 +108,12 @@ path — and leave the checked-in default on the shared copy.
 
 | Field | Value |
 | --- | --- |
-| Shared SquashFS | `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus+v0.7.0+vllm-0.25.1.aarch64.sqsh` |
-| Builder original | `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-7c68228e4f09-38c6b702948c.sqsh` |
-| Size | 48,752,754,688 bytes (about 45.4 GiB) |
-| SHA-256 | `d50f39e45f6104d13e12b9323dbe28cc91b0f13e3a250d029ce6cc7e7646742a` |
-| OCI tag | `nemo-rl-apertus:vllm-0.25.1-7c68228e4f09-38c6b702948c` |
-| OCI image ID | `18c36e6a31df01fc0370f65f9446c373d741198abf821b35a89be8214c11e79e` |
+| Shared SquashFS | `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus-vllm-0.25.1-8f22e59195f5-2a9bd7b13c00.aarch64.sqsh` |
+| Builder original | `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-8f22e59195f5-2a9bd7b13c00.sqsh` |
+| Source revision | `8f22e59195f547c5715ed250cd49d4776cda5d43` |
+| Build job | `3156560` (`COMPLETED 0:0`) |
+| Size | 50,049,777,664 bytes (about 46.6 GiB) |
+| SHA-256 | `4aaf2b1bba8613a1e515281d84ab9e330c41d2774ccd3992b5f0c0f81e9dd002` |
 | Persistent OCI data | `/iopsstor/scratch/cscs/xyixuan/podman-cache/nemo-rl` |
 
 The image ID suffix is `<12-char-git-revision>-<12-char-build-input-hash>`.
@@ -126,7 +126,7 @@ enter it.
 
 ### Build and cache lifecycle
 
-Submit the builder from the repository root. The launcher already names the
+Submit the builder from the repository root. The checked-in launchers pin the
 current Apertus reservation; override the `#SBATCH` option at submission time
 when the reservation changes.
 
@@ -215,9 +215,9 @@ Historical build output is under `logs/nrl-vllm0251-image_*.{out,err}`. Direct
 step-39 recovery was an allocation-specific rescue, not the supported rebuild
 path; use `build_nemo_rl_image.slurm` for future builds.
 
-The final clean rebuild on job `3077164` restored the persistent hermetic
+The earlier `7c68228e4f09` rebuild on job `3077164` restored the persistent hermetic
 manifest, committed every release actor as a bounded layer, exported the
-SquashFS above, and passed the baked import check in 2:03:51. It crossed the
+then-current SquashFS, and passed the baked import check in 2:03:51. It crossed the
 former five-DTensor temporary-space failure point with 235+ GiB of node-local
 tmpfs still available.
 
@@ -240,9 +240,10 @@ publishing, which was the remaining session-bus dependency. A missing session
 bus may still produce a harmless cgroup warning, but no longer blocks registry
 readiness.
 
-The successful build log is `logs/nrl-vllm0251-image_3077164.out`. It records
-all 47 release steps, final OCI publication, SquashFS export and checksum, and
-the baked vLLM 0.25.1 renderer, tokenizer, and tool-parser import check.
+The historical `7c68228e4f09` build log is
+`logs/nrl-vllm0251-image_3077164.out`. Final build `3156560` repeated the
+release assembly from the refreshed hermetic cache and passed SquashFS plus
+baked CUDA/vLLM/renderer/tokenizer/tool-parser validation.
 
 ### Image validation
 
@@ -276,37 +277,22 @@ sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
   infra/slurm/cscs/probe_nemo_rl_vllm0251_multinode_image.slurm
 ```
 
-The builder's CPU-side standalone boundary check passed on job `3077164`:
+The builder's CPU-side standalone boundary check passed on job `3156560`:
 the exported image reports vLLM `0.25.1`, OpenAI `2.6.1`, and xgrammar
 `0.2.3`, and imports the renderer, tokenizer, and Apertus tool parser from its
-baked tree. Run the six GPU probes above after changing the artifact; they
+baked tree. Run the seven GPU probes above after changing the artifact; they
 cover real-model generation and repeated FP8 storage-preserving refit, a
 four-GH200 DPO step with CUDA xIELU, synchronous and asynchronous four-GH200
 GRPO refit/KL steps, a compiled single-node TP4 vLLM run, and a two-node TP8
 vLLM startup respectively.
 
-The GRPO probes' `RECIPE` defaults use the post-rename recipe names and
-therefore match any image built from current `main`. The published
-`7c68228e4f09` image predates the rename: to certify that specific artifact,
-override the recipe to the old in-image name, e.g.
-`RECIPE=/opt/nemo-rl/examples/configs/recipes/llm/probe-grpo-apertus1p5-8b-1n4g-megatron-async.yaml`
-(and `.../probe-grpo-apertus1p5-8b-1n4g-megatron.yaml` for the sync probe).
-Drop this note once the image is rebuilt from a post-rename revision.
-
-The baked TP2 async probe passed on job `3077837` in 4:48. It ran one compiled
-TP2 AsyncLLM engine on two GH200s and TP2 Megatron training on the other two,
-rejected the invalid MNNVL workspace, captured CUDA graphs, completed two GRPO
-steps with generation KL error `0.0000`, refit successfully, and used the CUDA
-xIELU training kernel.
-
-The baked single-node TP4 probe passed on job `3078831` in 3:27. It loaded the
-real Apertus 1.5 8B checkpoint across all four GH200s with compilation enabled,
-rejected the unusable MNNVL multicast workspace, initialized the compiled
-TRT-LLM FlashInfer all-reduce backend, captured CUDA graphs, and generated four
-64-token responses. This is the relevant full-node inference certification for
-Clariden. The two-node TP8 probe is optional, non-blocking scalability evidence;
-current Apertus 8B Async-GRPO uses one node with TP2 inference and TP2 training
-and does not require TP8.
+The GRPO probes' `RECIPE` defaults match the recipe names baked into this image.
+Final PP2 regression job `3156866` completed refit, generation, logprobs,
+backward, and training with generation KL `0.0002`. Five-node Apertus-1.5 70B
+async-GRPO job `3156886` then completed three NCCL-reshard refits and three
+learning steps with generation KL below `0.001`; this is the current
+pipeline-parallel production smoke. The two-node TP8 probe remains optional,
+non-blocking scalability evidence.
 
 The two-node probe carries a CSCS-specific vLLM 0.25.1 collective workaround:
 it disables vLLM's direct PyNccl and Hopper symmetric-memory backends for the

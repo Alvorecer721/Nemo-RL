@@ -108,9 +108,9 @@ snapshot lines across runs; use the per-step `generation:` phase timers.
   `~/.cache/vllm*/torch_compile_cache` if the kernel is ever re-injected (details on
   the traps page).
 - **Why removal also helps correctness observability**: vLLM's kernel path captures
-  `beta`/`eps` at `__init__` and therefore masks refit-buffer failures from the KL
-  gauge; the Python path reads the refit-delivered buffers, keeping that failure class
-  visible in production (traps page, item 1).
+  `beta`/`eps` at `__init__`, while the Python path reads the live engine-owned,
+  non-persistent buffers. The latter keeps unintended mutation of those constants
+  visible to the KL gauge (traps page, item 1).
 - **Re-enabling** (should a future measured regime justify it): the kernel-free
   default lives as `policy.generation.vllm_cfg.env_vars.PYTHONPATH: ""` in the recipe
   family root (`grpo-apertus1p5-8b-1n4g-megatron-probe.yaml`), so it holds on every
