@@ -9,7 +9,7 @@
 
 ## Current diagnosis
 
-The initiating fault is a strict NUMA memory-policy bug. Instrumented retry `3163625` failed at checkpoint with Slurm reporting `nid006944: task 20: Out Of Memory`. Ranks 200, 201 and 203 on that node wrote roughly 29.52-GB shards; rank 202, hard-bound to the roughly 120-GB CPU NUMA node 2, wrote none. The node's 891.29-GB job cgroup peaked at only 334.78 GB, so aggregate node memory was not exhausted. MCore's async preload creates a full CPU copy of each rank's tensors; strict `numa_set_membind` forbids fallback to free memory on other nodes. NVRx v0.6 can additionally turn a preload-child death into an infinite parent wait because it blocks on `preload_q.join()` without checking child liveness. The code now prefers local memory with fallback; exact-topology save and fresh-allocation resume are the remaining causal validation.
+The initiating fault was a strict NUMA memory-policy bug. Instrumented retry `3163625` failed at checkpoint with Slurm reporting `nid006944: task 20: Out Of Memory`. Ranks 200, 201 and 203 on that node wrote roughly 29.52-GB shards; rank 202, hard-bound to the roughly 120-GB CPU NUMA node 2, wrote none. The node's 891.29-GB job cgroup peaked at only 334.78 GB, so aggregate node memory was not exhausted. MCore's async preload creates a full CPU copy of each rank's tensors; strict `numa_set_membind` forbids fallback to free memory on other nodes. NVRx v0.6 can additionally turn a preload-child death into an infinite parent wait because it blocks on `preload_q.join()` without checking child liveness. Preferred-local placement with fallback passed the exact 80-node save in job `3164148`: 288/288 shards, 8.926 TB and complete metadata with no OOM. Fresh-allocation optimizer/replay restoration remains the final checkpoint gate.
 
 ## Plan
 
@@ -18,6 +18,6 @@ The initiating fault is a strict NUMA memory-policy bug. Instrumented retry `316
 - [x] Pass current-source sync and NVRx save plus fresh-allocation next-step controls; both red Slurm exits were post-proof harness assertions, not checkpoint failures.
 - [x] Port the GLM harness without a custom dataset adapter. Source-overlay diagnostics use an empty head-scoped actor venv because mutating baked packages in place fails on Enroot's writable overlay; production remains image-owned.
 - [x] Runtime-attribute the checkpoint loss to strict per-worker NUMA memory binding and replace it with preferred-local placement that allows fallback.
-- [ ] Complete a 288-rank GLM optimizer save and fresh-allocation resume.
+- [ ] Complete a 288-rank GLM optimizer save and fresh-allocation resume. Save is green in `3164148`; resume is pending.
 - [ ] Runtime-prove nonzero reference KL.
 - [ ] Run representative endurance and publish only runtime-proven changes.
