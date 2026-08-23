@@ -51,3 +51,10 @@
 - Added an explicit scale/recipe/Phase-A-artifact contract to the launcher and a `152n4g` resume recipe. The existing reservation remains the 80-node default, while an explicitly empty reservation permits this larger ordinary-partition probe. Focused recipe and harness tests pass 7/7.
 - Storage audit found three unusable partial checkpoints: 230 shards/6.4 TiB, 272 shards/7.6 TiB, and 273 shards/7.7 TiB, each without DCP metadata. The complete 288-shard checkpoint is 8.2 TiB and must remain until DP32 restoration is proven. The user authorized deleting the old failed sharded checkpoints; do not delete the complete checkpoint or 1.488-TB conversion cache.
 - Deleted exactly the three metadata-less 230/272/273-shard namespaces and verified they no longer exist, reclaiming about 21.7 TiB. Re-verified the retained `526a5c6e...` checkpoint has DCP metadata and 288 shards; the conversion cache and reservation were untouched.
+
+## 2026-08-23 23:45 CEST
+
+- User requested a TP2 restore test without the CPU-placeholder fix and authorized removing the old complete Megatron optimizer checkpoint plus regenerating/resharding as needed.
+- The existing TP1 optimizer checkpoint is not used as TP2 evidence. The controlled plan creates a fresh `TP2/PP18/ETP1/EP16` Phase-A checkpoint and restores it in Phase B with the same topology.
+- On 72 trainer nodes (288 ranks), dense DP changes from 16 to 8 while expert DP remains 1. The final dense pipeline stage is tensor-sharded in half, directly testing whether extra model headroom is enough to survive the still-unfixed duplicate optimizer allocation.
+- Reservation `SD-69241-apertus-1-5-0` remains a preservation boundary. The 1.488-TB model-conversion cache remains reusable and must not be removed.

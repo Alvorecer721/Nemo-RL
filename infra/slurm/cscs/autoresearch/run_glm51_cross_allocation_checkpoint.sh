@@ -90,16 +90,20 @@ vllm = generation["vllm_cfg"]
 expected_nodes = int(os.environ["GLM_NUM_NODES"])
 assert (cfg.cluster["num_nodes"], cfg.cluster["gpus_per_node"]) == (expected_nodes, 4)
 assert generation["colocated"]["resources"]["num_nodes"] == 8
-assert (
-    megatron["tensor_model_parallel_size"],
-    megatron["pipeline_model_parallel_size"],
-    megatron["expert_model_parallel_size"],
-) == (1, 18, 16)
+tp = megatron["tensor_model_parallel_size"]
+pp = megatron["pipeline_model_parallel_size"]
+etp = megatron["expert_tensor_parallel_size"]
+ep = megatron["expert_model_parallel_size"]
+assert (tp, pp, etp, ep) in {(1, 18, 1, 16), (2, 18, 1, 16)}
 trainer_ranks = (expected_nodes - 8) * 4
-model_parallel_size = 1 * 18
-assert trainer_ranks % model_parallel_size == 0
-data_parallel_size = trainer_ranks // model_parallel_size
-assert data_parallel_size % megatron["expert_model_parallel_size"] == 0
+dense_model_parallel_size = tp * pp
+expert_model_parallel_size = etp * ep * pp
+assert trainer_ranks % dense_model_parallel_size == 0
+assert trainer_ranks % expert_model_parallel_size == 0
+dense_data_parallel_size = trainer_ranks // dense_model_parallel_size
+expert_data_parallel_size = trainer_ranks // expert_model_parallel_size
+if tp > 1 and ep > 1:
+    assert megatron["sequence_parallel"] is True
 assert (vllm["tensor_parallel_size"], vllm["expert_parallel_size"]) == (32, 32)
 assert megatron["checkpoint"]["async_save"] is True
 assert megatron["checkpoint"]["fully_parallel_save"] is False
@@ -108,7 +112,8 @@ assert cfg.checkpointing["save_optimizer"] is True
 assert cfg.checkpointing["enabled"] is (phase == "save")
 print(
     f"glm51_checkpoint_{phase}_config=OK "
-    f"nodes={expected_nodes} data_parallel={data_parallel_size}"
+    f"nodes={expected_nodes} tp={tp} pp={pp} etp={etp} ep={ep} "
+    f"dense_dp={dense_data_parallel_size} expert_dp={expert_data_parallel_size}"
 )
 PY
 

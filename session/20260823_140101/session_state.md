@@ -21,3 +21,26 @@ The initiating fault was a strict NUMA memory-policy bug. Instrumented retry `31
 - [ ] Complete a 288-rank GLM optimizer save and fresh-allocation resume. Save is green in `3164148`; the 80-node resume failed on final-stage GPU capacity, and a 152-node DP32 restore is staged.
 - [ ] Runtime-prove nonzero reference KL.
 - [ ] Run representative endurance and publish only runtime-proven changes.
+
+## Current subtask (2026-08-23 23:45 CEST)
+
+- Test whether training TP2 avoids the unpatched Transformer Engine optimizer-restore CUDA peak.
+- Keep the Megatron-LM CPU-placeholder fix absent from this experiment.
+- Use a fresh TP2 Phase-A checkpoint and same-topology Phase-B restore rather than interpreting a TP1 optimizer checkpoint as TP2.
+- Preserve reservation `SD-69241-apertus-1-5-0`; the user authorized removing the complete TP1 training checkpoint once the TP2 launch is staged. Preserve the reusable 1.488-TB model-conversion cache.
+
+## Loaded skills
+
+- `nemo-rl-auto-research` - one-variable experiment, committed hypothesis, terminal artifacts, and TSV ledger.
+- `nemo-rl-session-memory` - checkpoint state before edits and long-running launches.
+- `config-conventions` and `testing` - recipe inheritance, naming, and focused harness coverage.
+
+## TP2 experiment plan
+
+- [x] Add `TP2/PP18/ETP1/EP16` save/resume recipes on the existing 80-node layout. Dense DP is 8; expert DP remains 1.
+- [x] Generalize only the harness topology preflight and pass focused tests/lint (9/9 tests; Ruff clean; `bash -n` clean).
+- [ ] Commit the hypothesis before launch.
+- [ ] Remove only the superseded complete TP1 optimizer checkpoint, then submit Phase A using the existing reservation.
+- [ ] After a green Phase A, submit Phase B in a fresh allocation and require optimizer restoration plus the next training step.
+
+The checked-out MCore remains unpatched: `distrib_optimizer.py` still allocates the resume placeholder with `device=torch.cuda.current_device()`.
