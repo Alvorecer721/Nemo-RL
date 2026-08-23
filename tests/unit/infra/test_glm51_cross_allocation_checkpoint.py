@@ -61,3 +61,20 @@ def test_glm51_checkpoint_launcher_uses_cluster_safety_controls() -> None:
     assert "RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY:-68719476736}" in launcher
     assert "--mem=850000M" in launcher
     assert "--reservation=SD-69241-apertus-1-5-0" in launcher
+
+
+def test_glm51_checkpoint_runner_captures_rank_writer_failures() -> None:
+    runner = (
+        REPO_ROOT
+        / "infra/slurm/cscs/autoresearch/run_glm51_cross_allocation_checkpoint.sh"
+    ).read_text()
+    diagnostics = (
+        REPO_ROOT / "infra/slurm/cscs/autoresearch/collect_ray_node_diagnostics.py"
+    ).read_text()
+
+    assert "checkpoint_start_nodes.json" in runner
+    assert "checkpoint_stall_nodes.json" in runner
+    assert "memory.events" in diagnostics
+    assert "memory.peak" in diagnostics
+    assert "NodeAffinitySchedulingStrategy" in diagnostics
+    assert "glm51-checkpoint-$EXPECTED_HEAD" in runner

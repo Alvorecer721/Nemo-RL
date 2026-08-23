@@ -22,6 +22,7 @@ RUN_DIR=$RUN_ROOT/$PHASE
 RUN_LOG=$RUN_DIR/run.log
 MONITOR_LOG=$RUN_DIR/checkpoint_progress.tsv
 DIAGNOSTIC_LOG=$RUN_DIR/checkpoint_stall_diagnostics.txt
+NODE_DIAGNOSTIC_SCRIPT=$REPO_DIR/infra/slurm/cscs/autoresearch/collect_ray_node_diagnostics.py
 
 if [[ "$PHASE" == "save" ]]; then
   RECIPE=$REPO_DIR/examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml
@@ -51,8 +52,12 @@ export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_OFFLINE=1
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
-export NEMO_RL_VENV_DIR=/opt/ray_venvs
-export NRL_IGNORE_VERSION_MISMATCH=1
+# A source overlay changes the uv worker command from --directory /opt/nemo-rl
+# to this worktree. Rebuilding the baked venv in place is unsafe on Enroot's
+# writable overlay (uv can collide with lower-layer package directories), so
+# materialize the diagnostic source environment in an empty, head-scoped path.
+# The uv package cache remains image-owned and warm.
+export NEMO_RL_VENV_DIR=${GLM_ACTOR_VENV_DIR:-/opt/ray_venvs/glm51-checkpoint-$EXPECTED_HEAD}
 export NRL_MEGATRON_CHECKPOINT_DIR=$MEGATRON_CACHE
 export NRL_REFIT_NUM_STREAMS=${NRL_REFIT_NUM_STREAMS:-2}
 export PYTHONPATH=$REPO_DIR
@@ -116,12 +121,18 @@ if [[ "$PHASE" == "save" ]]; then
   last_count=-1
   last_change=$(date +%s)
   save_started=0
+  start_diagnostics_captured=0
   while kill -0 "$driver_pid" 2>/dev/null; do
     sleep "$POLL_SECONDS"
     if grep -Fq "Saving checkpoint for step 1" "$RUN_LOG" 2>/dev/null; then
       save_started=1
     fi
     if [[ "$save_started" == 1 ]]; then
+      if [[ "$start_diagnostics_captured" == 0 ]]; then
+        /opt/nemo_rl_venv/bin/python "$NODE_DIAGNOSTIC_SCRIPT" \
+          --output "$RUN_DIR/checkpoint_start_nodes.json" || true
+        start_diagnostics_captured=1
+      fi
       iteration_dir=$CHECKPOINT_DIR/tmp_step_1/policy/weights/iter_0000000
       if [[ ! -d "$iteration_dir" ]]; then
         iteration_dir=$CHECKPOINT_DIR/step_1/policy/weights/iter_0000000
@@ -138,6 +149,8 @@ if [[ "$PHASE" == "save" ]]; then
         last_count=$count
         last_change=$(date +%s)
       elif (( $(date +%s) - last_change >= STALL_SECONDS )); then
+        /opt/nemo_rl_venv/bin/python "$NODE_DIAGNOSTIC_SCRIPT" \
+          --output "$RUN_DIR/checkpoint_stall_nodes.json" || true
         {
           echo "checkpoint_stall_detected=$(date -u +%FT%TZ)"
           echo "completed_shards=$count"
