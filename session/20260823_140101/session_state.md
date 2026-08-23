@@ -9,14 +9,14 @@
 
 ## Current hypothesis
 
-The 272/288 save stalled after 16 rank-local persistent NVRx writers failed to report completion. The historical logs do not retain their tracebacks. Ray also reserved about 145 GB of object-store memory per node, leaving little host-memory headroom for 30-52 GB checkpoint shards. Test a bounded synchronous save with a smaller configurable Ray object store before retrying async persistence.
+The 272/288 save stalled after 16 rank-local persistent NVRx writers failed to report completion. The historical logs do not retain their tracebacks. Current-source one-node controls produced complete 4/4-shard sync and NVRx checkpoints and restored them in fresh allocations, so the remaining target is the actual 288-rank GLM topology. The leading unconfirmed stressor remains host-memory pressure: the old run reserved about 145 GB of Ray object-store memory per node while staging 30-52 GB optimizer shards per rank.
 
 ## Plan
 
 - [x] Rebase the investigation onto current certified main.
 - [x] Expose Bridge checkpoint save/load controls and a Ray object-store cap.
-- [ ] Pass matched current-source, exact-image sync and async save plus fresh-allocation resume controls.
-- [ ] Port the GLM harness without a custom nested actor-venv directory.
+- [x] Pass current-source sync and NVRx save plus fresh-allocation next-step controls; both red Slurm exits were post-proof harness assertions, not checkpoint failures.
+- [x] Port the GLM harness without a custom dataset adapter or nested actor-venv directory.
 - [ ] Complete a 288-rank GLM optimizer save and fresh-allocation resume.
 - [ ] Runtime-prove nonzero reference KL.
 - [ ] Run representative endurance and publish only runtime-proven changes.

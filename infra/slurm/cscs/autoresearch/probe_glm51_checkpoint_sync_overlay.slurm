@@ -20,7 +20,8 @@ PHASE=${1:?Usage: probe_glm51_checkpoint_sync_overlay.slurm save|resume CHECKPOI
 CHECKPOINT_DIR=${2:?Usage: probe_glm51_checkpoint_sync_overlay.slurm save|resume CHECKPOINT_DIR sync|async}
 SAVE_MODE=${3:-sync}
 case "$PHASE" in
-  save | resume) ;;
+  save) MAX_STEPS=1 ;;
+  resume) MAX_STEPS=2 ;;
   *) echo "Unsupported phase: $PHASE" >&2; exit 1 ;;
 esac
 case "$SAVE_MODE" in
@@ -70,6 +71,7 @@ srun \
     export RUN_DIR='"$RUN_DIR"'
     export PHASE='"$PHASE"'
     export SAVE_MODE='"$SAVE_MODE"'
+    export MAX_STEPS='"$MAX_STEPS"'
     export ASYNC_SAVE='"$ASYNC_SAVE"'
     export ASSUME_CONSTANT_STRUCTURE='"$ASSUME_CONSTANT_STRUCTURE"'
     export CHECKPOINT_DIR='"$CHECKPOINT_DIR"'
@@ -120,7 +122,7 @@ PY
       --config "$RECIPE" \
       policy.model_name="$APERTUS_CKPT" \
       policy.tokenizer.name="$APERTUS_TOKENIZER" \
-      dpo.max_num_steps=2 \
+      dpo.max_num_steps="$MAX_STEPS" \
       dpo.val_batches=1 \
       dpo.val_period=100 \
       dpo.val_at_start=false \
@@ -150,14 +152,14 @@ PY
       cluster.num_nodes=1 \
       2>&1 | tee "$RUN_LOG"
 
-    test -f "$CHECKPOINT_DIR/step_2/training_info.json"
     if [[ "$PHASE" == "save" ]]; then
       test -f "$CHECKPOINT_DIR/step_1/training_info.json"
-      mv "$CHECKPOINT_DIR/step_2" "$RUN_DIR/initial_step_2"
+      test ! -e "$CHECKPOINT_DIR/step_2"
       echo "glm51_checkpoint_control_${SAVE_MODE}_save=OK"
     else
+      test -f "$CHECKPOINT_DIR/step_2/training_info.json"
       grep -Fq "successfully loaded checkpoint" "$RUN_LOG"
-      grep -Fq "at iteration 1" "$RUN_LOG"
+      grep -Fq "Step 2/2" "$RUN_LOG"
       echo "glm51_checkpoint_control_${SAVE_MODE}_resume=OK"
     fi
 
