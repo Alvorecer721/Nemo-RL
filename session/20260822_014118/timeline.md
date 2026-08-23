@@ -348,3 +348,12 @@
 - PR #24's stale body was replaced with the exact pins, image, scheduler evidence, 70B metrics and GLM boundary. The fork's `main` was fast-forwarded from `8632389d5` to certified SHA `8f22e5919`; GitHub marked PR #24 merged with merge commit exactly `8f22e5919`, preserving image-to-main identity.
 - Published clean harness branches `autoresearch/2026-08-23-apertus70b-cert/exact-image` at `92db67ae0` and `autoresearch/2026-08-23-glm51-prototype/exact-image` at `76217c755`.
 - A post-certification upstream refresh found one new commit after the frozen base: `f0557321e`, a two-line sequence-importance-ratio metric fix plus regression. The certified 70B configuration has `sequence_level_importance_ratios=false`; the commit is intentionally deferred so the exact-head image remains truthful.
+
+## 2026-08-23 07:27 CEST
+
+- Post-merge CI on certified source `8f22e5919` exposed three publication-only classes: Ruff import ordering in two files, Pyrefly Optional narrowing in DAPO reward shaping, and one recipe key equal to its inherited default.
+- Isolated hotfix `d2e1e082f3fe29f438f46c16aeec684521fa0b68` changed only four files (9 insertions, 11 deletions). Ruff, focused Pyrefly, all recipe minimize checks, and 24 reward-function tests passed locally.
+- Hosted lint on the explicit `pull-request/25` CI branch passed. PR #25 was then fast-forwarded to public main with merge SHA exactly `d2e1e082f`.
+- Authoritative main CI run `32619985296` completed successfully: lint/Pyrefly, docs build and linkcheck, unit/functional coverage guards, coverage aggregation, and CI quality all passed.
+- The image remains certified at parent `8f22e5919`; no rebuild was performed because the hotfix leaves dependency, lockfile, build, submodule, and resolved recipe behavior unchanged.
+- Final upstream fetch still has only `f0557321e` above frozen base `7ea279abf`; it remains deferred.
