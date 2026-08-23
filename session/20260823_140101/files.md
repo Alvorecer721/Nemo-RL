@@ -10,3 +10,5 @@
 - `infra/slurm/cscs/autoresearch/collect_ray_node_diagnostics.py`: node-affine Ray sampler for cgroup OOM counters, memory peaks and checkpoint-writer process state.
 - `infra/slurm/cscs/autoresearch/submit_glm51_cross_allocation_checkpoint.sh`: TOML, single-step Ray, 64-GiB object-store and 850-GB host-memory submission contract.
 - `tests/unit/infra/test_glm51_cross_allocation_checkpoint.py`: resolved topology and cluster-control regression tests.
+- `nemo_rl/distributed/numa_utils.py`: prefer GPU-local CPU memory while permitting fallback instead of hard-capping each worker at one NUMA node.
+- `tests/unit/distributed/test_numa_utils.py`: preferred-memory-policy regression coverage.

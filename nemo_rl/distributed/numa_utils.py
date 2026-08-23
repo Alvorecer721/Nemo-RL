@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NUMA-aware CPU affinity and memory binding for GPU workers.
+"""NUMA-aware CPU affinity and memory placement for GPU workers.
 
 Uses a GPU→cpulist mapping file written by topology_probe.sh (in ray.sub)
 at node startup. The file path is communicated via the NRL_GPU_CPU_AFFINITY_FILE
 environment variable. See ray.sub for the writer side.
 
 Disable all binding with NRL_DISABLE_NUMA_BINDING=1.
-Disable only memory policy with NRL_DISABLE_NUMA_MEMBIND=1.
+Disable only the preferred-node memory policy with NRL_DISABLE_NUMA_MEMBIND=1.
 """
 
 import ctypes
@@ -37,11 +37,12 @@ GPU_CPU_AFFINITY_PATH = os.environ.get(
 
 
 def bind_to_gpu_numa(gpu_id: int) -> bool:
-    """Pin the current process to the NUMA-local CPUs and memory of the given GPU.
+    """Pin the current process to the NUMA-local CPUs of the given GPU.
 
     Reads the GPU→cpulist mapping written by topology_probe.sh at node
-    startup, then calls os.sched_setaffinity() for CPU pinning and
-    numa_set_membind() for memory policy. Best-effort: failures are
+    startup, then calls os.sched_setaffinity() for CPU pinning and prefers the
+    corresponding NUMA node for memory allocation. Memory may fall back to
+    other nodes when the preferred node is full. Best-effort: failures are
     logged, never raised.
 
     Args:
@@ -70,7 +71,7 @@ def bind_to_gpu_numa(gpu_id: int) -> bool:
                     cpus = _parse_cpulist(cpulist)
                     os.sched_setaffinity(0, cpus)
                     logger.info("NUMA CPU binding: GPU %s → CPUs %s", gpu, cpulist)
-                    _set_numa_membind(cpus)
+                    _set_numa_memory_preference(cpus)
                     return True
         logger.debug("NUMA binding: GPU %s not found in %s", gpu, GPU_CPU_AFFINITY_PATH)
     except FileNotFoundError:
@@ -122,8 +123,15 @@ def _get_numa_node(libnuma: ctypes.CDLL, cpus: set[int]) -> int:
     return libnuma.numa_node_of_cpu(min(cpus))
 
 
-def _set_numa_membind(cpus: set[int]) -> bool:
-    """Hard-bind memory allocations to the NUMA node of the given CPUs."""
+def _set_numa_memory_preference(cpus: set[int]) -> bool:
+    """Prefer the CPUs' NUMA node while allowing allocation fallback.
+
+    Strict ``numa_set_membind`` is unsafe for large checkpoint staging: the
+    process can be OOM-killed when one NUMA node fills even though the host has
+    ample memory on other nodes. CPU affinity still gives local first-touch;
+    ``numa_set_preferred`` preserves that locality without imposing a hard
+    capacity ceiling.
+    """
     if os.environ.get("NRL_DISABLE_NUMA_MEMBIND") == "1":
         return False
 
@@ -142,25 +150,13 @@ def _set_numa_membind(cpus: set[int]) -> bool:
             )
             return False
 
-        libnuma.numa_allocate_nodemask.restype = ctypes.c_void_p
-        libnuma.numa_bitmask_setbit.argtypes = [ctypes.c_void_p, ctypes.c_uint]
-        libnuma.numa_bitmask_setbit.restype = ctypes.c_void_p
-        libnuma.numa_set_membind.argtypes = [ctypes.c_void_p]
-        libnuma.numa_bitmask_free.argtypes = [ctypes.c_void_p]
-
-        nodemask = libnuma.numa_allocate_nodemask()
-        if not nodemask:
-            logger.debug("NUMA membind skipped: numa_allocate_nodemask returned NULL")
-            return False
-
-        try:
-            libnuma.numa_bitmask_setbit(nodemask, numa_node)
-            libnuma.numa_set_membind(nodemask)
-        finally:
-            libnuma.numa_bitmask_free(nodemask)
+        libnuma.numa_set_preferred.argtypes = [ctypes.c_int]
+        libnuma.numa_set_preferred(numa_node)
 
         logger.info(
-            "NUMA membind: hard-bound to node %d (from CPU %d)", numa_node, min(cpus)
+            "NUMA memory policy: preferred node %d with fallback (from CPU %d)",
+            numa_node,
+            min(cpus),
         )
         return True
     except Exception as exc:
