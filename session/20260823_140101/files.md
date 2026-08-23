@@ -12,3 +12,5 @@
 - `tests/unit/infra/test_glm51_cross_allocation_checkpoint.py`: resolved topology and cluster-control regression tests.
 - `nemo_rl/distributed/numa_utils.py`: prefer GPU-local CPU memory while permitting fallback instead of hard-capping each worker at one NUMA node.
 - `tests/unit/distributed/test_numa_utils.py`: preferred-memory-policy regression coverage.
+- `examples/configs/recipes/llm/autoresearch/grpo-glm5.1-152n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml`: capacity-only DP32 restore recipe; TP1/PP18 and the eight-node rollout pool remain unchanged.
+- `infra/slurm/cscs/autoresearch/{submit,run}_glm51_cross_allocation_checkpoint.sh`: now accept an explicit node count, recipe, Phase-A terminal artifact and optional reservation without changing the certified 80-node defaults.

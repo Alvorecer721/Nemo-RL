@@ -16,6 +16,7 @@ GLM_CKPT=${GLM_CKPT:?}
 CHECKPOINT_DIR=${GLM_RESUME_CHECKPOINT_DIR:?}
 RUN_ROOT=${GLM_RUN_ROOT:?}
 MEGATRON_CACHE=${GLM_MEGATRON_CACHE:?}
+export GLM_NUM_NODES=${GLM_NUM_NODES:-80}
 STALL_SECONDS=${GLM_CHECKPOINT_STALL_SECONDS:-1200}
 POLL_SECONDS=${GLM_CHECKPOINT_POLL_SECONDS:-60}
 RUN_DIR=$RUN_ROOT/$PHASE
@@ -25,10 +26,12 @@ DIAGNOSTIC_LOG=$RUN_DIR/checkpoint_stall_diagnostics.txt
 NODE_DIAGNOSTIC_SCRIPT=$REPO_DIR/infra/slurm/cscs/autoresearch/collect_ray_node_diagnostics.py
 
 if [[ "$PHASE" == "save" ]]; then
-  RECIPE=$REPO_DIR/examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml
+  DEFAULT_RECIPE=$REPO_DIR/examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml
 else
-  RECIPE=$REPO_DIR/examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml
+  DEFAULT_RECIPE=$REPO_DIR/examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml
 fi
+RECIPE=${GLM_RECIPE:-$DEFAULT_RECIPE}
+export GLM_RECIPE=$RECIPE
 
 [[ -r "$RECIPE" ]] || { echo "Missing recipe: $RECIPE" >&2; exit 1; }
 [[ -r "$GLM_CKPT/model.safetensors.index.json" ]] || { echo "Missing GLM checkpoint: $GLM_CKPT" >&2; exit 1; }
@@ -78,27 +81,35 @@ from omegaconf import OmegaConf
 
 register_omegaconf_resolvers()
 phase = os.environ["GLM_RESUME_PHASE"]
-name = f"grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-{'save' if phase == 'save' else 'resume'}.yaml"
-recipe = Path(os.environ["GLM_EXPERIMENT_DIR"]) / "examples/configs/recipes/llm/autoresearch" / name
+recipe = Path(os.environ["GLM_RECIPE"])
 resolved = OmegaConf.to_container(load_config(recipe), resolve=True)
 cfg = MasterConfig(**resolved)
 megatron = cfg.policy["megatron_cfg"]
 generation = cfg.policy["generation"]
 vllm = generation["vllm_cfg"]
-assert (cfg.cluster["num_nodes"], cfg.cluster["gpus_per_node"]) == (80, 4)
+expected_nodes = int(os.environ["GLM_NUM_NODES"])
+assert (cfg.cluster["num_nodes"], cfg.cluster["gpus_per_node"]) == (expected_nodes, 4)
 assert generation["colocated"]["resources"]["num_nodes"] == 8
 assert (
     megatron["tensor_model_parallel_size"],
     megatron["pipeline_model_parallel_size"],
     megatron["expert_model_parallel_size"],
 ) == (1, 18, 16)
+trainer_ranks = (expected_nodes - 8) * 4
+model_parallel_size = 1 * 18
+assert trainer_ranks % model_parallel_size == 0
+data_parallel_size = trainer_ranks // model_parallel_size
+assert data_parallel_size % megatron["expert_model_parallel_size"] == 0
 assert (vllm["tensor_parallel_size"], vllm["expert_parallel_size"]) == (32, 32)
 assert megatron["checkpoint"]["async_save"] is True
 assert megatron["checkpoint"]["fully_parallel_save"] is False
 assert generation["refit_transport"] == "nccl_reshard"
 assert cfg.checkpointing["save_optimizer"] is True
 assert cfg.checkpointing["enabled"] is (phase == "save")
-print(f"glm51_checkpoint_{phase}_config=OK")
+print(
+    f"glm51_checkpoint_{phase}_config=OK "
+    f"nodes={expected_nodes} data_parallel={data_parallel_size}"
+)
 PY
 
 if [[ "$PHASE" == "save" ]]; then

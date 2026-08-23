@@ -43,3 +43,11 @@
 - This closes the initiating checkpoint fault: the preceding strict-bind run lost rank 202 and stopped at 230 shards, while the otherwise-matched fallback-enabled run completed 288/288.
 - Training quality remained finite and nontrivial in the checkpoint step: loss `0.0190`, average reward `0.0312`, and generation KL error `0.0028`.
 - The Slurm wrapper exited 1 only after printing `glm51_cross_allocation_save=OK`: terminal-artifact creation read `SLURM_JOB_ID`, but `ray.sub` intentionally clears `SLURM_*` before launching Ray. Preserve the allocation ID as `NRL_SLURM_JOB_ID` and use that in the artifact writer. Focused harness tests pass 5/5; fresh-allocation restore remains pending.
+
+## 2026-08-23 21:29 CEST
+
+- Fresh-allocation Phase B job `3165089` read the complete checkpoint and entered Transformer Engine FusedAdam state initialization, then CUDA-OOMed only on global ranks 272-287. Those ranks are exactly the 16 DP replicas of PP stage 17, the heavy final pipeline stage. The failure is before the next training step and is fail-loud; no numerical corruption was observed.
+- The existing optimizer checkpoint requires unchanged TP1/PP18. Merely adding unused nodes cannot help; the next useful compatible scale is DP32: 576 trainer GPUs on 144 nodes plus the unchanged eight-node rollout pool, 152 nodes total. This halves DP-sharded optimizer state per rank.
+- Added an explicit scale/recipe/Phase-A-artifact contract to the launcher and a `152n4g` resume recipe. The existing reservation remains the 80-node default, while an explicitly empty reservation permits this larger ordinary-partition probe. Focused recipe and harness tests pass 7/7.
+- Storage audit found three unusable partial checkpoints: 230 shards/6.4 TiB, 272 shards/7.6 TiB, and 273 shards/7.7 TiB, each without DCP metadata. The complete 288-shard checkpoint is 8.2 TiB and must remain until DP32 restoration is proven. The user authorized deleting the old failed sharded checkpoints; do not delete the complete checkpoint or 1.488-TB conversion cache.
+- Deleted exactly the three metadata-less 230/272/273-shard namespaces and verified they no longer exist, reclaiming about 21.7 TiB. Re-verified the retained `526a5c6e...` checkpoint has DCP metadata and 288 shards; the conversion cache and reservation were untouched.

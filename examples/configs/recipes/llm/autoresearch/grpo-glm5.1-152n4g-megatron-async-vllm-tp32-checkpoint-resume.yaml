@@ -1,0 +1,11 @@
+defaults: grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml
+
+# Capacity-only Phase-B probe. TP1/PP18 stays checkpoint-compatible while
+# training DP grows from 16 to 32, halving DP-sharded optimizer state per rank.
+# The eight-node TP32/EP32 rollout pool is unchanged.
+cluster:
+  num_nodes: 152
+
+logger:
+  wandb:
+    name: glm51-cross-allocation-checkpoint-resume-dp32
