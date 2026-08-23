@@ -9,7 +9,7 @@
 
 ## Current diagnosis
 
-The 272/288 save stalled because 16 rank-local persistent NVRx children never completed D2H staging. Host-memory exhaustion is the evidence-backed root cause: the historical head step is recorded `OUT_OF_MEMORY`; the worker step's 261.33-GiB MaxRSS node is also a missing-writer node; missing writers are disproportionately concentrated on the 52-GB final pipeline stage; and the old 450-GiB node budget also carried a roughly 135-GiB Ray object store. NVRx then converted the child loss into an infinite wait because the parent blocks on `preload_q.join()` without checking child liveness. The next real-topology run captures cgroup OOM counters and writer processes on all nodes to close the remaining runtime-attribution gap.
+The initiating fault is a strict NUMA memory-policy bug. Instrumented retry `3163625` failed at checkpoint with Slurm reporting `nid006944: task 20: Out Of Memory`. Ranks 200, 201 and 203 on that node wrote roughly 29.52-GB shards; rank 202, hard-bound to the roughly 120-GB CPU NUMA node 2, wrote none. The node's 891.29-GB job cgroup peaked at only 334.78 GB, so aggregate node memory was not exhausted. MCore's async preload creates a full CPU copy of each rank's tensors; strict `numa_set_membind` forbids fallback to free memory on other nodes. NVRx v0.6 can additionally turn a preload-child death into an infinite parent wait because it blocks on `preload_q.join()` without checking child liveness. The code now prefers local memory with fallback; exact-topology save and fresh-allocation resume are the remaining causal validation.
 
 ## Plan
 
@@ -17,6 +17,7 @@ The 272/288 save stalled because 16 rank-local persistent NVRx children never co
 - [x] Expose Bridge checkpoint save/load controls and a Ray object-store cap.
 - [x] Pass current-source sync and NVRx save plus fresh-allocation next-step controls; both red Slurm exits were post-proof harness assertions, not checkpoint failures.
 - [x] Port the GLM harness without a custom dataset adapter. Source-overlay diagnostics use an empty head-scoped actor venv because mutating baked packages in place fails on Enroot's writable overlay; production remains image-owned.
+- [x] Runtime-attribute the checkpoint loss to strict per-worker NUMA memory binding and replace it with preferred-local placement that allows fallback.
 - [ ] Complete a 288-rank GLM optimizer save and fresh-allocation resume.
 - [ ] Runtime-prove nonzero reference KL.
 - [ ] Run representative endurance and publish only runtime-proven changes.

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for NUMA-aware CPU affinity and memory binding.
+"""Tests for NUMA-aware CPU affinity and memory placement.
 
 Unit tests run anywhere (no GPU needed). The benchmark test
 (TestNUMABindingBenchmark) requires a GPU and libnuma and is
@@ -29,7 +29,7 @@ from nemo_rl.distributed.numa_utils import (
     _get_numa_node,
     _load_libnuma,
     _parse_cpulist,
-    _set_numa_membind,
+    _set_numa_memory_preference,
     bind_to_gpu_numa,
     resolve_visible_gpu_id,
 )
@@ -331,22 +331,22 @@ class TestBindToGpuNuma:
                 _reset_all_bindings()
 
 
-class TestSetNumaMembind:
-    """Test membind with libnuma (skipped if libnuma unavailable)."""
+class TestSetNumaMemoryPreference:
+    """Test the preferred-node policy with libnuma."""
 
     @pytest.fixture(autouse=True)
     def _check_libnuma(self):
         if _load_libnuma() is None:
             pytest.skip("libnuma.so.1 not available")
 
-    def test_membind_disabled(self, monkeypatch):
+    def test_memory_preference_disabled(self, monkeypatch):
         monkeypatch.setenv("NRL_DISABLE_NUMA_MEMBIND", "1")
-        assert _set_numa_membind({0, 1, 2}) is False
+        assert _set_numa_memory_preference({0, 1, 2}) is False
 
-    def test_membind_succeeds(self, monkeypatch):
+    def test_memory_preference_succeeds(self, monkeypatch):
         monkeypatch.delenv("NRL_DISABLE_NUMA_MEMBIND", raising=False)
         cpus = os.sched_getaffinity(0)
-        assert _set_numa_membind(cpus) is True
+        assert _set_numa_memory_preference(cpus) is True
 
     def test_get_numa_node_valid(self):
         libnuma = _load_libnuma()
@@ -430,7 +430,7 @@ class TestNUMABindingBenchmark:
         if affinity_file is None:
             pytest.skip("Could not parse nvidia-smi topo output")
 
-        # Apply NUMA binding (CPU affinity + membind)
+        # Apply NUMA CPU affinity and preferred-node memory placement.
         old_path = _patch_affinity_path(affinity_file)
         gpu_str = cvd.split(",")[0]
         try:
