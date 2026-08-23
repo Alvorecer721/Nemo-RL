@@ -132,10 +132,10 @@ PY
       policy.megatron_cfg.use_fused_linear_logprobs=true \
       policy.megatron_cfg.fused_linear_logprobs_chunk_size=256 \
       policy.megatron_cfg.distributed_data_parallel_config.overlap_param_gather=false \
-      policy.megatron_cfg.checkpoint.fully_parallel_save=false \
+      +policy.megatron_cfg.checkpoint.fully_parallel_save=false \
       policy.megatron_cfg.checkpoint.async_save="$ASYNC_SAVE" \
       policy.megatron_cfg.checkpoint.ckpt_assume_constant_structure="$ASSUME_CONSTANT_STRUCTURE" \
-      policy.megatron_cfg.checkpoint.ckpt_load_validate_sharding_integrity=false \
+      +policy.megatron_cfg.checkpoint.ckpt_load_validate_sharding_integrity=false \
       logger.tensorboard_enabled=true \
       logger.log_dir="$LOG_DIR" \
       logger.wandb_enabled=false \
