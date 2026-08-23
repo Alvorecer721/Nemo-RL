@@ -49,6 +49,9 @@ def main() -> None:
         "temperature": 0.0,
         "top_p": 1.0,
         "top_k": None,
+        "val_temperature": 0.0,
+        "val_top_p": 1.0,
+        "val_top_k": None,
         "stop_token_ids": None,
         "stop_strings": None,
         "vllm_cfg": {
