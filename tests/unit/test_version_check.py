@@ -31,7 +31,7 @@ def test_cscs_build_bakes_valid_json_with_separate_hermetic_inputs():
         repo_root / "infra/slurm/cscs/build_nemo_rl_image.slurm"
     ).read_text()
 
-    assert "HOST_PYTHON=${HOST_PYTHON:-python3}" in build_script
+    assert "HOST_PYTHON=${HOST_PYTHON:-/usr/bin/python3.11}" in build_script
     assert 'command -v "$HOST_PYTHON"' in build_script
     assert (
         'BUILD_FINGERPRINT_B64=$("$HOST_PYTHON" tools/generate_fingerprint.py '

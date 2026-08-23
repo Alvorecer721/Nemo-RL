@@ -38,7 +38,11 @@ OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 MAX_JOBS=${MAX_JOBS:-4}
 NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS:-90}
-HOST_PYTHON=${HOST_PYTHON:-python3}
+# Clariden's unversioned python3 is Python 3.6, while the repository's
+# fingerprint helper uses modern stdlib/Python syntax. Pin the known host
+# interpreter explicitly so clean sbatch jobs do not depend on an inherited
+# container PATH.
+HOST_PYTHON=${HOST_PYTHON:-/usr/bin/python3.11}
 # This Apertus production image is validated with vLLM. Keep TensorRT-LLM an
 # explicit opt-in until its GH200 source build has independent evidence.
 BUILD_TRTLLM=${BUILD_TRTLLM:-0}
