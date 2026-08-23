@@ -38,6 +38,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 MAX_JOBS=${MAX_JOBS:-4}
 NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS:-90}
+HOST_PYTHON=${HOST_PYTHON:-python3}
 # This Apertus production image is validated with vLLM. Keep TensorRT-LLM an
 # explicit opt-in until its GH200 source build has independent evidence.
 BUILD_TRTLLM=${BUILD_TRTLLM:-0}
@@ -73,6 +74,10 @@ HERMETIC_FINGERPRINT_SHA256=ae440a7e8b2ab39353e47d5d879e9cfcbb3f6bdda5ca31330155
 PODMAN_STORAGE_BASE=${PODMAN_STORAGE_BASE:-/tmp/nemo-rl-podman-$CSCS_USER-$SLURM_JOB_ID}
 
 cd "$REPO_DIR"
+command -v "$HOST_PYTHON" >/dev/null || {
+    echo "Host Python not found: HOST_PYTHON=$HOST_PYTHON" >&2
+    exit 1
+}
 [[ -f docker/Dockerfile ]] || {
     echo "NeMo-RL Dockerfile not found under REPO_DIR=$REPO_DIR" >&2
     exit 1
@@ -116,14 +121,14 @@ SOURCE_ID="${SOURCE_REV}-${BUILD_INPUTS_SHA256:0:12}"
 IMAGE="nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
 SQSH_PATH="${OUTPUT_DIR}/nemo-rl-apertus-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
 generate_hermetic_cache_fingerprint() {
-    python tools/generate_fingerprint.py
+    "$HOST_PYTHON" tools/generate_fingerprint.py
     printf '\nbase_image=%s\nnvte_cuda_archs=%s\nbuild_trtllm=%s\ncustom_setup_fname=%s\n' \
         "$BASE_IMAGE" "$NVTE_CUDA_ARCHS" "$BUILD_TRTLLM" "$CUSTOM_SETUP_FNAME"
 }
 # The runtime version check expects this file to contain exactly one JSON
 # document. Image-construction choices participate only in the separate
 # hermetic cache key above.
-BUILD_FINGERPRINT_B64=$(python tools/generate_fingerprint.py | base64 -w0)
+BUILD_FINGERPRINT_B64=$("$HOST_PYTHON" tools/generate_fingerprint.py | base64 -w0)
 CURRENT_FINGERPRINT_SHA256=$(generate_hermetic_cache_fingerprint | sha256sum | cut -d' ' -f1)
 BUILD_TARGET=release
 if [[ "$HERMETIC_CACHE_TAG" == "rebuild" ]]; then
