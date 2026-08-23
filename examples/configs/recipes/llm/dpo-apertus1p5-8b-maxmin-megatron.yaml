@@ -33,7 +33,6 @@ policy:
     enabled: false
   megatron_cfg:
     use_fused_linear_logprobs: true
-    fused_linear_logprobs_chunk_size: 256
     distributed_data_parallel_config:
       overlap_param_gather: false
     enabled: true
