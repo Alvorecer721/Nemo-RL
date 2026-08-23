@@ -4,7 +4,7 @@ set -euo pipefail
 
 EXPERIMENT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 RAY_SUB=${RAY_SUB:-$EXPERIMENT_DIR/ray.sub}
-IMAGE=${IMAGE:-/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-084ade845b84-a14fb058fe83.sqsh}
+IMAGE=${IMAGE:-/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-8f22e59195f5-2a9bd7b13c00.sqsh}
 APERTUS70B_CONTAINER_ENV=${APERTUS70B_CONTAINER_ENV:-$EXPERIMENT_DIR/infra/slurm/cscs/autoresearch/apertus70b_exact_image.toml}
 APERTUS70B_CKPT=${APERTUS70B_CKPT:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-70b-sft-262k-3000}
 APERTUS70B_TOKENIZER=${APERTUS70B_TOKENIZER:-$APERTUS70B_CKPT}
@@ -16,7 +16,7 @@ APERTUS70B_MEGATRON_CACHE=${APERTUS70B_MEGATRON_CACHE:-/iopsstor/scratch/cscs/xy
 APERTUS70B_XIELU_SITE=${APERTUS70B_XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}
 APERTUS70B_RECIPE=$EXPERIMENT_DIR/examples/configs/recipes/llm/autoresearch/grpo-apertus1p5-70b-5n4g-megatron-async-vllm-tp4-smoke.yaml
 APERTUS70B_RUNTIME_OVERLAY=$EXPERIMENT_DIR/infra/slurm/cscs/autoresearch/runtime_overlay
-APERTUS70B_IMAGE_SOURCE_HEAD=${APERTUS70B_IMAGE_SOURCE_HEAD:-084ade845b8421ab82dcda1849d913da517f194e}
+APERTUS70B_IMAGE_SOURCE_HEAD=${APERTUS70B_IMAGE_SOURCE_HEAD:-8f22e59195f547c5715ed250cd49d4776cda5d43}
 APERTUS70B_PREFLIGHT_ONLY=${APERTUS70B_PREFLIGHT_ONLY:-0}
 NODES=5
 TIME_LIMIT=03:00:00
