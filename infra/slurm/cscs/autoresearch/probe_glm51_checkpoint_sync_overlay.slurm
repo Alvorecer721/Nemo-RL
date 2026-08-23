@@ -80,18 +80,20 @@ srun \
     export XIELU_SITE='"$XIELU_SITE"'
     export NEMO_RL_VENV_DIR=/opt/ray_venvs
     export NRL_IGNORE_VERSION_MISMATCH=1
-    export PYTHONPATH="$XIELU_SITE:$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/3rdparty/Megatron-LM:$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src:$REPO_DIR"
+    export PYTHONPATH="$XIELU_SITE:$REPO_DIR"
     export PYTHONUNBUFFERED=1
     export HF_HOME=${HF_HOME:-/iopsstor/scratch/cscs/${USER:-$(id -un)}/.cache/huggingface}
     export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
     export WANDB_DISABLED=true
     export LOG_DIR="$RUN_DIR/tb"
     export RUN_LOG="$RUN_DIR/run.log"
+    MCORE_PYTHON=/opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python
 
     mkdir -p "$LOG_DIR" "$HF_HOME" "$HF_DATASETS_CACHE"
     cd "$REPO_DIR"
+    test -x "$MCORE_PYTHON"
 
-    /opt/nemo_rl_venv/bin/python - <<'"'"'PY'"'"'
+    "$MCORE_PYTHON" - <<'"'"'PY'"'"'
 import os
 from pathlib import Path
 
