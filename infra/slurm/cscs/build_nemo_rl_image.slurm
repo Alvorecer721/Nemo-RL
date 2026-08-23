@@ -343,14 +343,14 @@ print(match.group(2))
     echo "Hermetic pyproject MD5: $HERMETIC_PYPROJECT_MD5"
     echo "Hermetic lock MD5:      $HERMETIC_LOCK_MD5"
     echo "Hermetic vLLM version:  $HERMETIC_VLLM_VERSION"
-    [[ "$HERMETIC_PYPROJECT_MD5" == "f0d45e9e7c2b755b28f92dcf03b33bae" ]] || {
+    [[ "$HERMETIC_PYPROJECT_MD5" == "f0d45e9e7c2b755b28f92dcf03b33bae" ]] || { # pragma: allowlist secret
         echo "Hermetic pyproject.toml does not match the pinned digest" >&2
         exit 1
-    } # pragma: allowlist secret
-    [[ "$HERMETIC_LOCK_MD5" == "6b479359053820191dea5e3cffd5af07" ]] || {
+    }
+    [[ "$HERMETIC_LOCK_MD5" == "6b479359053820191dea5e3cffd5af07" ]] || { # pragma: allowlist secret
         echo "Hermetic uv.lock does not match the pinned digest" >&2
         exit 1
-    } # pragma: allowlist secret
+    }
     [[ "$HERMETIC_VLLM_VERSION" == "$VLLM_VERSION" ]] || {
         echo "Hermetic vLLM version does not match $VLLM_VERSION" >&2
         exit 1
