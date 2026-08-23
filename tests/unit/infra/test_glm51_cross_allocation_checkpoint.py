@@ -11,9 +11,15 @@ REPO_ROOT = Path(__file__).parents[3]
 RECIPE_ROOT = REPO_ROOT / "examples/configs/recipes/llm/autoresearch"
 
 
-@pytest.mark.parametrize("phase", ["save", "resume"])
+@pytest.mark.parametrize(
+    ("nodes", "phase", "expected_nodes"),
+    [(80, "save", 80), (80, "resume", 80), (152, "resume", 152)],
+)
 def test_glm51_checkpoint_recipe_contract(
-    phase: str, monkeypatch: pytest.MonkeyPatch
+    nodes: int,
+    phase: str,
+    expected_nodes: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GLM_CKPT", "/models/glm-5.1")
     monkeypatch.setenv("GLM_RESUME_CHECKPOINT_DIR", "/checkpoints")
@@ -21,7 +27,7 @@ def test_glm51_checkpoint_recipe_contract(
     register_omegaconf_resolvers()
     recipe = (
         RECIPE_ROOT
-        / f"grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-{phase}.yaml"
+        / f"grpo-glm5.1-{nodes}n4g-megatron-async-vllm-tp32-checkpoint-{phase}.yaml"
     )
     config = MasterConfig(**OmegaConf.to_container(load_config(recipe), resolve=True))
     megatron = config.policy["megatron_cfg"]
@@ -29,7 +35,7 @@ def test_glm51_checkpoint_recipe_contract(
     vllm = generation["vllm_cfg"]
 
     assert (config.cluster["num_nodes"], config.cluster["gpus_per_node"]) == (
-        80,
+        expected_nodes,
         4,
     )
     assert generation["colocated"]["resources"]["num_nodes"] == 8
@@ -60,7 +66,10 @@ def test_glm51_checkpoint_launcher_uses_cluster_safety_controls() -> None:
     assert "RAY_SINGLE_SRUN=1" in launcher
     assert "RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY:-68719476736}" in launcher
     assert "--mem=850000M" in launcher
-    assert "--reservation=SD-69241-apertus-1-5-0" in launcher
+    assert "GLM_RESERVATION=${GLM_RESERVATION-SD-69241-apertus-1-5-0}" in launcher
+    assert 'SBATCH_RESERVATION_ARGS+=(--reservation="$GLM_RESERVATION")' in launcher
+    assert '--nodes="$GLM_NUM_NODES"' in launcher
+    assert "GLM_PHASE_A_TERMINAL" in launcher
 
 
 def test_glm51_checkpoint_runner_captures_rank_writer_failures() -> None:
@@ -93,3 +102,16 @@ def test_glm51_checkpoint_runner_uses_preserved_slurm_job_id() -> None:
     assert ray_launcher.index(preserve) < ray_launcher.index(clear_slurm)
     assert 'os.environ["NRL_SLURM_JOB_ID"]' in runner
     assert 'os.environ["SLURM_JOB_ID"]' not in runner
+
+
+def test_glm51_checkpoint_runner_validates_scaled_data_parallelism() -> None:
+    runner = (
+        REPO_ROOT
+        / "infra/slurm/cscs/autoresearch/run_glm51_cross_allocation_checkpoint.sh"
+    ).read_text()
+
+    assert 'recipe = Path(os.environ["GLM_RECIPE"])' in runner
+    assert 'expected_nodes = int(os.environ["GLM_NUM_NODES"])' in runner
+    assert "trainer_ranks = (expected_nodes - 8) * 4" in runner
+    assert "data_parallel_size = trainer_ranks // model_parallel_size" in runner
+    assert 'data_parallel_size % megatron["expert_model_parallel_size"] == 0' in runner
