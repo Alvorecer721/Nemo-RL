@@ -78,3 +78,18 @@ def test_glm51_checkpoint_runner_captures_rank_writer_failures() -> None:
     assert "memory.peak" in diagnostics
     assert "NodeAffinitySchedulingStrategy" in diagnostics
     assert "glm51-checkpoint-$EXPECTED_HEAD" in runner
+
+
+def test_glm51_checkpoint_runner_uses_preserved_slurm_job_id() -> None:
+    ray_launcher = (REPO_ROOT / "ray.sub").read_text()
+    runner = (
+        REPO_ROOT
+        / "infra/slurm/cscs/autoresearch/run_glm51_cross_allocation_checkpoint.sh"
+    ).read_text()
+
+    preserve = "export NRL_SLURM_JOB_ID=${NRL_SLURM_JOB_ID:-${SLURM_JOB_ID:?}}"
+    clear_slurm = "for v in \\$(env | awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/"
+    assert preserve in ray_launcher
+    assert ray_launcher.index(preserve) < ray_launcher.index(clear_slurm)
+    assert 'os.environ["NRL_SLURM_JOB_ID"]' in runner
+    assert 'os.environ["SLURM_JOB_ID"]' not in runner

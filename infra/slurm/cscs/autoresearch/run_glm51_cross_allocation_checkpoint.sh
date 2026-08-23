@@ -203,7 +203,7 @@ run_dir = Path(os.environ["GLM_RUN_DIR"])
 payload = {
     "phase": os.environ["GLM_RESUME_PHASE"],
     "source_head": os.environ["GLM_EXPECTED_SOURCE_HEAD"],
-    "slurm_job_id": os.environ["SLURM_JOB_ID"],
+    "slurm_job_id": os.environ["NRL_SLURM_JOB_ID"],
     "checkpoint_dir": os.environ["GLM_RESUME_CHECKPOINT_DIR"],
     "ray_object_store_memory": int(os.environ["RAY_OBJECT_STORE_MEMORY"]),
     "terminal_green": True,

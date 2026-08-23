@@ -36,3 +36,10 @@
 - Rank 202 was hard-bound by `nemo_rl.distributed.numa_utils` to CPU NUMA node 2. GH200 exposes only about 120 GB of CPU DRAM in each such node. The outer job cgroup allowed 891.29 GB and peaked at only 334.78 GB on `nid006944`, proving that aggregate job memory was not exhausted.
 - MCore's async checkpoint preload copies every tensor to CPU before persistence. The strict one-node `numa_set_membind` therefore converts a rank-local staging spike into an OOM despite free memory elsewhere. The historical sixteen missing writers across fourteen nodes are consistent with this code-side capacity bug, not bad hardware.
 - Replaced the strict memory bind with a preferred-local policy that permits fallback while retaining GPU-local CPU affinity. Focused NUMA tests pass 21/21 (two GPU benchmarks skipped in the sandbox); Ruff and compile checks pass. The exact 80-node confirmation and fresh-allocation resume remain pending.
+
+## 2026-08-23 18:36 CEST
+
+- Exact-head 80-node confirmation `3164148` completed rollout, step-1 training, NCCL refit and the first full optimizer checkpoint with the preferred-local NUMA policy. All 288 rank shards landed, totaling 8,926,103,907,981 bytes, and both DCP `.metadata` and Megatron `metadata.json` were written. No Slurm OOM occurred.
+- This closes the initiating checkpoint fault: the preceding strict-bind run lost rank 202 and stopped at 230 shards, while the otherwise-matched fallback-enabled run completed 288/288.
+- Training quality remained finite and nontrivial in the checkpoint step: loss `0.0190`, average reward `0.0312`, and generation KL error `0.0028`.
+- The Slurm wrapper exited 1 only after printing `glm51_cross_allocation_save=OK`: terminal-artifact creation read `SLURM_JOB_ID`, but `ray.sub` intentionally clears `SLURM_*` before launching Ray. Preserve the allocation ID as `NRL_SLURM_JOB_ID` and use that in the artifact writer. Focused harness tests pass 5/5; fresh-allocation restore remains pending.
