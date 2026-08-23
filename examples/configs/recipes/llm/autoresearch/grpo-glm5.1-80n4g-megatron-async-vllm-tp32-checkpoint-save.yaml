@@ -1,0 +1,133 @@
+defaults: ../grpo-glm5.1-64n8g-megatron.yaml
+
+# Phase A of the GLM-5.1 cross-allocation checkpoint proof on CSCS GH200.
+# Training uses 72 nodes (288 ranks); rollout uses eight nodes (32 ranks).
+grpo:
+  num_prompts_per_step: 16
+  num_generations_per_prompt: 8
+  max_num_epochs: 1
+  max_num_steps: 2
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  use_dynamic_sampling: false
+  skip_reference_policy_logprobs_calculation: true
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: 1
+    in_flight_weight_updates: true
+    recompute_kv_cache_after_weight_updates: false
+
+loss_fn:
+  reference_policy_kl_penalty: 0.0
+  use_importance_sampling_correction: true
+
+# Save step 1 and stop at that boundary. Phase B resumes the two-step horizon
+# in a fresh allocation, so optimizer, scheduler, data and replay state matter.
+checkpointing:
+  enabled: true
+  checkpoint_dir: ${oc.env:GLM_RESUME_CHECKPOINT_DIR}
+  metric_name: null
+  keep_top_k: 1
+  save_period: 100
+  checkpoint_must_save_by: 00:00:00:01
+  save_optimizer: true
+
+policy:
+  model_name: ${oc.env:GLM_CKPT}
+  train_global_batch_size: 128
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  max_total_sequence_length: 1536
+  logprob_chunk_size: 512
+  sequence_packing:
+    enabled: false
+  make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
+  megatron_cfg:
+    checkpoint:
+      async_save: true
+      ckpt_assume_constant_structure: true
+      # Avoid the 288-rank object collective used by the fully-parallel save
+      # planner. The ordinary torch_dist strategy still saves all distributed
+      # optimizer shards needed for same-topology restoration.
+      fully_parallel_save: false
+      ckpt_load_validate_sharding_integrity: false
+    model_overrides:
+      dsa_kernel_backend: none
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 18
+    num_layers_in_first_pipeline_stage: 7
+    num_layers_in_last_pipeline_stage: 7
+    expert_tensor_parallel_size: 1
+    expert_model_parallel_size: 16
+    sequence_parallel: false
+    activation_checkpointing: true
+    moe_token_dispatcher_type: allgather
+    apply_rope_fusion: false
+    defer_fp32_logits: true
+    optimizer:
+      lr: 5.0e-07
+      min_lr: 5.0e-08
+      weight_decay: 0.0
+      use_precision_aware_optimizer: true
+    scheduler:
+      lr_warmup_iters: 2
+      lr_warmup_init: 5.0e-08
+  generation:
+    max_new_tokens: 1024
+    temperature: 1.0
+    top_p: 1.0
+    refit_transport: nccl_reshard
+    colocated:
+      enabled: false
+      resources:
+        num_nodes: 8
+        gpus_per_node: 4
+    vllm_cfg:
+      tensor_parallel_size: 32
+      pipeline_parallel_size: 1
+      expert_parallel_size: 32
+      gpu_memory_utilization: 0.75
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      enforce_eager: true
+      use_tqdm: false
+      enable_vllm_metrics_logger: true
+      vllm_metrics_logger_interval: 0.5
+
+data:
+  max_input_seq_length: 512
+  shuffle: true
+  num_workers: 1
+  train:
+    dataset_name: DAPOMath17K
+    split_validation_size: 0.0
+    seed: ${grpo.seed}
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: math_hf_data_processor
+    env_name: math
+
+env:
+  math:
+    num_workers: 32
+    math_verify_impl: dapo_math_verify
+
+logger:
+  log_dir: ${oc.env:GLM_RUN_DIR}/tb
+  wandb_enabled: false
+  tensorboard_enabled: true
+  monitor_gpus: true
+  gpu_monitoring:
+    collection_interval: 2
+    flush_interval: 2
+  wandb:
+    project: nemo-rl-glm
+    name: glm51-cross-allocation-checkpoint-save
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 80
+  segment_size: 4
