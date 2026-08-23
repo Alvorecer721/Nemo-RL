@@ -215,6 +215,9 @@ class SequencePackingConfig(TypedDict):
     # Not required because some algorithms like SFT don't calculate log probs
     logprob_mb_tokens: NotRequired[int]
     algorithm: str
+    # Preserve the packer's order (or omit for backward compatibility), or
+    # execute each DP rank's assigned bins largest-first for allocator reuse.
+    microbatch_order: NotRequired[Literal["packer", "largest_first"]]
     # Fused packed loss (SequencePackingFusionLossWrapper) instead of the
     # per-sequence unpacking wrapper; read in megatron/train.py.
     fuse_loss: NotRequired[bool]
@@ -263,9 +266,10 @@ class MegatronOptimizerConfig(TypedDict):
     clip_grad: float
     # knob to enable optimizer cpu offload
     optimizer_cpu_offload: bool
-    # knob to set the fraction of parameters to keep on CPU
-    # currently if optimizer_cpu_offload is true, this knob must be 1.0
+    # knob to set the fraction of optimizer state and work to keep on CPU
     optimizer_offload_fraction: float
+    # overlap optimizer state transfers with CPU optimizer updates
+    overlap_cpu_optimizer_d2h_h2d: NotRequired[bool]
 
 
 class MegatronSchedulerConfig(TypedDict):
@@ -328,6 +332,10 @@ class MegatronCheckpointConfig(TypedDict, total=False):
 class MegatronConfig(TypedDict):
     enabled: Literal[True]
     env_vars: NotRequired[dict[str, str] | None]
+    # Arbitrary model-provider attributes applied recursively to the Megatron
+    # Bridge model config before model instantiation. Keys must match configurable
+    # provider fields and must not duplicate first-class megatron_cfg fields.
+    model_overrides: NotRequired[dict[str, Any]]
     # 1 is the minimum recommendation for RL since we almost always need to offload before beginning generation.
     # Setting to 0 is faster, but you are more likely to run out of GPU memory. In SFT/DPO, the default is 0.
     empty_unused_memory_level: int
@@ -347,6 +355,15 @@ class MegatronConfig(TypedDict):
     num_layers_in_first_pipeline_stage: int | None
     num_layers_in_last_pipeline_stage: int | None
     context_parallel_size: int
+    # Nemotron Omni RADIO/provider booleans. Omit any field to retain the model
+    # provider's checkpoint/default value.
+    radio_force_cpe_eval_mode: NotRequired[bool]
+    # Nemotron Omni tower freeze booleans. Omit any field to retain the model
+    # provider's checkpoint/default value.
+    freeze_vision_model: NotRequired[bool]
+    freeze_vision_projection: NotRequired[bool]
+    freeze_sound_encoder: NotRequired[bool]
+    freeze_sound_projection: NotRequired[bool]
     pipeline_dtype: str
     sequence_parallel: bool
     freeze_moe_router: bool
@@ -383,17 +400,43 @@ class MegatronConfig(TypedDict):
     # (used when transformer_impl='inference_optimized')
     moe_router_num_groups: NotRequired[int | None]
     moe_router_group_topk: NotRequired[int | None]
-    # Transformer implementation backing the model. Only valid on generation workers.
+    # Transformer implementation backing the model. 'inference_optimized'
+    # trains through the TE parent path and requires sequence_parallel with
+    # TP>1 (enforced at setup).
     # Options are 'transformer_engine' and 'inference_optimized'.
     transformer_impl: NotRequired[str]
     # CUDA-graph implementation.
     # Options: 'none', 'local', 'transformer_engine', 'full_iteration'.
     cuda_graph_impl: NotRequired[str]
+    # Training capture regions supported by Megatron-Core: attn, mlp, moe,
+    # moe_router, moe_preprocess, and mamba. An empty list captures whole layers.
+    # Scoped training capture requires the transformer_engine implementation.
+    cuda_graph_modules: NotRequired[str | list[str]]
+    # Number of training warmup steps before CUDA Graph capture. This is inactive
+    # when cuda_graph_impl is 'none'; the Megatron-Core default is 3.
+    cuda_graph_warmup_steps: NotRequired[int]
     # When True, each expert sees a fixed number of tokens for cuda-graph capture.
     # Required when cuda_graph_impl= 'local' with transformer_impl != 'inference_optimized'.
     moe_pad_experts_for_cuda_graph_inference: NotRequired[bool]
     # Can be used only with 'alltoall' token dispatcher
     moe_shared_expert_overlap: bool
+    # Offload specific module activations to CPU to reduce peak GPU memory.
+    # Works with both dense and MoE models. Different from
+    # optimizer_cpu_offload which offloads optimizer states.
+    # Requires transformer_engine. For TE >= 2.10.0 also requires
+    # NVTE_CPU_OFFLOAD_V1=1 in the environment (validated by
+    # Megatron-Bridge at runtime).
+    fine_grained_activation_offloading: NotRequired[bool]
+    # Modules to offload when fine_grained_activation_offloading is True.
+    # Required (no default). Common examples: "core_attn", "attn_proj",
+    # "expert_fc1", and "moe_act". Supported names depend on the pinned
+    # Megatron-LM version and are validated by MCore. "attn_proj" requires
+    # "core_attn". See the latest upstream module reference:
+    # https://github.com/NVIDIA/Megatron-LM/blob/main/docs/user-guide/features/fine_grained_activation_offloading.md#offloadable-modules
+    offload_modules: NotRequired[list[str] | None]
+    # Create gloo process groups during Megatron distributed init.
+    # Omitted: use the Megatron Bridge default.
+    use_gloo_process_groups: NotRequired[bool]
     # Enable grouped GEMM for MoE experts via CUTLASS. Significant throughput
     # gain when multiple experts are assigned per rank (num_local_experts > 1).
     # Requires TE >= 1.11.0 for FP8 and Ampere (sm_80) or newer.
@@ -415,15 +458,16 @@ class MegatronConfig(TypedDict):
     gradient_accumulation_fusion: NotRequired[bool]
     # Enable fused weighted squared ReLU when the architecture supports it.
     use_fused_weighted_squared_relu: NotRequired[bool]
-    # When True, uses chunked linear cross-entropy fusion loss to compute loss
-    # directly from hidden states, avoiding materialization of the full
-    # [batch, seq_len, vocab_size] logit tensor. This significantly reduces peak
-    # GPU memory, extending the maximum trainable sequence length (e.g. from <65K
-    # to >100K tokens). Only applicable to SFT with NLLLoss.
-    use_linear_ce_fusion_loss: NotRequired[bool]
-    # Number of tokens per chunk when computing the fused linear CE loss.
+    # When True, computes per-token logprobs with a chunked linear cross-entropy
+    # fusion kernel directly from hidden states, avoiding materialization of the
+    # full [batch, seq_len, vocab_size] logit tensor. This significantly reduces
+    # peak GPU memory, extending the maximum trainable sequence length (e.g. from
+    # <65K to >100K tokens). Supported for SFT, DPO, and GRPO. Not compatible with
+    # context parallelism, sequence packing, or top-k/top-p training-time filtering.
+    use_fused_linear_logprobs: NotRequired[bool]
+    # Number of tokens per chunk when computing fused linear logprobs.
     # Smaller values reduce peak memory further but may decrease throughput.
-    linear_ce_fusion_chunk_size: NotRequired[int]
+    fused_linear_logprobs_chunk_size: NotRequired[int]
     # When mtp_num_layers=0, Multi-Token Prediction is disabled.
     mtp_num_layers: NotRequired[int]
     # MTP loss weight added to the main next-token loss (0.0 disables the MTP loss contribution).
@@ -440,6 +484,10 @@ class MegatronConfig(TypedDict):
     clear_memory_caches_before_refit: NotRequired[bool]
     # FP8 quantization settings for the Megatron training backend.
     fp8_cfg: NotRequired[Fp8Config]
+    # Passed through to the Megatron model's freeze() method.
+    # Supported keys are model-specific, such as freeze_vision_model,
+    # freeze_vision_projection, and freeze_language_model.
+    freeze_config: NotRequired[dict[str, Any]]
 
 
 class DraftConfigDisabled(TypedDict):
@@ -460,13 +508,17 @@ class DraftConfig(TypedDict):
 
 class TokenizerConfig(TypedDict):
     name: str
-    chat_template: NotRequired[str]
+    # None selects NeMo-RL's passthrough prompt/response template.
+    chat_template: NotRequired[str | None]
     # Arguments to pass to tokenizer.apply_chat_template(...). This can be used to pass kwargs like enable_thinking=true
     chat_template_kwargs: NotRequired[dict[str, Any] | None]
     # Multimodal configs
     audio: NotRequired[dict[str, Any]]
     video: NotRequired[dict[str, Any]]
     use_processor: NotRequired[bool]
+    # Opt-in fastokens Rust-backed BPE tokenizer (~10x faster encode). Defaults to
+    # off when absent; NRL_USE_FASTOKENS overrides at runtime when set.
+    use_fastokens: NotRequired[bool]
 
 
 class PytorchOptimizerConfig(TypedDict):
@@ -538,7 +590,7 @@ class PolicyConfig(TypedDict):
     max_total_sequence_length: int
     # This sets the clipping norm for the DTensorPolicyWorkers (Megatron's is called clip_grad)
     max_grad_norm: NotRequired[float | int | None]
-    refit_buffer_size_gb: NotRequired[float]
+    refit_buffer_size_gb: NotRequired[float | int]
     optimizer: NotRequired[PytorchOptimizerConfig | None]
     scheduler: NotRequired[
         list[SinglePytorchSchedulerConfig | SinglePytorchMilestonesConfig]
@@ -555,3 +607,5 @@ class PolicyConfig(TypedDict):
     # If true, use standard Megatron layer specs while keeping ModelOpt
     # quantization enabled. Useful for faster QARL runs and logged in configs.
     disable_modelopt_layer_spec: NotRequired[bool]
+
+    is_vlm: NotRequired[bool]

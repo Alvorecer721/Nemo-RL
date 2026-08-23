@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +12,80 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import ABC, abstractmethod
-from typing import Any, NotRequired, TypedDict, Union
+from dataclasses import dataclass
+from typing import Any, NotRequired, Optional, TypedDict, Union
 
 import ray
 import torch
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+
+# Routed-expert index tensors ([seq, layers, topk]) are carried in the narrowest
+# signed dtype that fits ids 0..num_experts-1 plus the -1 missing-route sentinel:
+# int8 for <=128 experts (e.g. Qwen3-MoE), int16 for <=32768 (e.g. DeepSeek-V3),
+# int32 beyond. This shrinks message logs, transports, replay buffers, and
+# checkpoints 2-4x vs int32. The Megatron replay install converts to int64 at the
+# gather site, so training math is unaffected. When the expert count cannot be
+# determined, fall back to int16.
+ROUTED_EXPERTS_FALLBACK_DTYPE = torch.int16
+
+# A routed-expert row whose every top-k slot is this value means "no route was
+# captured for this token"; the Megatron replay install falls back to the model's
+# own router for those rows. Partially-negative rows are rejected as corruption.
+ROUTED_EXPERTS_MISSING_ROUTE_SENTINEL = -1
+
+_ROUTED_EXPERTS_DTYPE_NAMES = {
+    torch.int8: "int8",
+    torch.int16: "int16",
+    torch.int32: "int32",
+}
+
+
+def get_num_routed_experts(hf_config: Any) -> Optional[int]:
+    """Best-effort read of the routed-expert count from a HF model config.
+
+    Checks the attribute names used by the common MoE architectures (Qwen-MoE,
+    DeepSeek, Mixtral), including nested ``text_config`` for VLMs. Returns None
+    for dense models or unrecognized configs.
+    """
+    for owner in (hf_config, getattr(hf_config, "text_config", None)):
+        if owner is None:
+            continue
+        for attr in ("num_experts", "n_routed_experts", "num_local_experts"):
+            value = getattr(owner, attr, None)
+            if isinstance(value, int) and value > 0:
+                return value
+    return None
+
+
+def resolve_routed_experts_dtype(num_experts: Optional[int]) -> torch.dtype:
+    """Return the narrowest signed dtype that fits expert ids and the -1 sentinel."""
+    if num_experts is None:
+        return ROUTED_EXPERTS_FALLBACK_DTYPE
+    if num_experts - 1 <= torch.iinfo(torch.int8).max:
+        return torch.int8
+    if num_experts - 1 <= torch.iinfo(torch.int16).max:
+        return torch.int16
+    return torch.int32
+
+
+def resolve_routed_experts_dtype_name_for_model(model_name: str) -> str:
+    """Resolve the routed-experts carry dtype name ("int8"/"int16"/"int32") for a model.
+
+    Used where only the model name is available (e.g. building the NeMo-Gym env
+    config on the driver). Falls back to the default dtype name if the config
+    cannot be loaded.
+    """
+    # Deferred import: transformers config loading is only needed for this sizing.
+    from transformers import AutoConfig
+
+    try:
+        hf_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    except (OSError, ValueError):
+        return _ROUTED_EXPERTS_DTYPE_NAMES[ROUTED_EXPERTS_FALLBACK_DTYPE]
+    return _ROUTED_EXPERTS_DTYPE_NAMES[
+        resolve_routed_experts_dtype(get_num_routed_experts(hf_config))
+    ]
 
 
 def verify_right_padding(
@@ -115,6 +183,17 @@ class ColocationConfig(TypedDict):
     resources: OptionalResourcesConfig
 
 
+class CheckpointEngineConfig(TypedDict):
+    """Normalized internal configuration for checkpoint-engine refit."""
+
+    # "nixl" or a "module:ClassName" path to a CheckpointEngine implementation
+    backend: str
+    # fraction of total GPU memory used by each transfer bucket
+    update_weights_bucket_memory_ratio: float
+    # per-backend constructor kwargs, keyed by the configured backend string
+    engine_kwargs: dict[str, dict[str, Any]]
+
+
 class GenerationConfig(TypedDict):
     """Configuration for generation."""
 
@@ -123,9 +202,17 @@ class GenerationConfig(TypedDict):
     temperature: float
     top_p: float
     top_k: int | None
+    # Validation-only sampling. The exemplar YAMLs default these to the train
+    # values above via interpolation (${.temperature}, ...), so validation
+    # samples exactly like training unless overridden. Only honored on the
+    # NeMo-Gym vLLM rollout path (guarded in grpo.setup()).
+    val_temperature: float
+    val_top_p: float
+    val_top_k: int | None
     model_name: NotRequired[str]  # Not Required b/c GRPO writes this
     stop_token_ids: list[int] | None
     stop_strings: list[str] | None
+    bad_words: NotRequired[list[str] | None]
     colocated: NotRequired[ColocationConfig]
     port_range_low: NotRequired[int]
     port_range_high: NotRequired[int]
@@ -134,6 +221,71 @@ class GenerationConfig(TypedDict):
     _pad_token_id: NotRequired[int]
     # MTP draft weights arrive via refit if the trainer trains the MTP layer.
     _mtp_weights_from_refit: NotRequired[bool]
+    # Internal debug-only measurement of exact Ray generation arguments.
+    # Populated from grpo.debug_payload_metrics; not meant to be set by the user.
+    _debug_payload_metrics: NotRequired[bool]
+
+
+def should_use_async_rollouts(
+    generation_config: GenerationConfig | None,
+) -> bool:
+    """Determine whether a generation backend uses asynchronous rollouts."""
+    if generation_config is None:
+        return False
+    backend = generation_config.get("backend", "")
+
+    if backend == "dynamo":
+        return True
+
+    if backend == "sglang":
+        return bool(generation_config.get("use_async_rollouts", False))
+
+    if backend == "vllm":
+        return bool(generation_config.get("vllm_cfg", {}).get("async_engine", False))
+
+    if backend == "trtllm":
+        assert generation_config.get("trtllm_cfg", {}).get("async_engine", False), (
+            "TRT-LLM backend requires trtllm_cfg.async_engine=true; the "
+            "synchronous engine path (async_engine=false) is no longer supported."
+        )
+        return True
+
+    if backend == "megatron":
+        mcore_cfg = generation_config.get("mcore_generation_config", {})
+        assert mcore_cfg.get("async_engine") is None, (
+            "Megatron Inference always uses the async engine. The parameter "
+            "policy.generation.mcore_generation_config.async_engine was removed."
+        )
+        return True
+
+    return False
+
+
+@dataclass
+class GenerationSamplingParams:
+    """Sampling profile threaded explicitly through rollout entry points.
+
+    Rollout callers construct one from the relevant ``GenerationConfig``
+    fields (train or validation) so the sampling used for a rollout is
+    visible at the call site instead of flowing through config side-channels.
+    Named to distinguish it from ``TrainingSamplingParams`` (train-time logit
+    filtering) and vLLM's own ``SamplingParams``.
+    """
+
+    temperature: float
+    top_p: float
+    top_k: int | None
+
+    @classmethod
+    def from_generation_config(
+        cls, generation_config: "GenerationConfig"
+    ) -> "GenerationSamplingParams":
+        """Build the train-time sampling profile from a generation config."""
+        return cls(
+            temperature=generation_config["temperature"],
+            top_p=generation_config["top_p"],
+            top_k=generation_config["top_k"],
+        )
 
 
 class GenerationDatumSpec(TypedDict):
@@ -228,12 +380,21 @@ class GenerationOutputSpec(TypedDict):
     __extra__: Any
 
 
+@dataclass(frozen=True)
+class CollectiveSenderSpec:
+    """Policy-side protocol and packing geometry for NCCL weight transfer."""
+
+    nccl_peer: str = "nemo"
+    buffer_size_bytes: int | None = None
+    num_buffers: int | None = None
+
+
 class GenerationInterface(ABC):
     """Abstract base class defining the interface for RL policies."""
 
     @abstractmethod
     def init_collective(
-        self, ip: str, port: int, world_size: int
+        self, ip: str, port: int, world_size: int, *, train_world_size: int
     ) -> list[ray.ObjectRef]:
         """Initialize the collective communication."""
         pass
@@ -246,10 +407,29 @@ class GenerationInterface(ABC):
 
     @abstractmethod
     def prepare_for_generation(self, *args: Any, **kwargs: Any) -> bool:
+        """Ready the engine for a generation phase (start or wake it).
+
+        Idempotent wake: calling this on an already-running engine must be safe and cheap.
+        """
         pass
 
     @abstractmethod
     def finish_generation(self, *args: Any, **kwargs: Any) -> bool:
+        """Wind down after a generation phase.
+
+        Callers may pass `release_gpu` (keyword-only, default True):
+        True means the caller needs the GPUs for itself (a training step or a checkpoint save),
+        so even a colocated engine must fully stand down;
+        False means the phase is merely over, and a colocated engine must keep serving
+        usable with no intervening prepare_for_generation.
+        Only the colocated Megatron backend honors the flag today; other backends
+        ignore it, as do engines on dedicated GPUs.
+        """
+        pass
+
+    @abstractmethod
+    def shutdown(self) -> bool:
+        """Shut down generation resources; repeated calls must be safe."""
         pass
 
     @property
@@ -269,9 +449,62 @@ class GenerationInterface(ABC):
         """Update the model weights from collective communication."""
         raise NotImplementedError
 
+    def get_collective_sender_spec(self) -> CollectiveSenderSpec:
+        """Return policy-side NCCL protocol and packed-buffer requirements."""
+        return CollectiveSenderSpec()
+
+    def get_inference_world_size(self) -> int | None:
+        """Return a backend-specific collective world size when required."""
+        return None
+
+    def prepare_nccl_reshard_refit_info(self, refit_info: dict) -> None:
+        """Prepare per-layer param metadata for nccl_reshard-based refit."""
+        raise NotImplementedError
+
+    def nccl_reshard_refit(self) -> list[ray.ObjectRef]:
+        """Receive weights from training workers via nccl_reshard."""
+        raise NotImplementedError
+
+    def attach_fleet_health(self, monitor: Any, selector: Any) -> None:
+        """Route this backend's shard selection through fleet health.
+
+        Declared here rather than discovered with ``hasattr`` at the call site, so an
+        unsupported backend says so itself and the capability is greppable from the
+        interface. Same shape as the refit hooks above.
+
+        Args:
+            monitor: ``GenerationFleetHealth`` owning shard eligibility, which the
+                backend also reports observed failures and successes to.
+            selector: ``HealthyShardSelector`` picking among the serving shards.
+        """
+        raise NotImplementedError(
+            "async_rl.generation_fleet_health.enabled=true is not supported for the "
+            f"{type(self).__name__} generation backend"
+        )
+
     # Optional hook; backends may override to invalidate any reusable caches
     # (e.g., vLLM prefix/KV caches) after weight updates.
     def invalidate_kv_cache(self) -> bool:
+        return False
+
+    def blocks_training(self) -> bool:
+        """Whether this engine must stand down before a training step.
+
+        True when generation shares GPUs with training (colocated): the
+        training loop then pauses collection and winds the engine down
+        before training. Engines on dedicated GPUs never block training.
+        """
+        return False
+
+    def wake_carries_weight_updates(self) -> bool:
+        """Whether prepare_for_generation alone serves the latest weights.
+
+        True when waking the engine suffices for it to serve weights updated while it slept
+        (colocated Megatron: the wake reshards, or the engine shares the training tensors outright).
+        The async loop may then defer a wake past a checkpoint save and advance
+        the collector's weight version with no explicit transfer.
+        Backends whose wake does not reload weights must return False so the loop refits instead.
+        """
         return False
 
     def clear_logger_metrics(self) -> None:

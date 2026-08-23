@@ -12,8 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import logging
 import shutil
+import subprocess
+import sys
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -27,7 +32,9 @@ from nemo_rl.utils.logger import (
     TensorboardLogger,
     WandbLogger,
     flatten_dict,
+    log_container_init_timing,
     print_message_log_samples,
+    should_log_nemo_gym_full_result_tables,
 )
 
 
@@ -114,6 +121,30 @@ class TestFlattenDict:
         assert metrics["generation_logger_metrics"]["kv"] == {0: [1, 2], 1: [3]}
 
 
+@pytest.mark.parametrize(
+    ("wandb_enabled", "table_flag", "expected"),
+    [
+        (False, None, False),
+        (True, None, False),
+        (False, True, False),
+        (True, False, False),
+        (True, True, True),
+    ],
+)
+def test_should_log_nemo_gym_full_result_tables(wandb_enabled, table_flag, expected):
+    """Full-result Tables require both an active W&B logger and explicit opt-in."""
+    wandb_config = {}
+    if table_flag is not None:
+        wandb_config["log_nemo_gym_full_result_tables"] = table_flag
+
+    assert (
+        should_log_nemo_gym_full_result_tables(
+            wandb_enabled=wandb_enabled, wandb_config=wandb_config
+        )
+        is expected
+    )
+
+
 class TestTensorboardLogger:
     """Test the TensorboardLogger class."""
 
@@ -148,6 +179,49 @@ class TestTensorboardLogger:
         assert mock_writer.add_scalar.call_count == 2
         mock_writer.add_scalar.assert_any_call("loss", 0.5, 10)
         mock_writer.add_scalar.assert_any_call("accuracy", 0.8, 10)
+
+    def test_json_dump_requires_tag_prefix_across_plugin_categories(self, tmp_path):
+        """The functional gate accepts image tags and rejects missing prefixes."""
+        from torch.utils.tensorboard import SummaryWriter
+
+        log_dir = tmp_path / "tensorboard"
+        writer = SummaryWriter(log_dir=str(log_dir))
+        writer.add_image(
+            "generation_metrics/per_worker_requests",
+            torch.zeros((3, 1, 1)),
+            global_step=1,
+        )
+        writer.add_scalar("train/loss", 1.0, global_step=1)
+        writer.close()
+
+        script = Path(__file__).parents[2] / "json_dump_tb_logs.py"
+        metrics_path = tmp_path / "metrics.json"
+        command = [
+            sys.executable,
+            str(script),
+            str(log_dir),
+            "--output_path",
+            str(metrics_path),
+            "--require-tag-prefix",
+        ]
+
+        found = subprocess.run(
+            [*command, "generation_metrics/"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert found.returncode == 0, found.stderr
+        assert json.loads(metrics_path.read_text()) == {"train/loss": {"1": 1.0}}
+
+        missing = subprocess.run(
+            [*command, "missing/"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert missing.returncode == 1
+        assert "No TensorBoard tag starts with 'missing/'" in missing.stderr
 
     @patch("nemo_rl.utils.logger.SummaryWriter")
     def test_log_metrics_with_prefix(self, mock_summary_writer, temp_dir):
@@ -301,6 +375,7 @@ class TestWandbLogger:
             "entity": "custom-entity",
             "group": "custom-group",
             "tags": ["tag1", "tag2"],
+            "log_nemo_gym_full_result_tables": True,
         }
         WandbLogger(cfg, log_dir=temp_dir)
 
@@ -2056,6 +2131,35 @@ class TestLogger:
 
         mock_subplots.assert_not_called()
         backend_logger.log_plot.assert_not_called()
+
+
+class TestLogContainerInitTiming:
+    def test_warns_when_job_start_unset(self, monkeypatch, caplog, capsys):
+        monkeypatch.delenv("NRL_JOB_START_EPOCH", raising=False)
+        with caplog.at_level(logging.WARNING):
+            log_container_init_timing()
+        assert "NRL_JOB_START_EPOCH not set" in caplog.text
+        assert "CONTAINER INIT TIMING" not in capsys.readouterr().out
+
+    def test_prints_total_only(self, monkeypatch, capsys):
+        monkeypatch.delenv("SLURM_JOB_START_TIME", raising=False)
+        monkeypatch.delenv("NRL_RAY_READY_EPOCH", raising=False)
+        monkeypatch.setenv("NRL_JOB_START_EPOCH", "1.0")
+        log_container_init_timing()
+        out = capsys.readouterr().out
+        assert "CONTAINER INIT TIMING" in out and "total:" in out
+        assert "slurm_prologue" not in out and "cluster_startup" not in out
+
+    def test_prints_full_breakdown(self, monkeypatch, capsys):
+        monkeypatch.setenv("SLURM_JOB_START_TIME", "1.0")
+        monkeypatch.setenv("NRL_JOB_START_EPOCH", "2.0")
+        monkeypatch.setenv("NRL_RAY_READY_EPOCH", "3.0")
+        log_container_init_timing()
+        out = capsys.readouterr().out
+        assert "slurm_prologue: 1.0s" in out
+        assert "cluster_startup (orchestrator+container+ray): 1.0s" in out
+        assert "driver_startup (launch+python+imports):" in out
+        assert "total:" in out
 
 
 def test_print_message_log_samples(capsys):

@@ -17,7 +17,12 @@ from typing import Any, NotRequired, Optional, TypedDict, TypeVar
 import torch
 from pydantic import BaseModel
 
-from nemo_rl.algorithms.loss.interfaces import LossFunction, LossInputType, LossType
+from nemo_rl.algorithms.loss.interfaces import (
+    LossFunction,
+    LossInputType,
+    LossType,
+    MetricNormalizer,
+)
 from nemo_rl.algorithms.utils import calculate_kl, masked_mean
 from nemo_rl.algorithms.x_token.loss_utils import (
     LocalizedAlignment,
@@ -28,6 +33,7 @@ from nemo_rl.algorithms.x_token.loss_utils import (
     next_token_accuracy,
     project_student_to_teacher_vocab,
     select_teacher_topk_indices,
+    slice_sparse_projection_cols,
     student_next_token_ce,
     valid_chunk_mask,
 )
@@ -37,6 +43,7 @@ from nemo_rl.distributed.model_utils import (
     cp_shift_next,
     group_all_reduce_sum,
     vocab_parallel_full_log_softmax,
+    vocab_parallel_gather_columns,
     vocab_parallel_log_softmax,
 )
 from nemo_rl.models.dtensor.parallelize import to_local_if_dtensor
@@ -87,6 +94,8 @@ class DraftCrossEntropyLossFn(LossFunction):
                 False,
             )
         else:
+            # teacher_logits is already detached at the call site (utils.py);
+            # match DistributedCrossEntropy semantics.
             teacher_probs = torch.nn.functional.softmax(teacher_logits, dim=-1)
             student_log_probs = torch.nn.functional.log_softmax(student_logits, dim=-1)
             per_token_loss = -(teacher_probs * student_log_probs).sum(dim=-1)
@@ -195,7 +204,7 @@ class ClippedPGLossFn(LossFunction):
     - KL(π_θ || π_ref) is the KL divergence between the current policy and reference policy (Schulman Approx.)
 
     For REINFORCE/RLOO (when disable_ppo_ratio=True), the formula simplifies to:
-    L(θ) = E_t [ π_θ(a_t|s_t) * A_t ] - β * KL(π_θ || π_ref)
+    L(θ) = E_t [ log π_θ(a_t|s_t) * A_t ] - β * KL(π_θ || π_ref)
 
     Formula (CISPO):
     L(θ) = E_t [ sg(clip(r_t(θ), 1-ε_low, 1+ε_high)) * A_t * log π_θ(a_t|s_t) ]
@@ -216,7 +225,14 @@ class ClippedPGLossFn(LossFunction):
 
     input_type = LossInputType.LOGPROB
 
-    def __init__(self, cfg: ClippedPGLossConfig):
+    def __init__(
+        self, cfg: ClippedPGLossConfig, use_fused_linear_logprobs: bool = False
+    ):
+        # When True, the model forward is patched to return precomputed next-token
+        # logprobs (via chunked linear CE fusion) instead of full logits. This is
+        # consumed by prepare_loss_input, which short-circuits the logits->logprobs
+        # conversion. See nemo_rl/distributed/model_utils.py for the fused forward.
+        self.use_fused_linear_logprobs = use_fused_linear_logprobs
         self.disable_ppo_ratio = cfg.disable_ppo_ratio
         self.ratio_clip_min = cfg.ratio_clip_min
         self.ratio_clip_max = cfg.ratio_clip_max
@@ -306,6 +322,54 @@ class ClippedPGLossFn(LossFunction):
                     "seq-mask-tis uses token-level IS correction with sequence-level masking, "
                     "and is incompatible with sequence_level_importance_ratios=True"
                 )
+
+        # Advertise, per returned metric, the global denominator it was
+        # normalized by (see MetricNormalizer). Built here — next to the flags
+        # that pick the denominators — so split-API trainers can undo the
+        # placeholder global_valid_*=1 normalization without maintaining a
+        # consumer-side table. Keep in sync with __call__'s return dict.
+        grad_normalizer = (
+            MetricNormalizer.TOKENS
+            if self.loss_type == LossType.TOKEN_LEVEL
+            else MetricNormalizer.SEQUENCES
+        )
+        self.metric_normalizations: dict[str, MetricNormalizer] = {
+            # Normalized like the gradient (loss_type-dependent).
+            "loss": grad_normalizer,
+            "kl_penalty": grad_normalizer,
+            # Token-normalized diagnostics, independent of loss_type.
+            "probs_ratio": MetricNormalizer.TOKENS,
+            "probs_ratio_clamped": MetricNormalizer.TOKENS,
+            "token_mult_prob_error": MetricNormalizer.TOKENS,
+            "gen_kl_error": MetricNormalizer.TOKENS,
+            "policy_kl_error": MetricNormalizer.TOKENS,
+            "js_divergence_error": MetricNormalizer.TOKENS,
+            "approx_entropy": MetricNormalizer.TOKENS,
+            # Keyed on sequence_level_importance_ratios, NOT loss_type.
+            "sampling_importance_ratio": (
+                MetricNormalizer.SEQUENCES
+                if self.sequence_level_importance_ratios
+                else MetricNormalizer.TOKENS
+            ),
+            # Raw count — the downstream per-microbatch sum IS the value.
+            "num_valid_samples": MetricNormalizer.NONE,
+            # Normalized by the microbatch's own correct-token count, not a
+            # global factor — already a per-microbatch mean.
+            "positive_nll_loss": MetricNormalizer.NONE,
+            # Extrema — combined downstream with min/max, never scaled.
+            "probs_ratio_min": MetricNormalizer.NONE,
+            "probs_ratio_max": MetricNormalizer.NONE,
+            "probs_ratio_clamped_min": MetricNormalizer.NONE,
+            "probs_ratio_clamped_max": MetricNormalizer.NONE,
+        }
+        if self.truncated_importance_sampling_type is not None:
+            # Keyed on the TIS type, NOT loss_type: seq-mask-tis masks whole
+            # sequences (÷ global_valid_seqs); tis/icepop are token-level.
+            self.metric_normalizations["is_oob_ratio"] = (
+                MetricNormalizer.SEQUENCES
+                if self.truncated_importance_sampling_type == "seq-mask-tis"
+                else MetricNormalizer.TOKENS
+            )
 
     def __call__(
         self,
@@ -730,8 +794,15 @@ class NLLLossFn(LossFunction):
     loss_type = LossType.TOKEN_LEVEL
     input_type = LossInputType.LOGPROB
 
-    def __init__(self, use_linear_ce_fusion: bool = False):
-        self.use_linear_ce_fusion = use_linear_ce_fusion
+    def __init__(self, use_fused_linear_logprobs: bool = False):
+        self.use_fused_linear_logprobs = use_fused_linear_logprobs
+        # See MetricNormalizer — split-API trainers use this to undo the
+        # placeholder global_valid_*=1 normalization per metric.
+        self.metric_normalizations: dict[str, MetricNormalizer] = {
+            "loss": MetricNormalizer.TOKENS,
+            "num_unmasked_tokens": MetricNormalizer.NONE,
+            "num_valid_samples": MetricNormalizer.NONE,
+        }
 
     def __call__(
         self,
@@ -951,14 +1022,14 @@ class DPOLossFn(PreferenceLossFn):
     loss_type = LossType.SEQUENCE_LEVEL
     input_type = LossInputType.LOGPROB
 
-    def __init__(self, cfg: DPOLossConfig, use_linear_ce_fusion: bool = False):
+    def __init__(self, cfg: DPOLossConfig, use_fused_linear_logprobs: bool = False):
         self.reference_policy_kl_penalty = cfg.reference_policy_kl_penalty
         self.preference_loss_weight = cfg.preference_loss_weight
         self.sft_loss_weight = cfg.sft_loss_weight
         self.preference_average_log_probs = cfg.preference_average_log_probs
         self.sft_average_log_probs = cfg.sft_average_log_probs
-        self.use_linear_ce_fusion = use_linear_ce_fusion
-        self.sft_loss = NLLLossFn(use_linear_ce_fusion=use_linear_ce_fusion)
+        self.use_fused_linear_logprobs = use_fused_linear_logprobs
+        self.sft_loss = NLLLossFn(use_fused_linear_logprobs=use_fused_linear_logprobs)
 
     def _dpo_loss(
         self,
@@ -1035,10 +1106,10 @@ class DPOLossFn(PreferenceLossFn):
         }
 
 
-class DistillationLossConfig(TypedDict):
-    kl_type: str
-    mixed_kl_weight: float
-    zero_outside_topk: bool
+class DistillationLossConfig(BaseModel, extra="allow"):
+    kl_type: str = "mixed"
+    mixed_kl_weight: float = 0.5
+    zero_outside_topk: bool = False
 
 
 class DistillationLossDataDict(TypedDict):
@@ -1057,9 +1128,9 @@ class DistillationLossFn(LossFunction):
     input_type = LossInputType.DISTILLATION
 
     def __init__(self, cfg: DistillationLossConfig):
-        self.kl_type = cfg["kl_type"]
-        self.mixed_kl_weight = cfg["mixed_kl_weight"]
-        self.zero_outside_topk = cfg["zero_outside_topk"]
+        self.kl_type = cfg.kl_type
+        self.mixed_kl_weight = cfg.mixed_kl_weight
+        self.zero_outside_topk = cfg.zero_outside_topk
         self.log_infinitesimal = -100
 
         assert self.kl_type in ["forward", "reverse", "mixed"], "Invalid KL type"
@@ -1782,15 +1853,16 @@ class CrossTokenizerDistillationLossFn(LossFunction):
 
         Top-K columns are selected at the student from the reassembled full-vocab
         teacher logits (``select_teacher_topk_indices`` MAX-reduces across CP so
-        every CP rank agrees on the same columns). The student is gathered to full
-        vocab across TP (``vocab_parallel_full_log_softmax``) *before* slicing —
-        slicing a TP-local shard would pick the wrong columns. Both sides are
-        renormalized within the K-subset (the teacher's subset-softmax and the
-        student's full-then-renorm are mathematically identical, the full-vocab
-        partition function cancels). The masked next-token mean is normalized by
-        the CP/DP-global valid-token count, exactly like the CE term; at CP=1 the
-        ``cp_shift_next`` mask reduces to the ``token_mask[:, 1:]`` next-token
-        shift.
+        every CP rank agrees on the same columns). The student's K columns are
+        gathered TP-aware (``vocab_parallel_gather_columns``) and softmaxed
+        within the subset directly: because both sides renormalize within K,
+        the full-vocab partition function cancels, so
+        ``log_softmax_K(logits[..., idx] / T)`` equals the previous
+        full-vocab-log-softmax-then-renorm form exactly — without materializing
+        the all-gathered ``[B, T, V]`` student log-probs. The masked next-token
+        mean is normalized by the CP/DP-global valid-token count, exactly like
+        the CE term; at CP=1 the ``cp_shift_next`` mask reduces to the
+        ``token_mask[:, 1:]`` next-token shift.
         """
         T = self.temperature
         # Drop HF lm_head padding beyond the shared tokenizer vocab.
@@ -1801,13 +1873,13 @@ class CrossTokenizerDistillationLossFn(LossFunction):
         vocab_topk = min(self.vocab_topk, teacher.shape[-1])
         topk_idx = select_teacher_topk_indices(teacher, vocab_topk, cp_group=cp_group)
 
-        student_log_probs = vocab_parallel_full_log_softmax(
-            student_logits, T, tp_group=tp_group
+        # [B, T, K] instead of the all-gathered [B, T, V]: the K-subset
+        # renormalization cancels the full-vocab partition function, so the
+        # subset log_softmax is exactly equivalent (see docstring).
+        student_topk_logits = vocab_parallel_gather_columns(
+            student_logits, topk_idx, tp_group=tp_group
         )
-        student_gathered = student_log_probs[..., topk_idx]
-        student_log_probs_k = student_gathered - torch.logsumexp(
-            student_gathered, dim=-1, keepdim=True
-        )
+        student_log_probs_k = torch.log_softmax(student_topk_logits / T, dim=-1)
         teacher_log_probs_k = torch.log_softmax(
             teacher[..., topk_idx].float() / T, dim=-1
         )
@@ -2204,14 +2276,17 @@ class CrossTokenizerDistillationLossFn(LossFunction):
 
         Steps:
 
-        1. Project full-vocab student probs through ``M`` to teacher vocab.
-        2. Use the full teacher logits materialized by ``prepare_loss_input``.
-        3. Compute one ``global_top_indices [k]`` per microbatch from the
+        1. Use the full teacher logits materialized by ``prepare_loss_input``.
+        2. Compute one ``global_top_indices [k]`` per microbatch from the
            teacher's importance: ``max`` over flat ``(B*T_t)``, ``topk``
            over ``V_t``. Same vocab subset across every sample/position —
            keeps chunk-averaged KL well-defined.
-        4. Slice both the projected student probs and the teacher logits
-           to those ``k`` columns.
+        3. Restrict ``M`` to those ``k`` teacher columns and project the
+           student probs through it, so only the ``k`` columns are ever
+           produced. Each teacher column of ``M.t() @ p`` is an independent
+           contraction over the student axis, so slicing before the matmul
+           is value-preserving.
+        4. Slice the teacher logits to the same ``k`` columns.
         5. Build per-token chunk masks from ``alignment_*_chunk_id`` and
            chunk-average via ``bmm`` (shared helper).
         6. Renormalize student chunk distributions inside the top-k subset
@@ -2235,10 +2310,9 @@ class CrossTokenizerDistillationLossFn(LossFunction):
             student_vocab_size=self.student_vocab_size,
             teacher_vocab_size=teacher_vocab_size,
         )  # [V_s, V_t] sparse COO, fp32
-        projected_full = project_student_to_teacher_vocab(
-            student_probs, sparse_projection, tp_group=tp_group
-        )  # [B, T_s_local, V_t]
-        full_teacher_vocab_size = projected_full.shape[-1]
+        # The projection itself is deferred until the top-k columns are known
+        # (see below); its teacher-vocab width is available from the matrix.
+        full_teacher_vocab_size = sparse_projection.size(1)
 
         # `teacher_full_logits` [B, T_t, V_t_model] is materialized by
         # `prepare_loss_input` (rebuilt from the IPC handles). Same transport
@@ -2269,8 +2343,21 @@ class CrossTokenizerDistillationLossFn(LossFunction):
             teacher_full_logits, vocab_topk, cp_group=cp_group
         )  # [k]
 
-        # Slice both sides to the shared [k] columns.
-        projected_topk = projected_full[..., global_top_indices]  # [B, T_s, k]
+        # Slice both sides to the shared [k] columns. On the student side the
+        # slice is folded into the projection matrix rather than applied to its
+        # output: every teacher column of ``M.t() @ p`` is an independent
+        # contraction over the student axis, so restricting M's columns first is
+        # value-preserving, and the only renormalization here is within the [k]
+        # subset (below), never over V_t. Projecting all V_t columns and then
+        # discarding all but k built -- and all-reduced, under TP -- a
+        # [B, T_s, V_t] fp32 tensor to read k of its columns.
+        if vocab_topk < full_teacher_vocab_size:
+            sparse_projection = slice_sparse_projection_cols(
+                sparse_projection, global_top_indices
+            )
+        projected_topk = project_student_to_teacher_vocab(
+            student_probs, sparse_projection, tp_group=tp_group
+        )  # [B, T_s_local, k]
         teacher_topk_logits = teacher_full_logits[
             ..., global_top_indices
         ]  # [B, T_t, k]

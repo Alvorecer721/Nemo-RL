@@ -76,6 +76,16 @@ pressure from the sibling's venv build into tmpfs is the alternate suspect).
 Serialize containerized steps — or give a concurrent step a different EDF —
 until the mechanism is pinned down.
 
+**Use one Ray `srun` for multi-node OFI jobs.** Slingshot authorizes the CXI VNI
+per Slurm step. The upstream `ray.sub` topology starts the Ray head and workers
+in separate steps, which is valid on clusters without step-scoped fabric
+credentials but cannot back one cross-node NCCL/OFI communicator on Alps. Set
+`RAY_SINGLE_SRUN=1` for non-interactive multi-node jobs here. This dispatches
+the Ray head as task 0 and one worker per remaining task inside a single step,
+so every later Ray actor inherits the same VNI. The mode rejects interactive
+and sandbox-sidecar launches until those lifecycles can also preserve the
+single-step invariant.
+
 ## Custom vLLM 0.25.1 GH200 image
 
 The machine-local `docker/nemo_rl_vllm0251.toml` EDF selects the custom arm64
@@ -139,10 +149,13 @@ sbatch --chdir="$PWD" infra/slurm/cscs/build_nemo_rl_image.slurm
 
 Useful environment overrides are `SCRATCH_ROOT`, `CACHE_DIR`, `OUTPUT_DIR`,
 `REGISTRY_IMAGE_ARCHIVE`, `BASE_IMAGE`, `MAX_JOBS`, `NVTE_CUDA_ARCHS`, and
-`PODMAN_STORAGE_BASE`. `HERMETIC_CACHE_TAG=rebuild` deliberately rebuilds all
-dependencies instead of resuming the pinned hermetic image. The default
-architecture is arm64/GH200, the NGC base is digest-pinned, and Transformer
-Engine is limited to `NVTE_CUDA_ARCHS=90`.
+`PODMAN_STORAGE_BASE`. `CUSTOM_SETUP_FNAME` is empty by default because CSCS
+launches SquashFS images through Pyxis/Enroot and does not need Apptainer
+inside the image; set it explicitly only for a nested-container use case.
+`HERMETIC_CACHE_TAG=rebuild` deliberately rebuilds all dependencies instead of
+resuming the pinned hermetic image. The default architecture is arm64/GH200,
+the NGC base is digest-pinned, and Transformer Engine is limited to
+`NVTE_CUDA_ARCHS=90`.
 
 The build has two different stores:
 
@@ -246,6 +259,11 @@ sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
   infra/slurm/cscs/probe_nemo_rl_vllm0251_image.slurm
 
 sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
+  infra/slurm/cscs/probe_nemo_rl_grpo_vllm0251_image.slurm
+
+# Permanent Apertus pipeline-parallel refit regression: TP2 / PP2 on 4 GH200s.
+sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \
+  --export=ALL,MEGATRON_TP_SIZE=2,MEGATRON_PP_SIZE=2 \
   infra/slurm/cscs/probe_nemo_rl_grpo_vllm0251_image.slurm
 
 sbatch --reservation=SD-69241-apertus-1-5-0 --chdir="$PWD" \

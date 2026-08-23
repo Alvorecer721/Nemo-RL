@@ -12,18 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fail-fast guard: Apertus runs must import *our* nemo_rl, not the stock copy.
+"""Fail fast when an Apertus run resolves an incompatible local runtime.
 
-The Apertus deltas live in this repo's working tree and its Bridge submodule, not the container's baked ``/opt/nemo-rl`` copy:
-
-* the xIELU dummy-load fix (``nemo_rl/models/huggingface/common.py``), and
-* the Bridge refit-emit for the xIELU beta/eps buffers (``ApertusBridge.maybe_modify_converted_hf_weight`` in ``apertus_bridge.py``).
-
-If a launcher runs from a directory / ``PYTHONPATH`` that does not point at this checkout, ``import nemo_rl`` silently falls back to stock ``/opt/nemo-rl`` and those deltas are absent.
-The dangerous case is online training (GRPO / online-DPO): without the xIELU fix the refit omits the xIELU beta/eps buffers, vLLM's dummy-load leaves them as noise, and the run *silently* regresses to Generation KL Error ~0.79 — no error raised.
-
-This converts that silent misconfiguration into a loud startup failure.
-The check is cheap and side-effect-free, so it runs on every Apertus entrypoint regardless of online/offline — the invariant "we run our nemo_rl" is universal even though the xIELU symptom is online-only.
+The fork keeps xIELU ``beta``/``eps`` as engine-owned architecture constants:
+vLLM excludes them from weight state and the Bridge must not synthesize refit
+keys for them.  A stale NeMo-RL or Bridge checkout can silently violate that
+contract and corrupt online generation, so every Apertus entrypoint checks the
+contract before allocating model state.
 """
 
 from __future__ import annotations
@@ -33,32 +28,61 @@ import importlib.util
 from pathlib import Path
 
 
-def _bridge_apertus_module_path() -> Path:
-    """Locate the apertus_bridge.py that ``import megatron.bridge`` would resolve, without executing the package.
-
-    ``find_spec`` follows the same ``sys.path`` resolution as a real import but only imports the
-    code-free ``megatron`` namespace parent — executing ``megatron/bridge/__init__.py`` would pull
-    the full model zoo (+~17s warm / +~110s cold in the guard-only launcher process).
-    """
-    spec = importlib.util.find_spec("megatron.bridge")
-    if spec is None or not spec.submodule_search_locations:
-        raise RuntimeError(
-            "Apertus runtime guard failed: megatron.bridge is not importable.\n"
-            "  Fix: initialize the Bridge submodule — git submodule update --init --recursive — "
-            "and ensure PYTHONPATH includes <repo>/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src."
-        )
+def _bundled_bridge_apertus_module_path() -> Path:
+    """Return the Bridge source shipped beside NeMo-RL in source and release trees."""
     return (
-        Path(next(iter(spec.submodule_search_locations)))
+        Path(__file__).resolve().parents[1]
+        / "3rdparty"
+        / "Megatron-Bridge-workspace"
+        / "Megatron-Bridge"
+        / "src"
+        / "megatron"
+        / "bridge"
         / "models"
         / "apertus"
         / "apertus_bridge.py"
     )
 
 
+def _bridge_apertus_module_path() -> Path:
+    """Locate the active or bundled Apertus Bridge source without importing it.
+
+    ``find_spec`` follows the same ``sys.path`` resolution as a real import but only imports the
+    code-free ``megatron`` namespace parent — executing ``megatron/bridge/__init__.py`` would pull
+    the full model zoo (+~17s warm / +~110s cold in the guard-only launcher process). Release
+    images intentionally install Bridge only in the frozen Megatron worker environment, so the
+    launcher interpreter falls back to the same bundled source tree used to build that worker.
+    """
+    try:
+        spec = importlib.util.find_spec("megatron.bridge")
+    except ModuleNotFoundError:
+        spec = None
+    if spec is not None and spec.submodule_search_locations:
+        return (
+            Path(next(iter(spec.submodule_search_locations)))
+            / "models"
+            / "apertus"
+            / "apertus_bridge.py"
+        )
+
+    bundled_module = _bundled_bridge_apertus_module_path()
+    if bundled_module.is_file():
+        return bundled_module
+    raise RuntimeError(
+        "Apertus runtime guard failed: no Megatron-Bridge source is available.\n"
+        f"  Expected bundled source: {bundled_module}\n"
+        "  Fix: initialize the Bridge submodule — git submodule update --init --recursive — "
+        "or ensure PYTHONPATH includes <repo>/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src."
+    )
+
+
 def assert_apertus_runtime() -> None:
     """Raise if the Apertus deltas are missing from the imported runtime.
 
-    Checks (1) ``is_apertus_model`` exists in our nemo_rl (absent in the stock ``/opt/nemo-rl``), and (2) the Bridge's ``apertus_bridge.py`` defines the xIELU beta/eps refit-emit override on ``ApertusBridge`` itself — the base class ships a no-op, so an inherited-only method means a stale submodule. (2) matters because vLLM dummy-load relies on the refit carrying beta/eps; a stale Bridge would silently regress KL. The Bridge check is static (spec resolution + AST) so the guard stays cheap in the launcher's guard-only process.
+    The NeMo-RL marker distinguishes this checkout from the image's stock copy.
+    The Bridge source must declare that the engine owns xIELU static state and
+    must not retain the legacy synthetic-weight override.  The Bridge check is
+    static so the guard remains cheap in launcher preflight processes.
     """
     import nemo_rl
     from nemo_rl.models.huggingface import common
@@ -67,8 +91,8 @@ def assert_apertus_runtime() -> None:
         raise RuntimeError(
             "Apertus runtime guard failed: the imported nemo_rl is the stock copy, not the Apertus checkout.\n"
             f"  nemo_rl loaded from: {nemo_rl.__file__}\n"
-            "  It is missing the Apertus deltas (xIELU dummy-load + Bridge refit-emit).\n"
-            "  Online training would silently regress to Generation KL Error ~0.79 with no error raised.\n"
+            "  It is missing the Apertus engine-owned xIELU state contract.\n"
+            "  Online training could silently corrupt generation after refit.\n"
             "  Fix: run from your Nemo-RL checkout, or set PYTHONPATH=<repo> so `import nemo_rl` resolves to it."
         )
 
@@ -81,7 +105,22 @@ def assert_apertus_runtime() -> None:
         )
 
     tree = ast.parse(bridge_module.read_text())
-    defines_refit_emit = any(
+    engine_owns_static_state = any(
+        isinstance(node, (ast.Assign, ast.AnnAssign))
+        and (
+            any(
+                isinstance(target, ast.Name)
+                and target.id == "APERTUS_XIELU_STATIC_STATE_OWNER"
+                for target in (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+            )
+        )
+        and isinstance(node.value, ast.Constant)
+        and node.value.value == "engine"
+        for node in tree.body
+    )
+    defines_legacy_refit_emit = any(
         isinstance(node, ast.ClassDef)
         and node.name == "ApertusBridge"
         and any(
@@ -91,10 +130,17 @@ def assert_apertus_runtime() -> None:
         )
         for node in ast.walk(tree)
     )
-    if not defines_refit_emit:
+    if not engine_owns_static_state:
         raise RuntimeError(
-            "Apertus runtime guard failed: the Megatron-Bridge submodule is missing the xIELU beta/eps refit-emit (ApertusBridge.maybe_modify_converted_hf_weight).\n"
+            "Apertus runtime guard failed: the Megatron-Bridge submodule does not declare engine-owned xIELU static state.\n"
             f"  ApertusBridge resolved from: {bridge_module}\n"
-            "  With vLLM dummy-load the refit would not carry beta/eps and Generation KL would silently regress to ~0.79.\n"
+            '  Expected: APERTUS_XIELU_STATIC_STATE_OWNER = "engine".\n'
+            "  Fix: update the submodule — git submodule update --init --recursive."
+        )
+    if defines_legacy_refit_emit:
+        raise RuntimeError(
+            "Apertus runtime guard failed: ApertusBridge still defines the legacy xIELU synthetic-weight refit override.\n"
+            f"  ApertusBridge resolved from: {bridge_module}\n"
+            "  Engine-owned beta/eps constants must not also travel through the weight stream.\n"
             "  Fix: update the submodule — git submodule update --init --recursive."
         )

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
@@ -21,6 +22,26 @@ from megatron.bridge import AutoBridge
 from megatron.core.transformer import ModuleSpec
 
 from nemo_rl.models.policy import MegatronConfig
+
+
+def iter_vlm_config_overrides(
+    megatron_config: MegatronConfig,
+) -> Iterator[tuple[str, Any]]:
+    """Yield explicitly configured Nemotron Omni provider overrides.
+
+    Only keys present in the recipe are yielded, so omitting one keeps the
+    provider's own default rather than silently forcing False.
+    """
+    keys = (
+        "radio_force_cpe_eval_mode",
+        "freeze_vision_model",
+        "freeze_vision_projection",
+        "freeze_sound_encoder",
+        "freeze_sound_projection",
+    )
+    for key in keys:
+        if key in megatron_config:
+            yield key, megatron_config[key]
 
 
 def to_torch_dtype(dtype: str | torch.dtype) -> torch.dtype:
@@ -111,6 +132,19 @@ def import_model_from_hf_name(
 
     model_provider = bridge.to_megatron_provider(load_weights=True)
 
+    if megatron_config is not None:
+        for key, value in iter_vlm_config_overrides(megatron_config):
+            # Match the import-time behaviour in megatron/setup.py: a key the
+            # recipe set explicitly must not be dropped just because this
+            # provider lacks the field, or a frozen tower silently trains.
+            if not hasattr(model_provider, key):
+                raise ValueError(
+                    f"megatron_cfg set '{key}' but "
+                    f"{type(model_provider).__name__} has no such field; this "
+                    "provider does not support that tower control."
+                )
+            setattr(model_provider, key, value)
+
     # Keep track of defaults so can restore them to the config after loading the model
     orig_tensor_model_parallel_size = model_provider.tensor_model_parallel_size
     orig_pipeline_model_parallel_size = model_provider.pipeline_model_parallel_size
@@ -154,8 +188,14 @@ def import_model_from_hf_name(
         ]
     if transformer_layer_spec is not None:
         model_provider.transformer_layer_spec = transformer_layer_spec
-    if mamba_stack_spec is not None and hasattr(model_provider, "mamba_stack_spec"):
-        model_provider.mamba_stack_spec = mamba_stack_spec
+    if mamba_stack_spec is not None:
+        # HybridModelProvider superseded the deprecated Mamba-only field.  A
+        # MambaModelProvider normalizes mamba_stack_spec only in __post_init__,
+        # so assignments made here must target the canonical field directly.
+        if hasattr(model_provider, "hybrid_stack_spec"):
+            model_provider.hybrid_stack_spec = mamba_stack_spec
+        elif hasattr(model_provider, "mamba_stack_spec"):
+            model_provider.mamba_stack_spec = mamba_stack_spec
     model_provider.finalize()
 
     from megatron.core import parallel_state

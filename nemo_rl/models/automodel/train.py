@@ -51,7 +51,11 @@ from nemo_rl.distributed.model_utils import (
     distributed_vocab_topk,
     get_logprobs_from_vocab_parallel_logits,
 )
-from nemo_rl.models.automodel.data import ProcessedInputs, ProcessedMicrobatch
+from nemo_rl.models.automodel.data import (
+    ProcessedInputs,
+    ProcessedMicrobatch,
+    filter_multimodal_kwargs_for_model,
+)
 from nemo_rl.models.policy import PolicyConfig
 
 # Union type for any post-processing function
@@ -118,7 +122,9 @@ def model_forward(
 
     # Add VLM kwargs if applicable
     if processed_inputs.is_multimodal:
-        model_args.update(processed_inputs.vlm_kwargs)
+        model_args.update(
+            filter_multimodal_kwargs_for_model(model, processed_inputs.vlm_kwargs)
+        )
         # flash_attn_kwargs is not supported for multimodal
         if "flash_attn_kwargs" in model_args:
             del model_args["flash_attn_kwargs"]
@@ -804,47 +810,56 @@ class LogprobsPostProcessor:
 
         Returns:
             Token log probabilities
+
+        When ``logprob_chunk_size`` is set, log-softmax and gather run per
+        sequence chunk to bound peak memory for long-context runs.
         """
-        if self.logprob_chunk_size is not None:
-            logits_seq_len = int(logits.shape[1])
-            num_chunks = (
-                logits_seq_len + self.logprob_chunk_size - 1
-            ) // self.logprob_chunk_size
-            chunked_log_probs = []
-            for chunk_idx in range(num_chunks):
-                chunk_start = chunk_idx * self.logprob_chunk_size
-                chunk_end = min(
-                    logits_seq_len,
-                    (chunk_idx + 1) * self.logprob_chunk_size,
-                )
-                chunk_logits = logits[:, chunk_start:chunk_end, :].to(torch.float32)
-                chunk_logits = apply_top_k_top_p_filtering_for_local_logits(
-                    chunk_logits, self.sampling_params
-                )
-                log_probs = torch.nn.functional.log_softmax(chunk_logits, dim=-1)
-                chunked_log_probs.append(log_probs)
-            log_probs = torch.cat(chunked_log_probs, dim=1)
-            del chunked_log_probs
-        else:
-            logits = logits.to(torch.float32)
+        # Extract logprobs for each token in the sequence by gathering the logprob
+        # corresponding to the next token at each position
+        # Input shapes:
+        #   logits: [batch_size, sequence_length, vocab_size] - logits for each position
+        #   token_ids: [batch_size, sequence_length] - actual tokens
+        next_tokens = input_ids[:, 1:].to(logits.device)
+        target_seq_len = int(next_tokens.shape[1])
+
+        if target_seq_len == 0:
+            return logits.new_empty(
+                (input_ids.shape[0], 0),
+                dtype=torch.float32,
+            )
+
+        logits = logits[:, :target_seq_len, :]
+
+        if self.logprob_chunk_size is None:
+            logits = logits.to(torch.float32).contiguous()
             logits = apply_top_k_top_p_filtering_for_local_logits(
                 logits, self.sampling_params
             )
             log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+            token_logprobs = log_probs.gather(
+                dim=-1, index=next_tokens.unsqueeze(-1)
+            ).squeeze(-1)
+            del log_probs
+            return token_logprobs
 
-        # Extract logprobs for each token in the sequence by gathering the logprob
-        # corresponding to the next token at each position
-        # Input shapes:
-        #   log_probs: [batch_size, sequence_length, vocab_size] - logits for each position
-        #   token_ids: [batch_size, sequence_length] - actual tokens
-        # Output shape: [batch_size, sequence_length] - logprob of each token given previous
-        # We get logprob of token[t+1] from logits[t], prepending 0 to maintain sequence length
-        next_tokens = input_ids[:, 1:]
-        log_probs = log_probs[:, :-1]
-        token_logprobs = log_probs.gather(
-            dim=-1, index=next_tokens.unsqueeze(-1)
-        ).squeeze(-1)
-        del log_probs
+        chunked_token_logprobs = []
+        for chunk_start in range(0, target_seq_len, self.logprob_chunk_size):
+            chunk_end = min(chunk_start + self.logprob_chunk_size, target_seq_len)
+            chunk_logits = logits[:, chunk_start:chunk_end, :].to(torch.float32)
+            chunk_logits = chunk_logits.contiguous()
+            chunk_logits = apply_top_k_top_p_filtering_for_local_logits(
+                chunk_logits, self.sampling_params
+            )
+            chunk_log_probs = torch.nn.functional.log_softmax(chunk_logits, dim=-1)
+            chunk_token_logprobs = chunk_log_probs.gather(
+                dim=-1,
+                index=next_tokens[:, chunk_start:chunk_end].unsqueeze(-1),
+            ).squeeze(-1)
+            chunked_token_logprobs.append(chunk_token_logprobs)
+            del chunk_log_probs, chunk_logits
+
+        token_logprobs = torch.cat(chunked_token_logprobs, dim=1)
+        del chunked_token_logprobs
 
         return token_logprobs
 

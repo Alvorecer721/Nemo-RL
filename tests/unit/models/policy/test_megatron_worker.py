@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -45,12 +46,426 @@ from tests.unit.test_utils import SimpleLossFn
 pytestmark = pytest.mark.mcore
 
 
+def test_model_owned_packing_capability_is_detected():
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        _model_self_packs_for_cp,
+    )
+
+    class ModelOwnedPackingModel:
+        model_owns_packing = True
+
+    assert _model_self_packs_for_cp(ModelOwnedPackingModel())
+
+
+def test_model_owned_mtp_loss_mask_packing_capability_is_detected():
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        _model_self_packs_mtp_loss_mask,
+    )
+
+    class ModelOwnedPackingModel:
+        model_owns_mtp_loss_mask_packing = True
+
+    assert _model_self_packs_mtp_loss_mask(ModelOwnedPackingModel())
+    assert not _model_self_packs_mtp_loss_mask(object())
+
+
+def _conversion_task(megatron_param: str, hf_param) -> SimpleNamespace:
+    return SimpleNamespace(
+        global_param_name=megatron_param,
+        mapping=SimpleNamespace(hf_param=hf_param),
+    )
+
+
+def test_collect_mtp_hf_layer_names_covers_both_naming_schemes():
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        _collect_mtp_hf_layer_names,
+    )
+
+    tasks = [
+        None,  # dropped tasks are tolerated
+        # DeepSeek-style: megatron mtp.* exports as a trailing main-model
+        # layer index (num_hidden_layers=61 -> HF layer model.layers.61).
+        _conversion_task(
+            "mtp.layers.0.mtp_model_layer.mlp.linear_fc1.weight",
+            {
+                "gate": "model.layers.61.mlp.gate_proj.weight",
+                "up": "model.layers.61.mlp.up_proj.weight",
+            },
+        ),
+        # NemotronH-style: bare mtp. prefix survives into the HF name.
+        _conversion_task(
+            "mtp.layers.0.mtp_model_layer.layers.0.mlp.linear_fc1.weight",
+            "mtp.layers.0.mixer.up_proj.weight",
+        ),
+        # Qwen3.5-VL / EXAONE-style: megatron name carries a language_model.
+        # prefix before the mtp. segment; the HF name stays bare mtp.*.
+        _conversion_task(
+            "language_model.mtp.layers.1.mtp_model_layer.mlp.linear_fc1.weight",
+            "mtp.layers.1.mlp.up_proj.weight",
+        ),
+        # Main-model tasks must not contribute.
+        _conversion_task(
+            "decoder.layers.3.mlp.linear_fc1.weight",
+            {"gate": "model.layers.3.mlp.gate_proj.weight"},
+        ),
+        _conversion_task(
+            "embedding.word_embeddings.weight", "model.embed_tokens.weight"
+        ),
+    ]
+
+    assert _collect_mtp_hf_layer_names(tasks) == {
+        "model.layers.61",
+        "mtp.layers.0",
+        "mtp.layers.1",
+    }
+
+
+def test_collect_mtp_hf_layer_names_empty_inputs():
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        _collect_mtp_hf_layer_names,
+    )
+
+    assert _collect_mtp_hf_layer_names([]) == set()
+    assert _collect_mtp_hf_layer_names(None) == set()
+
+
+def test_regular_model_does_not_delegate_packing():
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        _model_self_packs_for_cp,
+    )
+
+    assert not _model_self_packs_for_cp(object())
+
+
+def test_model_cp_slicing_capability_is_detected():
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        _model_slices_context_parallel_inputs,
+    )
+
+    class ModelSlicesContextParallelInputs:
+        model_slices_context_parallel_inputs = True
+
+    assert _model_slices_context_parallel_inputs(ModelSlicesContextParallelInputs())
+    assert not _model_slices_context_parallel_inputs(object())
+
+
+def test_model_cp_slicing_rejects_transfer_queue_setup():
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        MegatronPolicyWorkerImpl,
+    )
+
+    worker = object.__new__(MegatronPolicyWorkerImpl)
+    worker.model_slices_context_parallel_inputs = True
+
+    with pytest.raises(
+        NotImplementedError, match="TransferQueue/SingleController does not yet support"
+    ):
+        worker.setup_data_plane(MagicMock())
+
+
+def test_refit_size_estimate_preserves_integral_buffer_dtype():
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        _estimate_refit_tensor_size_in_bytes,
+    )
+
+    param = torch.zeros(3, dtype=torch.int64)
+
+    assert (
+        _estimate_refit_tensor_size_in_bytes(
+            param, export_dtype=torch.bfloat16, tp_size=2, ep_size=4
+        )
+        == 3 * 8 * 2 * 4
+    )
+
+
+def test_refit_size_estimate_casts_floating_weight_to_export_dtype():
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        _estimate_refit_tensor_size_in_bytes,
+    )
+
+    param = torch.zeros(3, dtype=torch.float32)
+
+    assert (
+        _estimate_refit_tensor_size_in_bytes(
+            param, export_dtype=torch.bfloat16, tp_size=2, ep_size=4
+        )
+        == 3 * 2 * 2 * 4
+    )
+
+
+def test_qwen3vl_type_fallback_still_delegates_packing():
+    from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import Qwen3VLModel
+
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        _model_self_packs_for_cp,
+    )
+
+    assert _model_self_packs_for_cp(Qwen3VLModel.__new__(Qwen3VLModel))
+
+
 class _FakeTrainableModel:
     def __init__(self):
         self.train_called = False
+        self.eval_called = False
 
     def train(self):
         self.train_called = True
+
+    def eval(self):
+        self.eval_called = True
+
+
+class _ModelWithNonSerializableExtraState(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(1))
+        self.register_buffer("scale", torch.ones(1))
+
+    def get_extra_state(self):
+        raise AssertionError("moving a module must not serialize its extra state")
+
+
+def test_megatron_offload_before_refit_finalizes_async_save_first(monkeypatch):
+    """Async checkpoint tensor references must be released before GPU offload."""
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        MegatronPolicyWorkerImpl,
+    )
+
+    events = []
+    worker = object.__new__(MegatronPolicyWorkerImpl)
+    worker.model = object()
+    worker.optimizer = None
+    worker.optimizer_cpu_offload = False
+    worker.fp8_cfg = None
+    worker.cfg = {"megatron_cfg": {"clear_memory_caches_before_refit": False}}
+    worker.finalize_async_save = lambda: events.append("finalize_async_save")
+    worker.move_model = lambda model, device, move_params, move_grads: (
+        events.append("move_model") or model
+    )
+
+    class _AllocatorWakeup:
+        def cuda(self):
+            events.append("wake_allocator")
+
+    monkeypatch.setattr(
+        torch.cuda,
+        "memory_allocated",
+        lambda *args, **kwargs: events.append("memory_allocated") or 0,
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "memory_reserved",
+        lambda *args, **kwargs: events.append("memory_reserved") or 0,
+    )
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: events.append("empty_cache"))
+    monkeypatch.setattr(torch, "randn", lambda *args, **kwargs: _AllocatorWakeup())
+
+    MegatronPolicyWorkerImpl.offload_before_refit(worker)
+
+    assert events[0] == "finalize_async_save"
+    assert events.index("finalize_async_save") < events.index("move_model")
+
+
+@pytest.mark.parametrize("offload_optimizer", [False, True])
+def test_megatron_offload_before_refit_honors_offload_optimizer_for_refit(
+    monkeypatch, offload_optimizer
+):
+    """offload_optimizer_for_refit=False must leave the optimizer untouched."""
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        MegatronPolicyWorkerImpl,
+    )
+
+    moved = []
+    worker = object.__new__(MegatronPolicyWorkerImpl)
+    worker.model = object()
+    worker.optimizer = object()
+    worker.optimizer_cpu_offload = False
+    worker.offload_optimizer_for_refit = offload_optimizer
+    worker.fp8_cfg = None
+    worker.cfg = {"megatron_cfg": {"clear_memory_caches_before_refit": False}}
+    worker.finalize_async_save = lambda: None
+    worker.move_model = lambda model, device, move_params, move_grads: model
+    worker.move_optimizer = lambda device: moved.append(device)
+
+    class _AllocatorWakeup:
+        def cuda(self):
+            pass
+
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch, "randn", lambda *args, **kwargs: _AllocatorWakeup())
+
+    MegatronPolicyWorkerImpl.offload_before_refit(worker)
+
+    assert moved == (["cpu"] if offload_optimizer else [])
+
+
+def test_megatron_offload_after_refit_finalizes_before_model_move(monkeypatch):
+    """Checkpoint CUDA IPC handles must be dropped before model storage is replaced."""
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        MegatronPolicyWorkerImpl,
+    )
+
+    events = []
+    worker = object.__new__(MegatronPolicyWorkerImpl)
+    worker.model = _FakeTrainableModel()
+    worker.finalize_async_save = lambda: events.append("finalize_async_save")
+    worker.move_model = lambda model, device: events.append("move_model") or model
+    worker.offload_before_refit = lambda: events.append("offload_before_refit")
+
+    class _AllocatorWakeup:
+        def cuda(self):
+            events.append("wake_allocator")
+
+    monkeypatch.setattr(
+        torch.cuda,
+        "memory_allocated",
+        lambda *args, **kwargs: events.append("memory_allocated") or 0,
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "memory_reserved",
+        lambda *args, **kwargs: events.append("memory_reserved") or 0,
+    )
+    monkeypatch.setattr(torch, "randn", lambda *args, **kwargs: _AllocatorWakeup())
+
+    MegatronPolicyWorkerImpl.offload_after_refit(worker)
+
+    assert events[0] == "finalize_async_save"
+    assert events.index("finalize_async_save") < events.index("move_model")
+
+
+def test_megatron_save_checkpoint_onloads_model_before_save(monkeypatch):
+    """Params offloaded by colocated generation must be onloaded before the save walks them."""
+    import nemo_rl.models.policy.workers.megatron_policy_worker as worker_module
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        MegatronPolicyWorkerImpl,
+    )
+
+    events = []
+    worker = object.__new__(MegatronPolicyWorkerImpl)
+    worker.model = _FakeTrainableModel()
+    worker.model.training = False
+    worker.optimizer = object()
+    worker.scheduler = None
+    worker.optimizer_cpu_offload = False
+    worker.should_disable_forward_pre_hook = False
+    worker.checkpointing_context = None
+    worker.mcore_state = SimpleNamespace(
+        cfg=SimpleNamespace(
+            checkpoint=SimpleNamespace(save="original_path", async_save=False)
+        ),
+        train_state=SimpleNamespace(floating_point_operations_so_far=0),
+    )
+    worker.move_model = lambda model, device, move_params, move_grads: (
+        events.append(f"move_model_{device}") or model
+    )
+    worker.move_optimizer = lambda device: events.append(f"move_optimizer_{device}")
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: events.append("synchronize"))
+    monkeypatch.setattr(
+        worker_module,
+        "maybe_finalize_async_save",
+        lambda *args, **kwargs: events.append("finalize_async_save"),
+    )
+    monkeypatch.setattr(
+        worker_module, "save_checkpoint", lambda **kwargs: events.append("mcore_save")
+    )
+
+    MegatronPolicyWorkerImpl.save_checkpoint(
+        worker, weights_path="ckpt/weights", optimizer_path="ckpt/optim"
+    )
+
+    assert "mcore_save" in events
+    assert events.index("move_model_cuda") < events.index("mcore_save")
+    assert events.index("move_optimizer_cuda") < events.index("mcore_save")
+    assert events.index("synchronize") < events.index("mcore_save")
+    assert worker.mcore_state.cfg.checkpoint.save == "original_path"
+
+
+@pytest.mark.parametrize("cache_active", [True, False])
+def test_megatron_finalize_async_save_releases_colocated_nvrx_cache(
+    monkeypatch, cache_active
+):
+    """Only an active unsafe NVRx cache should terminate the persistent writer."""
+    import nemo_rl.models.policy.workers.megatron_policy_worker as worker_module
+
+    worker = object.__new__(worker_module.MegatronPolicyWorkerImpl)
+    worker.cfg = {"generation": {"colocated": {"enabled": True}}}
+    worker.mcore_state = SimpleNamespace(
+        cfg=SimpleNamespace(
+            checkpoint=SimpleNamespace(
+                async_save=True,
+                async_strategy="nvrx",
+                use_persistent_ckpt_worker=True,
+                ckpt_assume_constant_structure=True,
+                async_ckpt_use_cpu_shm=False,
+            )
+        )
+    )
+    worker._async_checkpoint_cuda_cache_active = cache_active
+    events = []
+
+    monkeypatch.setattr(
+        worker_module,
+        "maybe_finalize_async_save",
+        lambda *args, **kwargs: events.append(("finalize", kwargs["terminate"])),
+    )
+
+    class _Writer:
+        @classmethod
+        def cleanup_tensor_caches(cls):
+            events.append(("cleanup_tensor_caches", None))
+
+    monkeypatch.setattr(
+        worker_module,
+        "get_async_strategy",
+        lambda strategy: (strategy, {"FileSystemWriterAsync": _Writer}),
+    )
+    monkeypatch.setattr(
+        worker_module.gc, "collect", lambda: events.append(("gc_collect", None))
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "ipc_collect",
+        lambda: events.append(("ipc_collect", None)),
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "empty_cache",
+        lambda: events.append(("empty_cache", None)),
+    )
+
+    worker_module.MegatronPolicyWorkerImpl.finalize_async_save(worker)
+
+    assert events[0] == ("finalize", cache_active)
+    if cache_active:
+        assert events[1:] == [
+            ("cleanup_tensor_caches", None),
+            ("gc_collect", None),
+            ("ipc_collect", None),
+            ("empty_cache", None),
+        ]
+        assert worker._async_checkpoint_cuda_cache_active is False
+    else:
+        assert events == [("finalize", False)]
+
+
+def test_megatron_move_model_does_not_serialize_extra_state():
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        MegatronPolicyWorkerImpl,
+    )
+
+    worker = object.__new__(MegatronPolicyWorkerImpl)
+    model = _ModelWithNonSerializableExtraState()
+
+    moved_model = MegatronPolicyWorkerImpl.move_model(worker, model, "cpu")
+
+    assert moved_model is model
+    assert model.weight.device.type == "cpu"
+    assert model.scale.device.type == "cpu"
 
 
 def test_megatron_prepare_for_training_restores_optimizer():
@@ -73,6 +488,29 @@ def test_megatron_prepare_for_training_restores_optimizer():
 
     assert model.train_called
     assert restored_devices == ["cuda"]
+
+
+def test_megatron_prepare_for_training_leaves_native_cpu_optimizer_placement():
+    """HybridDeviceOptimizer owns state placement when native offload is enabled."""
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        MegatronPolicyWorkerImpl,
+    )
+
+    worker = object.__new__(MegatronPolicyWorkerImpl)
+    model = _FakeTrainableModel()
+
+    worker.model = model
+    worker.optimizer = object()
+    worker.optimizer_cpu_offload = True
+    worker.cfg = {"megatron_cfg": {"empty_unused_memory_level": 0}}
+    worker.move_model = lambda model, device, move_grads, move_params: model
+    worker.move_optimizer = lambda device: pytest.fail(
+        "native optimizer CPU offload must not use the generic optimizer mover"
+    )
+
+    MegatronPolicyWorkerImpl.prepare_for_training(worker)
+
+    assert model.train_called
 
 
 def test_set_moe_grad_scale_func_sets_and_clears_on_model_config():
@@ -154,7 +592,13 @@ def test_compute_moe_grad_scale_clamps_zero_valid_tokens():
     assert torch.allclose(scale_fn(), torch.tensor(1.0))
 
 
-def test_disable_forward_pre_hook_until_next_step_uses_worker_override():
+@pytest.mark.parametrize(
+    ("kwargs", "expected_param_sync"),
+    [({}, False), ({"param_sync": True}, True)],
+)
+def test_disable_forward_pre_hook_until_next_step_uses_worker_override(
+    kwargs: dict[str, bool], expected_param_sync: bool
+) -> None:
     source_path = (
         Path(__file__).parents[4]
         / "nemo_rl/models/policy/workers/megatron_policy_worker.py"
@@ -204,12 +648,55 @@ def test_disable_forward_pre_hook_until_next_step_uses_worker_override():
         param_sync
     )
 
-    worker._disable_forward_pre_hook_until_next_train_step()
+    worker._disable_forward_pre_hook_until_next_train_step(**kwargs)
 
-    assert disable_calls == [False]
+    assert disable_calls == [expected_param_sync]
     assert worker._first_train_step_param_sync_func == "sync"
     assert model_config.param_sync_func is None
     assert worker._first_train_step_forward_pre_hook_disabled is True
+
+
+def test_prepare_for_generation_disables_param_gather_hook_before_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nemo_rl.models.generation.megatron import megatron_worker
+
+    events = []
+    model = SimpleNamespace(
+        config=SimpleNamespace(flash_decode=True),
+        eval=lambda: events.append("eval"),
+    )
+    worker = object.__new__(megatron_worker.MegatronGenerationMixin)
+    worker.cfg = {
+        "generation": {"mcore_generation_config": {"cuda_graph_impl": "none"}}
+    }
+    worker.model = model
+    worker.is_generation_colocated = True
+    worker.should_disable_forward_pre_hook = True
+    worker.move_model = lambda model, device, **kwargs: (
+        events.append("move_to_cuda") or model
+    )
+    worker._forward_pre_hook_enabled = lambda: True
+    worker._disable_forward_pre_hook_until_next_train_step = (
+        lambda *, param_sync=False: events.append(("disable_hook", param_sync))
+    )
+    worker._inference_engine_initialized = True
+    # Asleep, so the idempotent-wake guard falls through to the full wake path.
+    worker._inference_engine_asleep = True
+    worker._wake = lambda: events.append("wake_engine")
+
+    monkeypatch.setattr(megatron_worker, "log_gpu_memory", lambda *_: None)
+    monkeypatch.setattr(megatron_worker, "unwrap_model", lambda model: model)
+
+    worker.prepare_for_generation()
+
+    assert events == [
+        "move_to_cuda",
+        ("disable_hook", True),
+        "eval",
+        "wake_engine",
+    ]
+    assert model.config.flash_decode is False
 
 
 def create_megatron_test_config(
@@ -245,7 +732,6 @@ def create_megatron_test_config(
             "stop_token_ids": None,
             "stop_strings": None,
             "mcore_generation_config": {
-                "async_engine": False,
                 "max_model_len": 1024,
                 "buffer_size_gb": 2,
                 "num_cuda_graphs": 16,
@@ -304,8 +790,8 @@ def create_megatron_test_config(
             "moe_token_dispatcher_type": "alltoall",
             "moe_shared_expert_overlap": False,
             "defer_fp32_logits": defer_fp32_logits,
-            "use_linear_ce_fusion_loss": False,
-            "linear_ce_fusion_chunk_size": 256,
+            "use_fused_linear_logprobs": False,
+            "fused_linear_logprobs_chunk_size": 256,
             "gradient_accumulation_fusion": False,
             "use_fused_weighted_squared_relu": False,
             "train_iters": 100,  # Required for Megatron training
@@ -325,6 +811,7 @@ def create_megatron_test_config(
                 "clip_grad": 1.0,
                 "optimizer_cpu_offload": False,
                 "optimizer_offload_fraction": 0.0,
+                "overlap_cpu_optimizer_d2h_h2d": False,
             },
             "scheduler": {
                 "start_weight_decay": 0.01,
@@ -1368,6 +1855,9 @@ def test_megatron_checkpoint_save_kill_and_restore(
                 weights_path=weights_path,
                 optimizer_path=optimizer_path,
             )
+            # save_checkpoint() may use MCore's async save path.  Complete the
+            # write before inspecting the checkpoint or terminating its workers.
+            policy1.finalize_async_save()
 
             # Verify checkpoint was created
             assert os.path.exists(checkpoint_dir), "Checkpoint directory not created"
@@ -2140,15 +2630,15 @@ def test_megatron_sft_linear_ce_fusion_agreement(tiny_qwen2_model_path):
         max_colocated_worker_groups=1,
     )
     config_fuse = create_megatron_test_config(tiny_qwen2_model_path)
-    config_fuse["megatron_cfg"]["use_linear_ce_fusion_loss"] = True
-    config_fuse["megatron_cfg"]["linear_ce_fusion_chunk_size"] = 256
+    config_fuse["megatron_cfg"]["use_fused_linear_logprobs"] = True
+    config_fuse["megatron_cfg"]["fused_linear_logprobs_chunk_size"] = 256
     policy_fuse = Policy(
         cluster=cluster_fuse,
         config=config_fuse,
         tokenizer=tokenizer,
         init_reference_model=False,
     )
-    sft_loss_fuse = NLLLossFn(use_linear_ce_fusion=True)
+    sft_loss_fuse = NLLLossFn(use_fused_linear_logprobs=True)
 
     try:
         policy_fuse.prepare_for_training()
@@ -2242,15 +2732,15 @@ def test_megatron_dpo_linear_ce_fusion_agreement(tiny_qwen2_model_path):
         max_colocated_worker_groups=1,
     )
     config_fuse = create_megatron_test_config(tiny_qwen2_model_path)
-    config_fuse["megatron_cfg"]["use_linear_ce_fusion_loss"] = True
-    config_fuse["megatron_cfg"]["linear_ce_fusion_chunk_size"] = 256
+    config_fuse["megatron_cfg"]["use_fused_linear_logprobs"] = True
+    config_fuse["megatron_cfg"]["fused_linear_logprobs_chunk_size"] = 256
     policy_fuse = Policy(
         cluster=cluster_fuse,
         config=config_fuse,
         tokenizer=tokenizer,
         init_reference_model=False,
     )
-    dpo_loss_fuse = DPOLossFn(dpo_cfg, use_linear_ce_fusion=True)
+    dpo_loss_fuse = DPOLossFn(dpo_cfg, use_fused_linear_logprobs=True)
 
     try:
         policy_fuse.prepare_for_training()
@@ -2265,6 +2755,110 @@ def test_megatron_dpo_linear_ce_fusion_agreement(tiny_qwen2_model_path):
     assert not torch.isnan(loss_fuse).any(), "Fusion DPO loss should not be NaN"
     assert not torch.isinf(loss_std).any(), "Standard DPO loss should not be Inf"
     assert not torch.isinf(loss_fuse).any(), "Fusion DPO loss should not be Inf"
+
+    # Verify losses are numerically close
+    torch.testing.assert_close(loss_std, loss_fuse, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.timeout(600)
+def test_megatron_grpo_linear_ce_fusion_agreement(tiny_qwen2_model_path):
+    """Test that linear CE fusion loss matches the standard path for GRPO (ClippedPGLossFn)."""
+    import time
+
+    num_gpus = 2
+    batch_size = 8
+    seq_len = 64
+    vocab_size = 151936
+
+    torch.manual_seed(42)
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
+    attention_mask = torch.ones(batch_size, seq_len)
+    input_lengths = attention_mask.sum(dim=1).to(torch.int32)
+    token_mask = torch.triu(torch.ones(batch_size, seq_len), diagonal=1)
+    sample_mask = torch.ones(batch_size)
+    # Use small-magnitude logprobs so the importance ratio exp(curr - prev) stays
+    # well-conditioned and the agreement check is not dominated by exp blow-up.
+    advantages = torch.randn(batch_size, seq_len)
+    prev_logprobs = torch.randn(batch_size, seq_len) * 0.1
+    generation_logprobs = torch.randn(batch_size, seq_len) * 0.1
+    reference_policy_logprobs = torch.randn(batch_size, seq_len) * 0.1
+
+    data = BatchedDataDict(
+        {
+            "input_ids": input_ids,
+            "input_lengths": input_lengths,
+            "attention_mask": attention_mask,
+            "token_mask": token_mask,
+            "sample_mask": sample_mask,
+            "advantages": advantages,
+            "prev_logprobs": prev_logprobs,
+            "generation_logprobs": generation_logprobs,
+            "reference_policy_logprobs": reference_policy_logprobs,
+        }
+    )
+
+    pg_cfg = ClippedPGLossConfig()
+
+    # --- Standard GRPO (no linear CE fusion) ---
+    cluster_std = RayVirtualCluster(
+        name="test-grpo-std",
+        bundle_ct_per_node_list=[num_gpus],
+        use_gpus=True,
+        num_gpus_per_node=num_gpus,
+        max_colocated_worker_groups=1,
+    )
+    config_std = create_megatron_test_config(tiny_qwen2_model_path)
+    tokenizer = get_tokenizer(config_std["tokenizer"])
+    policy_std = Policy(
+        cluster=cluster_std,
+        config=config_std,
+        tokenizer=tokenizer,
+        init_reference_model=False,
+    )
+    pg_loss_std = ClippedPGLossFn(pg_cfg)
+
+    try:
+        policy_std.prepare_for_training()
+        results_std = policy_std.train(data, pg_loss_std)
+        loss_std = results_std["loss"]
+    finally:
+        policy_std.shutdown()
+        cluster_std.shutdown()
+
+    time.sleep(10)
+
+    # --- GRPO with linear CE fusion ---
+    cluster_fuse = RayVirtualCluster(
+        name="test-grpo-fuse",
+        bundle_ct_per_node_list=[num_gpus],
+        use_gpus=True,
+        num_gpus_per_node=num_gpus,
+        max_colocated_worker_groups=1,
+    )
+    config_fuse = create_megatron_test_config(tiny_qwen2_model_path)
+    config_fuse["megatron_cfg"]["use_fused_linear_logprobs"] = True
+    config_fuse["megatron_cfg"]["fused_linear_logprobs_chunk_size"] = 256
+    policy_fuse = Policy(
+        cluster=cluster_fuse,
+        config=config_fuse,
+        tokenizer=tokenizer,
+        init_reference_model=False,
+    )
+    pg_loss_fuse = ClippedPGLossFn(pg_cfg, use_fused_linear_logprobs=True)
+
+    try:
+        policy_fuse.prepare_for_training()
+        results_fuse = policy_fuse.train(data, pg_loss_fuse)
+        loss_fuse = results_fuse["loss"]
+    finally:
+        policy_fuse.shutdown()
+        cluster_fuse.shutdown()
+
+    # Verify both produce valid losses
+    assert not torch.isnan(loss_std).any(), "Standard GRPO loss should not be NaN"
+    assert not torch.isnan(loss_fuse).any(), "Fusion GRPO loss should not be NaN"
+    assert not torch.isinf(loss_std).any(), "Standard GRPO loss should not be Inf"
+    assert not torch.isinf(loss_fuse).any(), "Fusion GRPO loss should not be Inf"
 
     # Verify losses are numerically close
     torch.testing.assert_close(loss_std, loss_fuse, rtol=1e-2, atol=1e-2)

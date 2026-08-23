@@ -46,6 +46,15 @@ from tests.unit.models.generation.vllm_patch_source_utils import (
 _TOOL_PARSER_SOURCE = "tool_parsers/utils.py"
 _PATCH_FN = "_patch_vllm_tool_parser_namespace_tool"
 _MARKER = "except ImportError:  # openai < 2.25.0 predates namespace tools"
+_RADIO_SOURCE = "model_executor/models/radio.py"
+_RADIO_PATCH_FN = "_patch_vllm_radio_layerscale_loader"
+_RADIO_MARKER = "initializer_factor = self.config.initializer_factor"
+_XIELU_SOURCE = "model_executor/layers/activation.py"
+_XIELU_PATCH_FN = "_patch_vllm_xielu_static_constants"
+_XIELU_MARKER = '"beta", torch.tensor(beta, dtype=dtype), persistent=False'
+_APERTUS_SOURCE = "model_executor/models/apertus.py"
+_APERTUS_PATCH_FN = "_patch_vllm_apertus_static_xielu_loader"
+_APERTUS_MARKER = "Apertus xIELU architecture constant"
 
 
 @pytest.fixture
@@ -54,6 +63,41 @@ def patched_tool_parser_source(tmp_path, monkeypatch):
     copied = write_unpatched_copy(_TOOL_PARSER_SOURCE, _PATCH_FN, tmp_path / "utils.py")
     monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
     patches._patch_vllm_tool_parser_namespace_tool(logging.getLogger(__name__))
+    return copied
+
+
+@pytest.fixture
+def patched_radio_source(tmp_path, monkeypatch):
+    """The installed vLLM RADIO loader, unpatched then patched in tmp."""
+    copied = write_unpatched_copy(_RADIO_SOURCE, _RADIO_PATCH_FN, tmp_path / "radio.py")
+    monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
+    patches._patch_vllm_radio_layerscale_loader(logging.getLogger(__name__))
+    return copied
+
+
+@pytest.fixture
+def patched_xielu_source(tmp_path, monkeypatch):
+    """The installed vLLM xIELU op, unpatched then patched in tmp."""
+    copied = write_unpatched_copy(
+        _XIELU_SOURCE,
+        _XIELU_PATCH_FN,
+        tmp_path / "activation.py",
+    )
+    monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
+    patches._patch_vllm_xielu_static_constants(logging.getLogger(__name__))
+    return copied
+
+
+@pytest.fixture
+def patched_apertus_source(tmp_path, monkeypatch):
+    """The installed vLLM Apertus loader, unpatched then patched in tmp."""
+    copied = write_unpatched_copy(
+        _APERTUS_SOURCE,
+        _APERTUS_PATCH_FN,
+        tmp_path / "apertus.py",
+    )
+    monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
+    patches._patch_vllm_apertus_static_xielu_loader(logging.getLogger(__name__))
     return copied
 
 
@@ -104,6 +148,83 @@ def test_namespace_tool_stub_never_matches(patched_tool_parser_source):
         assert not isinstance(value, stub_cls)
 
 
+@pytest.mark.vllm
+def test_radio_layerscale_patch_anchor_still_matches_installed_vllm(
+    patched_radio_source,
+):
+    """Pin the vLLM 0.25.1 RADIO loader shape used by the source patch."""
+    content = patched_radio_source.read_text()
+    assert _RADIO_MARKER in content
+    assert "Skip layer-scale entries that vLLM doesn't use" not in content
+
+
+@pytest.mark.vllm
+def test_xielu_constants_are_non_persistent(patched_xielu_source):
+    content = patched_xielu_source.read_text()
+    assert _XIELU_MARKER in content
+    assert '"eps", torch.tensor(eps, dtype=dtype), persistent=False' in content
+    assert 'if "beta" in self.state_dict() or "eps" in self.state_dict():' in content
+    ast.parse(content)
+
+
+@pytest.mark.vllm
+def test_apertus_loader_validates_instead_of_overwriting_static_xielu(
+    patched_apertus_source,
+):
+    content = patched_apertus_source.read_text()
+    assert _APERTUS_MARKER in content
+    assert 'getattr(self, "_nrl_xielu_static_buffers", None)' in content
+    assert 'if name.endswith((".beta", ".eps")) and name in static_buffers:' in content
+    assert "if not torch.equal(expected, received):" in content
+    ast.parse(content)
+
+
+@pytest.mark.vllm
+def test_xielu_constants_patch_is_idempotent(patched_xielu_source, monkeypatch):
+    before = patched_xielu_source.read_text()
+    monkeypatch.setattr(
+        patches, "_get_vllm_file", lambda _relative: str(patched_xielu_source)
+    )
+    patches._patch_vllm_xielu_static_constants(logging.getLogger(__name__))
+    assert patched_xielu_source.read_text() == before
+
+
+@pytest.mark.vllm
+def test_apertus_loader_patch_is_idempotent(patched_apertus_source, monkeypatch):
+    before = patched_apertus_source.read_text()
+    monkeypatch.setattr(
+        patches, "_get_vllm_file", lambda _relative: str(patched_apertus_source)
+    )
+    patches._patch_vllm_apertus_static_xielu_loader(logging.getLogger(__name__))
+    assert patched_apertus_source.read_text() == before
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    ("patch_fn_name", "message"),
+    [
+        (_XIELU_PATCH_FN, "Required vLLM xIELU static-constant patch"),
+        (_APERTUS_PATCH_FN, "Required vLLM Apertus static xIELU loader patch"),
+    ],
+)
+def test_apertus_xielu_patch_anchor_miss_is_fatal(
+    patch_fn_name,
+    message,
+    tmp_path,
+    monkeypatch,
+):
+    unrelated_source = tmp_path / "unexpected_vllm_source.py"
+    unrelated_source.write_text("# incompatible vLLM source shape\n")
+    monkeypatch.setattr(
+        patches,
+        "_get_vllm_file",
+        lambda _relative: str(unrelated_source),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        getattr(patches, patch_fn_name)(logging.getLogger(__name__))
+
+
 _FLASHINFER_AR_SOURCE = "distributed/device_communicators/flashinfer_all_reduce.py"
 _MNNVL_PATCH_FN = "_patch_vllm_invalid_mnnvl_workspace"
 _MNNVL_MARKER = 'backend == "mnnvl" and not getattr(workspace, "mc_ptr", 0)'
@@ -132,6 +253,41 @@ def test_invalid_mnnvl_workspace_patch_matches_installed_vllm(
     assert "workspace.destroy()" in content
     assert "return None" in content
     ast.parse(content)
+
+
+@pytest.mark.vllm
+def test_radio_layerscale_patch_loads_explicit_and_initializes_folded_weights(
+    patched_radio_source,
+):
+    content = patched_radio_source.read_text()
+    assert 'vllm_key = f"model.encoder.layers.{layer_idx}.{suffix}"' in content
+    assert 'name.endswith((".ls1", ".ls2"))' in content
+    assert "param.data.fill_(initializer_factor)" in content
+    assert "loaded_params.add(name)" in content
+
+
+@pytest.mark.vllm
+def test_radio_layerscale_patch_is_idempotent(patched_radio_source, monkeypatch):
+    before = patched_radio_source.read_text()
+    monkeypatch.setattr(
+        patches, "_get_vllm_file", lambda _relative: str(patched_radio_source)
+    )
+
+    patches._patch_vllm_radio_layerscale_loader(logging.getLogger(__name__))
+
+    assert patched_radio_source.read_text() == before
+
+
+def test_radio_layerscale_patch_warns_on_unknown_source(monkeypatch, tmp_path, caplog):
+    radio_source = tmp_path / "radio.py"
+    radio_source.write_text("class RadioModel:\n    pass\n")
+    monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(radio_source))
+
+    with caplog.at_level(logging.WARNING):
+        patches._patch_vllm_radio_layerscale_loader(logging.getLogger(__name__))
+
+    assert radio_source.read_text() == "class RadioModel:\n    pass\n"
+    assert "vLLM 0.25.1 source shape was not found" in caplog.text
 
 
 @pytest.mark.vllm
@@ -168,10 +324,25 @@ def test_source_compat_applies_all_interpreter_independent_patches(monkeypatch):
         "_patch_vllm_invalid_mnnvl_workspace",
         lambda _logger: applied.append("mnnvl"),
     )
+    monkeypatch.setattr(
+        patches,
+        "_patch_vllm_radio_layerscale_loader",
+        lambda _logger: applied.append("radio"),
+    )
+    monkeypatch.setattr(
+        patches,
+        "_patch_vllm_xielu_static_constants",
+        lambda _logger: applied.append("xielu"),
+    )
+    monkeypatch.setattr(
+        patches,
+        "_patch_vllm_apertus_static_xielu_loader",
+        lambda _logger: applied.append("apertus"),
+    )
 
     patches.ensure_vllm_source_compat()
 
-    assert applied == ["tool-parser", "mnnvl"]
+    assert applied == ["tool-parser", "xielu", "apertus", "radio", "mnnvl"]
 
 
 @pytest.mark.parametrize(

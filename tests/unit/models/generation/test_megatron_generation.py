@@ -16,7 +16,6 @@ import gc
 from copy import deepcopy
 
 import pytest
-import ray
 import torch
 
 from nemo_rl.algorithms.grpo import refit_policy_generation
@@ -24,8 +23,15 @@ from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
 from nemo_rl.models.generation.megatron import MegatronGeneration
+from nemo_rl.models.generation.megatron.config import (
+    dedicated_inference_megatron_cfg,
+)
 from nemo_rl.models.policy import PolicyConfig
 from nemo_rl.models.policy.lm_policy import Policy
+from nemo_rl.weight_sync.megatron_weight_synchronizer import (
+    MegatronWeightSynchronizer,
+)
+from tests.unit.test_utils import SimpleLossFn
 
 model_name = "Qwen/Qwen3-0.6B"
 
@@ -87,6 +93,7 @@ basic_megatron_test_config: PolicyConfig = {
             "clip_grad": 1.0,
             "optimizer_cpu_offload": False,
             "optimizer_offload_fraction": 0.0,
+            "overlap_cpu_optimizer_d2h_h2d": False,
         },
         "scheduler": {
             "start_weight_decay": 0.01,
@@ -122,7 +129,6 @@ basic_megatron_test_config: PolicyConfig = {
             "resources": {"gpus_per_node": None, "num_nodes": None},
         },
         "mcore_generation_config": {
-            "async_engine": False,
             "max_model_len": 1024,
             "cuda_graph_impl": "local",
             "inference_cuda_graph_scope": "block",
@@ -268,13 +274,25 @@ async def _generate_async(mg, tokenizer, test_input_data, greedy=False):
 @pytest.mark.mcore
 @pytest.mark.timeout(900)
 @pytest.mark.parametrize(
-    "tensor_parallel_size,pipeline_parallel_size",
-    [(1, 1), (2, 1), (1, 2)],
+    "tensor_parallel_size,pipeline_parallel_size,top_p,top_k",
+    [
+        (1, 1, 1.0, None),
+        (2, 1, 1.0, None),
+        (1, 2, 1.0, None),
+        (1, 1, 0.9, 8000),
+        (1, 1, 1.0, 1),
+    ],
 )
 def test_megatron_policy_generation(
-    cluster, test_input_data, tokenizer, tensor_parallel_size, pipeline_parallel_size
+    cluster,
+    test_input_data,
+    tokenizer,
+    tensor_parallel_size,
+    pipeline_parallel_size,
+    top_p,
+    top_k,
 ):
-    """Standalone Megatron generation across tp/pp."""
+    """Standalone Megatron generation across tp/pp and sampling params."""
     if cluster.num_gpus_per_node < tensor_parallel_size * pipeline_parallel_size:
         pytest.skip(
             f"Need {tensor_parallel_size * pipeline_parallel_size} GPUs for "
@@ -284,6 +302,8 @@ def test_megatron_policy_generation(
     config = deepcopy(basic_megatron_test_config)
     config["megatron_cfg"]["tensor_model_parallel_size"] = tensor_parallel_size
     config["megatron_cfg"]["pipeline_model_parallel_size"] = pipeline_parallel_size
+    config["generation"]["top_p"] = top_p
+    config["generation"]["top_k"] = top_k
     # config-level stop string, unioned with the per-sample stop strings below.
     config["generation"]["stop_strings"] = ["</s>"]
 
@@ -302,6 +322,19 @@ def test_megatron_policy_generation(
         # sampling (non-greedy) path still produces a valid contract
         sampled = mg.generate(test_input_data, greedy=False)
         _assert_valid_generation_output(sampled, test_input_data)
+        if top_k == 1:
+            for i in range(len(test_input_data["input_ids"])):
+                start = test_input_data["input_lengths"][i].item()
+                end = start + sampled["generation_lengths"][i].item()
+                gen_logprobs = sampled["logprobs"][i, start:end]
+                # Processed logprobs are exactly 0.0 where the argmax is unique;
+                # bf16 max-ties renormalize to log(1/n). Raw logprobs are never
+                # exactly 0, so a mostly-exact-0 row pins the processed mode.
+                assert (gen_logprobs <= 0).all() and (
+                    (gen_logprobs == 0.0).float().mean() >= 0.5
+                ), (
+                    f"expected mostly-exact-0 processed logprobs under top_k=1, got {gen_logprobs}"
+                )
 
         # per-sample stop strings are merged with the config stop string (may stop early,
         # so don't require a generated token)
@@ -335,7 +368,6 @@ def test_megatron_policy_generation(
 async def test_megatron_policy_generation_async(cluster, test_input_data, tokenizer):
     """Standalone Megatron async generation."""
     config = deepcopy(basic_megatron_test_config)
-    config["generation"]["mcore_generation_config"]["async_engine"] = True
     mg = None
     try:
         mg = MegatronGeneration(config=config, tokenizer=tokenizer, cluster=cluster)
@@ -354,10 +386,42 @@ async def test_megatron_policy_generation_async(cluster, test_input_data, tokeni
 
 @pytest.mark.mcore
 @pytest.mark.timeout(900)
-def test_megatron_generation_colocated(cluster, test_input_data, tokenizer):
+@pytest.mark.parametrize(
+    "train_impl, gen_impl",
+    [
+        ("transformer_engine", "transformer_engine"),
+        ("transformer_engine", "inference_optimized"),
+        ("inference_optimized", "inference_optimized"),
+    ],
+)
+def test_megatron_generation_colocated(
+    cluster, test_input_data, tokenizer, train_impl, gen_impl
+):
     """Colocated Megatron generation: wrap an existing training policy without owning it."""
     config = deepcopy(basic_megatron_test_config)
     config["generation"]["colocated"]["enabled"] = True
+    # Eager engine startup (expose_http_server) flips MLM's process-wide
+    # InferenceMode on at construction; the legs that train before any
+    # generate/suspend cycle must construct engine-less.
+    expose_http_server = (
+        train_impl == "transformer_engine" and gen_impl == "transformer_engine"
+    )
+    config["generation"]["mcore_generation_config"]["expose_http_server"] = (
+        expose_http_server
+    )
+    # Matched impls => reshardless colocated (shared model; the
+    # inference_optimized pair trains through the TE parent path); differing
+    # impls => the worker builds a dedicated resharded inference model on
+    # the shared GPUs.
+    config["megatron_cfg"]["transformer_impl"] = train_impl
+    config["generation"]["mcore_generation_config"]["transformer_impl"] = gen_impl
+    if train_impl == "inference_optimized":
+        # The parity block's sleep/wake cycle would tear down and recapture
+        # CUDA graphs mid-test; keep them off here.
+        config["generation"]["mcore_generation_config"]["cuda_graph_impl"] = "none"
+        # The parity block's 2-sample batch shards to 1 sample per DP rank
+        # (DP=2 on the 2-GPU cluster); the logprob microbatch must divide it.
+        config["logprob_batch_size"] = 1
 
     # construction guard: exactly one of `cluster` / `policy` is required
     with pytest.raises(AssertionError):
@@ -379,9 +443,77 @@ def test_megatron_generation_colocated(cluster, test_input_data, tokenizer):
         assert "max_tokens" not in config["megatron_cfg"]
         assert config["megatron_cfg"] == megatron_cfg_before
 
+        # The selector: matched impls => reshardless (no dedicated model).
+        assert (dedicated_inference_megatron_cfg(config) is None) == (
+            train_impl == gen_impl
+        )
+
+        if expose_http_server:
+            # setup() hands dp_openai_server_base_urls to NeMo Gym right after
+            # construction, so the colocated constructor must have collected them.
+            assert mg.dp_openai_server_base_urls, "no OpenAI server URLs collected"
+            assert all(url.startswith("http") for url in mg.dp_openai_server_base_urls)
+
+        if gen_impl == "inference_optimized":
+            # Both inference_optimized legs take a train step (finite loss)
+            # before the engine ever starts; the reshard leg then generates
+            # on the dedicated model built at first wake, the matched-impl
+            # leg directly on the shared training model.
+            torch.manual_seed(42)
+            train_data = BatchedDataDict(
+                {
+                    "input_ids": torch.randint(0, 32000, (4, 64)),
+                    "input_lengths": torch.full((4,), 64, dtype=torch.int32),
+                    "attention_mask": torch.ones(4, 64),
+                    "labels": torch.randint(0, 32000, (4, 64)),
+                    "sample_mask": torch.ones(4),
+                }
+            )
+            policy.prepare_for_training()
+            loss = policy.train(train_data, SimpleLossFn())["loss"]
+            assert not torch.isnan(loss).any() and not torch.isinf(loss).any(), (
+                f"pre-generation train step produced bad loss: {loss}"
+            )
+            policy.finish_training()
+
+        # re-entering generation mode must be a no-op on the running engine
         mg.prepare_for_generation()
         outputs = mg.generate(test_input_data, greedy=True)
         _assert_valid_generation_output(outputs, test_input_data)
+
+        if train_impl == "inference_optimized":
+            # 3490-review follow-up: bound token mult-prob error on the
+            # matched-impl leg — generation and recomputed policy logprobs
+            # run the same inference kernels on the same shared weights.
+            # Greedy must be off: processed logprobs are ~0 under top_k=1.
+            sampled = mg.generate(test_input_data, greedy=False)
+            fprop_data = BatchedDataDict(
+                {
+                    "input_ids": sampled["output_ids"],
+                    "input_lengths": sampled["unpadded_sequence_lengths"],
+                }
+            )
+            # Production ordering: the engine stands down before any training-path forward.
+            mg.finish_generation(release_gpu=True)
+            policy.prepare_for_lp_inference()
+            lp_logprobs = policy.get_logprobs(fprop_data)["logprobs"]
+            gen_mask = torch.zeros_like(sampled["logprobs"], dtype=torch.bool)
+            for i, (start, end) in enumerate(
+                zip(
+                    test_input_data["input_lengths"],
+                    sampled["unpadded_sequence_lengths"],
+                )
+            ):
+                gen_mask[i, start:end] = True
+            abs_diff = (sampled["logprobs"] - lp_logprobs).abs().masked_select(gen_mask)
+            avg_prob_mult_error = torch.exp(abs_diff).mean()
+            assert avg_prob_mult_error <= 1.05, (
+                f"matched-impl inference_optimized: generation logprobs "
+                f"diverge from policy logprobs (avg prob mult error "
+                f"{avg_prob_mult_error:.4f})"
+            )
+            # Wake the engine again for the post-shutdown generation check.
+            mg.prepare_for_generation()
 
         # ownership guard: shutdown is a no-op, so the wrapped policy keeps generating
         assert mg.shutdown() is True
@@ -396,10 +528,15 @@ def test_megatron_generation_colocated(cluster, test_input_data, tokenizer):
 
 @pytest.mark.mcore
 @pytest.mark.timeout(900)
+@pytest.mark.parametrize("skip_weight_load", [False, True])
 def test_megatron_generation_non_colocated_refit(
-    policy_cluster_separate, test_input_data, tokenizer
+    policy_cluster_separate, test_input_data, tokenizer, skip_weight_load
 ):
-    """Non-colocated Megatron generation."""
+    """Non-colocated Megatron generation.
+
+    With skip_weight_load the inference engine builds without loading the
+    checkpoint and must still generate correctly once refit delivers weights.
+    """
     generation_cluster = RayVirtualCluster(
         bundle_ct_per_node_list=[1],
         use_gpus=True,
@@ -421,35 +558,67 @@ def test_megatron_generation_non_colocated_refit(
         policy = Policy(
             cluster=policy_cluster_separate, config=config, tokenizer=tokenizer
         )
+
+        # construction guard: skip_weight_load requires a dedicated inference
+        # policy; wrapping an existing (colocated) policy must be rejected.
+        with pytest.raises(AssertionError):
+            MegatronGeneration(
+                config=config,
+                tokenizer=tokenizer,
+                policy=policy,
+                skip_weight_load=True,
+            )
+
         mg = MegatronGeneration(
-            config=config, tokenizer=tokenizer, cluster=generation_cluster
+            config=config,
+            tokenizer=tokenizer,
+            cluster=generation_cluster,
+            skip_weight_load=skip_weight_load,
         )
 
-        # init the refit collective on both sides.
-        ip, port = policy_cluster_separate.get_master_address_and_port()
-        train_world_size = policy_cluster_separate.world_size()
-        world_size = train_world_size + generation_cluster.world_size()
-        refit_backend = config["generation"]["mcore_generation_config"]["refit_backend"]
-        futures_train = policy.init_collective_mcore_generation(
-            ip, port, world_size, rank_offset=0, refit_backend=refit_backend
+        # Wire the refit collective the way grpo.setup does: through the
+        # weight synchronizer, which refit_policy_generation dispatches to.
+        mg.weight_synchronizer = MegatronWeightSynchronizer(
+            policy,
+            mg,
+            colocated=False,
+            train_cluster=policy_cluster_separate,
+            inference_cluster=generation_cluster,
         )
-        futures_inference = mg.init_collective(
-            ip,
-            port,
-            world_size,
-            train_world_size=train_world_size,
-            refit_backend=refit_backend,
-        )
-        ray.get(futures_train + futures_inference)
+        mg.weight_synchronizer.init_communicator()
 
         # refit the inference engine from the training weights, then generate
         refit_policy_generation(policy, mg, False)
-        outputs = mg.generate(test_input_data, greedy=True)
+        # Greedy needs to be false because processed logprobs doesn't handle it well.
+        outputs = mg.generate(test_input_data, greedy=False)
         _assert_valid_generation_output(outputs, test_input_data)
         generated_texts = tokenizer.batch_decode(
             outputs["output_ids"], skip_special_tokens=True
         )
         assert all(len(t) > 0 for t in generated_texts), "Some texts are empty"
+
+        # Training-policy logprobs must match generation-policy logprobs.
+        # A broken refit would fail this test.
+        fprop_data = BatchedDataDict(
+            {
+                "input_ids": outputs["output_ids"],
+                "input_lengths": outputs["unpadded_sequence_lengths"],
+            }
+        )
+        policy.prepare_for_lp_inference()
+        train_logprobs = policy.get_logprobs(fprop_data)["logprobs"]
+        gen_mask = torch.zeros_like(outputs["logprobs"], dtype=torch.bool)
+        for i, (start, end) in enumerate(
+            zip(test_input_data["input_lengths"], outputs["unpadded_sequence_lengths"])
+        ):
+            gen_mask[i, start:end] = True
+        abs_diff = (outputs["logprobs"] - train_logprobs).abs().masked_select(gen_mask)
+        avg_prob_mult_error = torch.exp(abs_diff).mean()
+        assert avg_prob_mult_error <= 1.05, (
+            f"generation logprobs diverge from training-policy logprobs "
+            f"(avg prob mult error {avg_prob_mult_error:.4f}); inference weights "
+            f"do not match training weights after refit"
+        )
     finally:
         if mg is not None:
             mg.shutdown()
