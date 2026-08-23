@@ -16,6 +16,8 @@ GLM_CKPT=${GLM_CKPT:?}
 CHECKPOINT_DIR=${GLM_RESUME_CHECKPOINT_DIR:?}
 RUN_ROOT=${GLM_RUN_ROOT:?}
 MEGATRON_CACHE=${GLM_MEGATRON_CACHE:?}
+MEGATRON_SOURCE_OVERLAY=${GLM_MEGATRON_SOURCE_OVERLAY:-}
+EXPECTED_MEGATRON_SOURCE_HEAD=${GLM_EXPECTED_MEGATRON_SOURCE_HEAD:-}
 export GLM_NUM_NODES=${GLM_NUM_NODES:-80}
 STALL_SECONDS=${GLM_CHECKPOINT_STALL_SECONDS:-1200}
 POLL_SECONDS=${GLM_CHECKPOINT_POLL_SECONDS:-60}
@@ -40,6 +42,16 @@ CACHE_METADATA=$(find "$MEGATRON_CACHE" -mindepth 2 -maxdepth 3 -type f -name .m
 [[ $(git -C "$REPO_DIR" rev-parse HEAD) == "$EXPECTED_HEAD" ]] || { echo "Source HEAD changed after submission" >&2; exit 1; }
 SOURCE_STATUS=$(git -C "$REPO_DIR" status --porcelain --untracked-files=no --ignore-submodules=untracked)
 [[ -z "$SOURCE_STATUS" ]] || { echo "Tracked source is dirty: $SOURCE_STATUS" >&2; exit 1; }
+if [[ -n "$MEGATRON_SOURCE_OVERLAY" ]]; then
+  [[ -n "$EXPECTED_MEGATRON_SOURCE_HEAD" ]] || { echo "Missing expected Megatron overlay HEAD" >&2; exit 1; }
+  [[ -r "$MEGATRON_SOURCE_OVERLAY/megatron/core/optimizer/distrib_optimizer.py" ]] || { echo "Invalid Megatron source overlay: $MEGATRON_SOURCE_OVERLAY" >&2; exit 1; }
+  [[ $(git -C "$MEGATRON_SOURCE_OVERLAY" rev-parse HEAD) == "$EXPECTED_MEGATRON_SOURCE_HEAD" ]] || { echo "Megatron source overlay HEAD changed after submission" >&2; exit 1; }
+  MEGATRON_SOURCE_STATUS=$(git -C "$MEGATRON_SOURCE_OVERLAY" status --porcelain --untracked-files=no)
+  [[ -z "$MEGATRON_SOURCE_STATUS" ]] || { echo "Megatron source overlay is dirty: $MEGATRON_SOURCE_STATUS" >&2; exit 1; }
+elif [[ -n "$EXPECTED_MEGATRON_SOURCE_HEAD" ]]; then
+  echo "Expected Megatron overlay HEAD set without an overlay path" >&2
+  exit 1
+fi
 if [[ "$PHASE" == "save" ]]; then
   [[ ! -e "$CHECKPOINT_DIR" ]] || { echo "Refusing existing checkpoint namespace: $CHECKPOINT_DIR" >&2; exit 1; }
 else
@@ -63,7 +75,11 @@ export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export NEMO_RL_VENV_DIR=${GLM_ACTOR_VENV_DIR:-/opt/ray_venvs/glm51-checkpoint-$EXPECTED_HEAD}
 export NRL_MEGATRON_CHECKPOINT_DIR=$MEGATRON_CACHE
 export NRL_REFIT_NUM_STREAMS=${NRL_REFIT_NUM_STREAMS:-2}
-export PYTHONPATH=$REPO_DIR
+if [[ -n "$MEGATRON_SOURCE_OVERLAY" ]]; then
+  export PYTHONPATH=$MEGATRON_SOURCE_OVERLAY:$REPO_DIR
+else
+  export PYTHONPATH=$REPO_DIR
+fi
 export PYTHONUNBUFFERED=1
 export RAY_DEDUP_LOGS=0
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
@@ -115,6 +131,25 @@ print(
     f"nodes={expected_nodes} tp={tp} pp={pp} etp={etp} ep={ep} "
     f"dense_dp={dense_data_parallel_size} expert_dp={expert_data_parallel_size}"
 )
+
+megatron_source_overlay = os.environ.get("GLM_MEGATRON_SOURCE_OVERLAY")
+if megatron_source_overlay:
+    from megatron.core.optimizer import distrib_optimizer
+
+    imported_optimizer = Path(distrib_optimizer.__file__).resolve()
+    expected_optimizer = (
+        Path(megatron_source_overlay)
+        / "megatron/core/optimizer/distrib_optimizer.py"
+    ).resolve()
+    assert imported_optimizer == expected_optimizer, (
+        f"Megatron overlay mismatch: imported {imported_optimizer}, "
+        f"expected {expected_optimizer}"
+    )
+    print(
+        "glm51_megatron_source_overlay=OK "
+        f"head={os.environ['GLM_EXPECTED_MEGATRON_SOURCE_HEAD']} "
+        f"optimizer={imported_optimizer}"
+    )
 PY
 
 if [[ "$PHASE" == "save" ]]; then
@@ -223,6 +258,10 @@ payload = {
     "checkpoint_dir": os.environ["GLM_RESUME_CHECKPOINT_DIR"],
     "ray_object_store_memory": int(os.environ["RAY_OBJECT_STORE_MEMORY"]),
     "terminal_green": True,
+    "megatron_source_overlay": os.environ.get("GLM_MEGATRON_SOURCE_OVERLAY"),
+    "megatron_source_overlay_head": os.environ.get(
+        "GLM_EXPECTED_MEGATRON_SOURCE_HEAD"
+    ),
 }
 (run_dir / "terminal.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY

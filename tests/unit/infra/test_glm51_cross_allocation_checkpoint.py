@@ -170,3 +170,21 @@ def test_glm51_checkpoint_runner_validates_scaled_data_parallelism() -> None:
         "expert_data_parallel_size = trainer_ranks // expert_model_parallel_size"
         in runner
     )
+
+
+def test_glm51_checkpoint_runner_supports_an_asserted_megatron_overlay() -> None:
+    launcher = (
+        REPO_ROOT
+        / "infra/slurm/cscs/autoresearch/submit_glm51_cross_allocation_checkpoint.sh"
+    ).read_text()
+    runner = (
+        REPO_ROOT
+        / "infra/slurm/cscs/autoresearch/run_glm51_cross_allocation_checkpoint.sh"
+    ).read_text()
+
+    assert "GLM_MEGATRON_SOURCE_OVERLAY" in launcher
+    assert "GLM_EXPECTED_MEGATRON_SOURCE_HEAD" in launcher
+    assert 'git -C "$MEGATRON_SOURCE_OVERLAY" rev-parse HEAD' in runner
+    assert "export PYTHONPATH=$MEGATRON_SOURCE_OVERLAY:$REPO_DIR" in runner
+    assert "Megatron overlay mismatch" in runner
+    assert '"megatron_source_overlay_head"' in runner
