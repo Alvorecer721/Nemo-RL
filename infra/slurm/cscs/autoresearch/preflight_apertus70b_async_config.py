@@ -8,7 +8,7 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from examples.custom_dataloader.glm51_local_dapo import (
+from apertus70b_local_dapo import (
     DAPO_LOGICAL_ROWS,
     DAPO_SMOKE_INDICES_SHA256,
     DAPO_SMOKE_ROWS,
@@ -53,18 +53,21 @@ def main() -> None:
     assert (train_tp, train_pp, dense_dp) == (4, 4, 1)
     assert megatron["sequence_parallel"] is True
     assert megatron["activation_checkpointing"] is True
+    assert megatron["defer_fp32_logits"] is True
     assert megatron["use_fused_linear_logprobs"] is True
+    assert config.policy["logprob_chunk_size"] == 256
     assert (vllm["tensor_parallel_size"], rollout_dp) == (4, 1)
     assert vllm["async_engine"] is True
+    assert vllm["env_vars"] == {"PYTHONPATH": ""}
     assert generation["refit_transport"] == "nccl_reshard"
-    assert config.grpo.num_prompts_per_step == 4
+    assert config.grpo.num_prompts_per_step == 16
     assert config.grpo.num_generations_per_prompt == 8
-    assert config.policy["train_global_batch_size"] == 32
+    assert config.policy["train_global_batch_size"] == 128
     assert config.policy["train_global_batch_size"] == (
         config.grpo.num_prompts_per_step * config.grpo.num_generations_per_prompt
     )
-    assert config.policy["max_total_sequence_length"] == 1024
-    assert generation["max_new_tokens"] == 512
+    assert config.policy["max_total_sequence_length"] == 1536
+    assert generation["max_new_tokens"] == 1024
     assert config.grpo.max_num_steps == 3
     assert config.grpo.val_period == 0
     assert config.data["validation"] is None

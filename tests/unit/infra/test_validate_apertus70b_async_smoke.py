@@ -29,6 +29,7 @@ def _valid_scalars() -> dict[str, list[tuple[float, int, float]]]:
         "advantage_max": [1.0, 0.5, 0.25],
         "trajectory_age": [0.0, 1.0, 1.0],
         "step_time_s": [10.0, 9.0, 8.0],
+        "gen_kl_error": [0.0003, 0.0004, 0.0005],
     }
     return {
         MODULE.REQUIRED_TAGS[name]: [
@@ -75,4 +76,12 @@ def test_smoke_metrics_rejects_obsolete_reward_stddev_only() -> None:
     ]
 
     with pytest.raises(AssertionError, match="min_total_reward missing steps"):
+        MODULE.validate_smoke_metrics(scalars, steps=3)
+
+
+def test_smoke_metrics_rejects_generation_kl_regression() -> None:
+    scalars = _valid_scalars()
+    _set_value(scalars, "gen_kl_error", 2, 0.002)
+
+    with pytest.raises(AssertionError, match=r"\[0, 0\.002\)"):
         MODULE.validate_smoke_metrics(scalars, steps=3)

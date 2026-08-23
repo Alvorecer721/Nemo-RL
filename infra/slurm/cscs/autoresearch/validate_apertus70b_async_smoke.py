@@ -18,6 +18,7 @@ REQUIRED_TAGS = {
     "advantage_max": "train/advantages/max",
     "trajectory_age": "train/avg_trajectory_age",
     "step_time_s": "timing/train/total_step_time",
+    "gen_kl_error": "train/gen_kl_error",
 }
 
 
@@ -53,7 +54,10 @@ def _values(
 
 
 def validate_smoke_metrics(
-    scalars: dict[str, list[tuple[float, int, float]]], *, steps: int
+    scalars: dict[str, list[tuple[float, int, float]]],
+    *,
+    steps: int,
+    max_gen_kl: float = 0.002,
 ) -> dict[str, dict[int, float]]:
     """Validate per-step learning evidence using NeMo-RL's emitted scalar tags."""
     expected_steps = set(range(1, steps + 1))
@@ -89,6 +93,13 @@ def validate_smoke_metrics(
         for value in metrics["trajectory_age"].values()
     ):
         raise AssertionError(f"Invalid trajectory ages: {metrics['trajectory_age']}")
+    if not all(
+        math.isfinite(value) and 0 <= value < max_gen_kl
+        for value in metrics["gen_kl_error"].values()
+    ):
+        raise AssertionError(
+            f"Generation KL must remain in [0, {max_gen_kl}): {metrics['gen_kl_error']}"
+        )
     return metrics
 
 
@@ -98,13 +109,19 @@ def main() -> None:
     parser.add_argument("--run-log", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source-head", required=True)
+    parser.add_argument("--harness-head", required=True)
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--steps", type=int, default=3)
+    parser.add_argument("--max-gen-kl", type=float, default=0.002)
     args = parser.parse_args()
 
     scalars = _load_scalars(args.log_dir)
-    metrics = validate_smoke_metrics(scalars, steps=args.steps)
+    metrics = validate_smoke_metrics(
+        scalars,
+        steps=args.steps,
+        max_gen_kl=args.max_gen_kl,
+    )
     expected_steps = set(range(1, args.steps + 1))
 
     run_text = args.run_log.read_text(encoding="utf-8", errors="replace")
@@ -123,10 +140,12 @@ def main() -> None:
         "schema": "nemo-rl.apertus70b-async-smoke.v1",
         "status": "terminal-metrics-validated",
         "source_head": args.source_head,
+        "harness_head": args.harness_head,
         "image": str(args.image.resolve(strict=True)),
         "run_id": args.run_id,
         "validated_steps": sorted(expected_steps),
         "refit_count": refits,
+        "max_gen_kl": args.max_gen_kl,
         "required_tags": REQUIRED_TAGS,
         "values_by_step": {
             name: {str(step): value for step, value in values.items()}

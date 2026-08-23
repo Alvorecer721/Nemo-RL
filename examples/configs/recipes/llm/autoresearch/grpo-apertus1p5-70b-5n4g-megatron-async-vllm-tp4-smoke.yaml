@@ -5,7 +5,7 @@ defaults: ../../../grpo_math_1B.yaml
 # the fifth node. The matched DPO topology study selected TP4/PP4 before this
 # experiment.
 grpo:
-  num_prompts_per_step: 4
+  num_prompts_per_step: 16
   num_generations_per_prompt: 8
   use_dynamic_sampling: false
   skip_reference_policy_logprobs_calculation: true
@@ -32,10 +32,10 @@ policy:
   model_name: ${oc.env:APERTUS70B_CKPT}
   tokenizer:
     name: ${oc.env:APERTUS70B_TOKENIZER}
-  train_global_batch_size: 32
+  train_global_batch_size: 128
   train_micro_batch_size: 1
   logprob_batch_size: 1
-  max_total_sequence_length: 1024
+  max_total_sequence_length: 1536
   logprob_chunk_size: 256
   dtensor_cfg:
     enabled: false
@@ -51,6 +51,7 @@ policy:
     context_parallel_size: 1
     sequence_parallel: true
     activation_checkpointing: true
+    defer_fp32_logits: true
     use_fused_linear_logprobs: true
     fused_linear_logprobs_chunk_size: 256
     bias_activation_fusion: false
@@ -66,7 +67,7 @@ policy:
       lr_warmup_iters: 2
       lr_warmup_init: 5.0e-8
   generation:
-    max_new_tokens: 512
+    max_new_tokens: 1024
     temperature: 1.0
     top_p: 1.0
     refit_transport: nccl_reshard
@@ -76,6 +77,8 @@ policy:
         num_nodes: 1
         gpus_per_node: 4
     vllm_cfg:
+      env_vars:
+        PYTHONPATH: ''
       tensor_parallel_size: 4
       pipeline_parallel_size: 1
       gpu_memory_utilization: 0.80
@@ -93,7 +96,7 @@ data:
   num_workers: 1
   use_multiple_dataloader: false
   train:
-    dataset_name: examples.custom_dataloader.glm51_local_dapo.LocalFormattedDAPOSmokeDataset
+    dataset_name: apertus70b_local_dapo.LocalFormattedDAPOSmokeDataset
     data_path: ${oc.env:APERTUS70B_DAPO_ARROW}
     split_validation_size: 0.0
     seed: ${grpo.seed}
