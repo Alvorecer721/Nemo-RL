@@ -18,6 +18,7 @@
 - `.tmp/apertus-refit-fix/infra/slurm/cscs/probe_nemo_rl_grpo_vllm0251_image.slurm` - permanent configurable PP regression gate.
 - `.tmp/apertus-refit-fix/infra/slurm/cscs/autoresearch/submit_apertus70b_async_smoke.sh` - opt-in exact-image source overlay for committed development gates.
 - `.tmp/nemo-upstream-7ea-curated/` - curated upstream replay and canonical PR #24 head; merged to public `main` at `8f22e59195f5`.
+- `.tmp/nemo-upstream-7ea-curated/` - also contains the clean post-sync CI hotfix branch `fix/post-sync-main-ci` at `d2e1e082f`; PR #25 merged it to public main after hosted lint passed.
 - `.tmp/apertus70b-exact-cert/` - exact-image Apertus 70B fail-closed harness; published branch `autoresearch/2026-08-23-apertus70b-cert/exact-image` at `92db67ae0`.
 - `.tmp/glm51-exact-prototype/` - exact-image offline GLM-5.1 TP32/EP32 harness; published branch `autoresearch/2026-08-23-glm51-prototype/exact-image` at `76217c755`.
 

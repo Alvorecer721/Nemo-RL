@@ -132,3 +132,13 @@ Preserve exact terminal evidence and distinguish the phase. Do not broaden fixes
 ## Other Open Thread
 
 The production-preserving KL=0.01 reference load fix is isolated in `.tmp/glm-reference-object-load`. It forwards per-rank ShardedObject loading from Bridge to MCore and passed exact unit/config gate `3147419`; it must not be published as runtime-proven until a real 288-rank reference-policy smoke succeeds.
+
+## Final Publication State — 2026-08-23 07:27 CEST
+
+- Public `main` is `d2e1e082f3fe29f438f46c16aeec684521fa0b68`. PR #24 merged the certified upstream sync at `8f22e5919`; PR #25 then fast-forwarded four post-sync lint corrections at `d2e1e082f`.
+- Main CI run `32619985296` completed successfully. Hosted lint/Pyrefly, recipe minimization, docs build/linkcheck, coverage guards, and CI quality are green.
+- The release image remains exact to parent `8f22e59195f547c5715ed250cd49d4776cda5d43`: `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-8f22e59195f5-2a9bd7b13c00.sqsh`, SHA-256 `4aaf2b1bba8613a1e515281d84ab9e330c41d2774ccd3992b5f0c0f81e9dd002`.
+- No rebuild is required for `d2e1e082f`: its complete delta is import ordering in two files, explicit Optional narrowing with unchanged DAPO behavior, and removal of a recipe key equal to its inherited default. `pyproject.toml`, `uv.lock`, Docker/build inputs, and all submodule pins are unchanged. The focused reward suite passed 24/24 and both branch and main hosted lint passed.
+- Apertus-1.5 70B is production-ready at smoke-gate strength: exact-image jobs `3156865`, `3156866`, and `3156886` all completed `0:0`; the three 70B steps had nonzero learning signal and generation KL below `0.0010`.
+- GLM-5.1 is a scale prototype only: exact-image job `3156867` completed `0:0` on 32 GH200, loaded all 282 shards, and measured `92.936` output tokens/s. Do not call its 80-node Megatron checkpoint or KL path production-ready.
+- Final upstream refresh found exactly one commit after the frozen base: `f0557321e` (`fix(grpo): correct sequence importance ratio metric`). The certified 70B recipe disables sequence-level importance ratios, so this remains a source-only follow-up rather than part of this release.

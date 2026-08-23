@@ -115,3 +115,12 @@ Complete. PR #24 is merged by exact-SHA fast-forward, the release image is sourc
 - Use escalated Slurm queries; sandbox DNS failures can falsely report the controller down.
 - Do not modify `.tmp/glm51-async-topology` while a source-bound smoke/benchmark is running; the artifact intentionally fails closed on dirty or changed source.
 - Do not delete or reconvert the 1.488-TB GLM DCP cache.
+
+## Publication Closure — 2026-08-23 07:27 CEST
+
+- Public main: `d2e1e082f3fe29f438f46c16aeec684521fa0b68`.
+- Merged PRs: #24 at certified image source `8f22e5919`; #25 at source-only CI hotfix `d2e1e082f`.
+- Authoritative main CI: run `32619985296`, `COMPLETED success`.
+- Certified image source boundary: `8f22e59195f547c5715ed250cd49d4776cda5d43`; current main differs only by four dependency-neutral lint corrections and does not require a rebuild.
+- Apertus 70B production smoke: accepted. GLM-5.1 32-GPU vLLM scale prototype: accepted as prototype only.
+- Deferred upstream delta: `f0557321e`, one sequence-level importance-ratio metric fix; no dependency or image rebuild required if taken later, but run its focused unit test before merge.
