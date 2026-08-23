@@ -7,16 +7,16 @@
 - Reservation: `SD-69241-apertus-1-5-0`, expires 2026-08-31 12:00 CEST. Do not cancel it.
 - Historical incomplete checkpoint and the 1.488-TB conversion cache are preservation boundaries.
 
-## Current hypothesis
+## Current diagnosis
 
-The 272/288 save stalled after 16 rank-local persistent NVRx writers failed to report completion. The historical logs do not retain their tracebacks. Current-source one-node controls produced complete 4/4-shard sync and NVRx checkpoints and restored them in fresh allocations, so the remaining target is the actual 288-rank GLM topology. The leading unconfirmed stressor remains host-memory pressure: the old run reserved about 145 GB of Ray object-store memory per node while staging 30-52 GB optimizer shards per rank.
+The 272/288 save stalled because 16 rank-local persistent NVRx children never completed D2H staging. Host-memory exhaustion is the evidence-backed root cause: the historical head step is recorded `OUT_OF_MEMORY`; the worker step's 261.33-GiB MaxRSS node is also a missing-writer node; missing writers are disproportionately concentrated on the 52-GB final pipeline stage; and the old 450-GiB node budget also carried a roughly 135-GiB Ray object store. NVRx then converted the child loss into an infinite wait because the parent blocks on `preload_q.join()` without checking child liveness. The next real-topology run captures cgroup OOM counters and writer processes on all nodes to close the remaining runtime-attribution gap.
 
 ## Plan
 
 - [x] Rebase the investigation onto current certified main.
 - [x] Expose Bridge checkpoint save/load controls and a Ray object-store cap.
 - [x] Pass current-source sync and NVRx save plus fresh-allocation next-step controls; both red Slurm exits were post-proof harness assertions, not checkpoint failures.
-- [x] Port the GLM harness without a custom dataset adapter or nested actor-venv directory.
+- [x] Port the GLM harness without a custom dataset adapter. Source-overlay diagnostics use an empty head-scoped actor venv because mutating baked packages in place fails on Enroot's writable overlay; production remains image-owned.
 - [ ] Complete a 288-rank GLM optimizer save and fresh-allocation resume.
 - [ ] Runtime-prove nonzero reference KL.
 - [ ] Run representative endurance and publish only runtime-proven changes.
