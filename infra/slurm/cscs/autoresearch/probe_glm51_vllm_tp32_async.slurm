@@ -20,7 +20,7 @@ CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/autoresearch/glm51_exa
 PROBE_SCRIPT=${PROBE_SCRIPT:-$REPO_DIR/infra/slurm/cscs/autoresearch/probe_glm51_vllm_tp32_async.py}
 RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/glm51_exact_vllm_tp32_${SLURM_JOB_ID}}
 GLM_CKPT=${GLM_CKPT:-/capstor/store/cscs/swissai/infra01/hf_models/models/zai-org/GLM-5.1}
-EXPECTED_SOURCE_HEAD=${EXPECTED_SOURCE_HEAD:-084ade845b8421ab82dcda1849d913da517f194e}
+EXPECTED_SOURCE_HEAD=${EXPECTED_SOURCE_HEAD:-8f22e59195f547c5715ed250cd49d4776cda5d43}
 GPUS_PER_NODE=4
 NUM_NODES=$SLURM_JOB_NUM_NODES
 EXPECTED_UNITS=$((NUM_NODES * GPUS_PER_NODE))
@@ -54,6 +54,8 @@ srun \
     unset PYTHONPATH
     export PYTHONUNBUFFERED=1
     export HF_HOME=${HF_HOME:-/iopsstor/scratch/cscs/${USER:-$(id -un)}/.cache/huggingface}
+    export HF_DATASETS_OFFLINE=1
+    export HF_HUB_OFFLINE=1
     export RAY_DEDUP_LOGS=0
     export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
     export NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE:-$RUN_DIR/nccl.%h.%p.log}
