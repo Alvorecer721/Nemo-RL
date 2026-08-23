@@ -68,6 +68,22 @@ def _point_guard_at_bridge_source(
     )
 
 
+def test_guard_locates_bundled_bridge_for_frozen_worker_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The base launcher can validate Bridge when only the worker venv imports it."""
+    bridge_module = tmp_path / "apertus_bridge.py"
+    bridge_module.write_text(BRIDGE_WITH_ENGINE_OWNERSHIP)
+    monkeypatch.setattr(runtime_guard.importlib.util, "find_spec", lambda _: None)
+    monkeypatch.setattr(
+        runtime_guard,
+        "_bundled_bridge_apertus_module_path",
+        lambda: bridge_module,
+    )
+
+    assert runtime_guard._bridge_apertus_module_path() == bridge_module
+
+
 def test_guard_passes_when_deltas_present(marker_present, monkeypatch, tmp_path):
     """A matching NeMo-RL and engine-owned Bridge contract pass."""
     _point_guard_at_bridge_source(monkeypatch, tmp_path, BRIDGE_WITH_ENGINE_OWNERSHIP)

@@ -28,25 +28,51 @@ import importlib.util
 from pathlib import Path
 
 
-def _bridge_apertus_module_path() -> Path:
-    """Locate the apertus_bridge.py that ``import megatron.bridge`` would resolve, without executing the package.
-
-    ``find_spec`` follows the same ``sys.path`` resolution as a real import but only imports the
-    code-free ``megatron`` namespace parent — executing ``megatron/bridge/__init__.py`` would pull
-    the full model zoo (+~17s warm / +~110s cold in the guard-only launcher process).
-    """
-    spec = importlib.util.find_spec("megatron.bridge")
-    if spec is None or not spec.submodule_search_locations:
-        raise RuntimeError(
-            "Apertus runtime guard failed: megatron.bridge is not importable.\n"
-            "  Fix: initialize the Bridge submodule — git submodule update --init --recursive — "
-            "and ensure PYTHONPATH includes <repo>/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src."
-        )
+def _bundled_bridge_apertus_module_path() -> Path:
+    """Return the Bridge source shipped beside NeMo-RL in source and release trees."""
     return (
-        Path(next(iter(spec.submodule_search_locations)))
+        Path(__file__).resolve().parents[1]
+        / "3rdparty"
+        / "Megatron-Bridge-workspace"
+        / "Megatron-Bridge"
+        / "src"
+        / "megatron"
+        / "bridge"
         / "models"
         / "apertus"
         / "apertus_bridge.py"
+    )
+
+
+def _bridge_apertus_module_path() -> Path:
+    """Locate the active or bundled Apertus Bridge source without importing it.
+
+    ``find_spec`` follows the same ``sys.path`` resolution as a real import but only imports the
+    code-free ``megatron`` namespace parent — executing ``megatron/bridge/__init__.py`` would pull
+    the full model zoo (+~17s warm / +~110s cold in the guard-only launcher process). Release
+    images intentionally install Bridge only in the frozen Megatron worker environment, so the
+    launcher interpreter falls back to the same bundled source tree used to build that worker.
+    """
+    try:
+        spec = importlib.util.find_spec("megatron.bridge")
+    except ModuleNotFoundError:
+        spec = None
+    if spec is not None and spec.submodule_search_locations:
+        return (
+            Path(next(iter(spec.submodule_search_locations)))
+            / "models"
+            / "apertus"
+            / "apertus_bridge.py"
+        )
+
+    bundled_module = _bundled_bridge_apertus_module_path()
+    if bundled_module.is_file():
+        return bundled_module
+    raise RuntimeError(
+        "Apertus runtime guard failed: no Megatron-Bridge source is available.\n"
+        f"  Expected bundled source: {bundled_module}\n"
+        "  Fix: initialize the Bridge submodule — git submodule update --init --recursive — "
+        "or ensure PYTHONPATH includes <repo>/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src."
     )
 
 
