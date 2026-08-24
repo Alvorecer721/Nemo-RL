@@ -24,10 +24,10 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 
 ## Current subtask (2026-08-24 02:47 CEST)
 
-- Publish the runtime-proven MCore patch `23ae88370` to the existing draft PR; do not publish the earlier CPU-placeholder or noisy formatting drafts.
+- MCore PR #1 is merged at `9c82d4cad8c2aba345903cefee56989ba46f7013`; Bridge PR #5 is merged at `6b24b9e7944300a2a908c4e710841a679d435b95`, and this NeMo branch pins that Bridge commit.
 - Keep the valid TP2 checkpoint until PR evidence and integration pins are safely recorded.
 - Preserve reservation `SD-69241-apertus-1-5-0` and the reusable 1.488-TB model-conversion cache.
-- After the MCore PR merges, advance the Bridge MCore gitlink, then the NeMo-RL Bridge gitlink; the source overlay is validation machinery, not the production install contract.
+- Publish the NeMo-RL branch and run its CI; the source overlay remains validation machinery, not the production install contract.
 
 ## Loaded skills
 
@@ -43,5 +43,7 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 - [x] Submit Phase A using the existing reservation and write a complete TP2 checkpoint (`3168499`).
 - [x] Prove unpatched TP2 still fails during optimizer restoration (`3168898`).
 - [x] Prove the final MCore patch restores in a fresh allocation and completes the next training step (`3169314`).
-- [x] Add a launcher preflight so uninitialized or mismatched recursive submodules fail before node allocation (`1b884ed64`; focused tests 10/10, Ruff and `bash -n` clean).
-- [ ] Publish clean MCore SHA `23ae88370`, update the draft PR evidence, and land the downstream gitlink sequence.
+- [x] Add a launcher preflight so uninitialized or mismatched recursive submodules fail before node allocation (`558dd58b5` after DCO replay; focused tests 10/10, Ruff and `bash -n` clean).
+- [x] Merge the clean MCore fix through fork PR #1, merge its Bridge gitlink through fork PR #5, and pin the merged Bridge SHA in NeMo-RL.
+- [x] Relock with image-owned uv 0.11.28 in job `3169750`; 549 packages resolved in 1.04 seconds and `uv.lock` remained byte-identical.
+- [ ] Publish the NeMo-RL branch, trigger CI with its full commit SHA, and address only substantive failures.

@@ -23,8 +23,9 @@
 
 ## Restore-memory fix evidence
 
-- `.tmp/mcore-dcp-no-cast-14346/megatron/core/optimizer/__init__.py`: passes `store_param_remainders` to the TE 2.15 optimizer-state initializer.
-- `.tmp/mcore-dcp-no-cast-14346/megatron/core/optimizer/distrib_optimizer.py`: uses TE's final float32 scaled optimizer state as the DCP target for the alias-safe precision-aware path, avoiding a second CUDA-resident load skeleton and preserving the existing fallback for other optimizers/dtypes.
-- `.tmp/mcore-dcp-no-cast-14346/tests/unit_tests/optimizer/test_distrib_optimizer_load_state.py`: covers CPU fallback placeholders, the TE 2.15 initializer signature, tensor-identity preservation, repeat loads, and param-group metadata restoration; 3/3 focused tests pass.
+- `3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/optimizer/__init__.py`: passes `store_param_remainders` to the TE 2.15 optimizer-state initializer.
+- `3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/optimizer/distrib_optimizer.py`: uses TE's final float32 scaled optimizer state as the DCP target for the alias-safe precision-aware path, avoiding a second CUDA-resident load skeleton and preserving the existing fallback for other optimizers/dtypes.
+- `3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/3rdparty/Megatron-LM/tests/unit_tests/optimizer/test_distrib_optimizer_load_state.py`: covers CPU fallback placeholders, the TE 2.15 initializer signature, tensor-identity preservation, repeat loads, and param-group metadata restoration; 3/3 focused tests pass.
 - `infra/slurm/cscs/autoresearch/submit_glm51_cross_allocation_checkpoint.sh`: rejects uninitialized or gitlink-mismatched recursive submodules before allocating nodes.
 - `tests/unit/infra/test_glm51_cross_allocation_checkpoint.py`: launcher preflight plus topology/cluster contracts; 10/10 focused tests pass.
+- `3rdparty/Megatron-Bridge-workspace/Megatron-Bridge`: NeMo gitlink at merged Bridge SHA `6b24b9e7`, which pins merged MCore SHA `9c82d4ca`.
