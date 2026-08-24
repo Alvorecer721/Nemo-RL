@@ -1273,11 +1273,10 @@ def _create_checkpoint_config(
         optimizer_path: Path to the optimizer state (None if not resuming optimizer).
         load_main_params_from_ckpt: Load optimizer main params from the checkpoint.
         ckpt_cfg: MegatronCheckpointConfig dict from YAML (``megatron_cfg.checkpoint``).
-            Every knob (``async_save``, ``ckpt_assume_constant_structure``, and the
-            parallel-IO fields) is forwarded only when explicitly set in YAML — no
-            call-site default. When a field (or the whole block) is absent, Megatron
-            Bridge's own ``CheckpointConfig`` default applies, so ``async_save``
-            falls back to synchronous save for configs that don't set it.
+            Every knob is forwarded only when explicitly set in YAML — no call-site
+            default. When a field (or the whole block) is absent, Megatron Bridge's
+            own ``CheckpointConfig`` default applies, so ``async_save`` falls back to
+            synchronous save for configs that don't set it.
     """
     cfg = ckpt_cfg or {}
 
@@ -1298,8 +1297,10 @@ def _create_checkpoint_config(
     # — no call-site default — so a config that omits the block keeps Bridge's
     # default (synchronous save).
     _optional_ckpt_fields = (
+        "fully_parallel_save",
         "async_save",
         "ckpt_assume_constant_structure",
+        "ckpt_load_validate_sharding_integrity",
         "ckpt_fully_parallel_save_process_group",
         "ckpt_fully_parallel_load_process_group",
         "ckpt_fully_parallel_load_exchange_algo",

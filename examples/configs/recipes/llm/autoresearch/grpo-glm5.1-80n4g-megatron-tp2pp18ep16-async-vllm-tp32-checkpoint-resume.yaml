@@ -1,0 +1,11 @@
+defaults: grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-checkpoint-save.yaml
+
+# Phase B restores the TP2 Phase-A checkpoint in a fresh allocation and must
+# complete the next outer training step. The CPU-placeholder fix remains absent.
+checkpointing:
+  enabled: false
+  checkpoint_must_save_by: null
+
+logger:
+  wandb:
+    name: glm51-cross-allocation-checkpoint-resume-tp2

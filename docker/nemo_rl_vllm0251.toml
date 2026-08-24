@@ -1,4 +1,4 @@
-image = "/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus+v0.7.0+vllm-0.25.1.aarch64.sqsh"
+image = "/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus-vllm-0.25.1-8f22e59195f5-2a9bd7b13c00.aarch64.sqsh"
 mounts = ["/capstor", "/iopsstor", "/users"]
 writable = true
 workdir = "/opt/nemo-rl"

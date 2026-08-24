@@ -26,6 +26,10 @@ set -eoux pipefail
 
 # Record job-start epoch so Python can measure pre-Python overhead
 export NRL_JOB_START_EPOCH=$(date +%s.%N)
+# The Ray head clears SLURM_* before starting Ray so MPI libraries initialize in
+# a clean environment. Preserve the allocation identity under an NRL-owned name
+# for driver artifacts and diagnostics that still need to identify the job.
+export NRL_SLURM_JOB_ID=${NRL_SLURM_JOB_ID:-${SLURM_JOB_ID:?}}
 
 # Log a timestamped, seconds-since-job-start marker at each phase boundary.
 log_phase() {
@@ -188,6 +192,19 @@ fi
 #   8800-8999    SGLang Prometheus metrics (carve-out inside the 7000-8999 band)
 MIN_WORKER_PORT=${MIN_WORKER_PORT:-2000}
 MAX_WORKER_PORT=${MAX_WORKER_PORT:-2999}
+########################################################
+# Optional per-node Ray plasma-store cap, in bytes. Ray otherwise reserves a
+# large fraction of host memory automatically; large optimizer checkpoints can
+# need that memory for rank-local D2H staging and storage writers.
+RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY:-}
+if [[ -n "$RAY_OBJECT_STORE_MEMORY" && ! "$RAY_OBJECT_STORE_MEMORY" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] RAY_OBJECT_STORE_MEMORY must be a positive integer byte count, got: $RAY_OBJECT_STORE_MEMORY" >&2
+  exit 1
+fi
+RAY_OBJECT_STORE_ARG=""
+if [[ -n "$RAY_OBJECT_STORE_MEMORY" ]]; then
+  RAY_OBJECT_STORE_ARG="--object-store-memory=$RAY_OBJECT_STORE_MEMORY"
+fi
 ########################################################
 # Number seconds to sync logs from /tmp/ray/session_*/logs to $LOG_DIR/ray/
 RAY_LOG_SYNC_FREQUENCY=${RAY_LOG_SYNC_FREQUENCY:-}
@@ -791,6 +808,7 @@ ray start --head \
     --disable-usage-stats \
     --resources="\$RAY_RESOURCES" \
     \$HEAD_RAY_RESOURCE_ARGS \
+    $RAY_OBJECT_STORE_ARG \
     --node-ip-address="$head_node_ip" \
     --port=${PORT} \
     --ray-client-server-port=${RAY_CLIENT_SERVER_PORT} \
@@ -1020,6 +1038,7 @@ while [[ \$count -lt $WORKER_NUM_RETRIES ]]; do
 ray start --address "$ip_head" \
           --disable-usage-stats \
           --resources="\$RAY_RESOURCES" \
+          $RAY_OBJECT_STORE_ARG \
           --min-worker-port=${MIN_WORKER_PORT} \
           --max-worker-port=${MAX_WORKER_PORT} \
           \
