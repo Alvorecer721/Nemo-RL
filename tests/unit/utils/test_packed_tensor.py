@@ -20,6 +20,8 @@ import torch
 from nemo_rl.utils.packed_tensor import (
     packed_broadcast_consumer,
     packed_broadcast_producer,
+    restore_tensor_from_bytes,
+    tensor_to_contiguous_bytes,
 )
 
 
@@ -49,6 +51,28 @@ class MockConsumerCommunicationGroup:
         if self.current_index < len(self.tensors_to_return):
             tensor.copy_(self.tensors_to_return[self.current_index])
             self.current_index += 1
+
+
+def test_byte_helpers_restore_noncontiguous_tensor_and_scalar():
+    routes = torch.tensor(
+        [[[-1, -1], [127, 128]], [[255, 256], [1024, 32767]]],
+        dtype=torch.int16,
+    ).transpose(0, 1)
+    assert not routes.is_contiguous()
+
+    route_bytes = tensor_to_contiguous_bytes(routes)
+    assert route_bytes.dtype == torch.uint8
+    assert route_bytes.is_contiguous()
+    restored_routes = restore_tensor_from_bytes(route_bytes, routes.shape, routes.dtype)
+    assert torch.equal(restored_routes, routes)
+
+    scalar = torch.tensor(42.0, dtype=torch.bfloat16)
+    scalar_bytes = tensor_to_contiguous_bytes(scalar)
+    restored_scalar = restore_tensor_from_bytes(
+        scalar_bytes, scalar.shape, scalar.dtype
+    )
+    assert restored_scalar.shape == torch.Size([])
+    assert torch.equal(restored_scalar, scalar)
 
 
 def create_mock_model_params():
