@@ -20,3 +20,11 @@
 - `examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-checkpoint-{save,resume}.yaml`: fresh TP2/PP18/ETP1/EP16 Phase A/B pair on the 80-node reservation; dense DP8 and expert DP1.
 - `infra/slurm/cscs/autoresearch/run_glm51_cross_allocation_checkpoint.sh`: validates both certified TP1 and diagnostic TP2 grids and prints dense/expert DP explicitly.
 - `tests/unit/infra/test_glm51_cross_allocation_checkpoint.py`: covers both TP2 phases plus existing TP1/DP32 recipes; 9/9 focused tests pass.
+
+## Restore-memory fix evidence
+
+- `.tmp/mcore-dcp-no-cast-14346/megatron/core/optimizer/__init__.py`: passes `store_param_remainders` to the TE 2.15 optimizer-state initializer.
+- `.tmp/mcore-dcp-no-cast-14346/megatron/core/optimizer/distrib_optimizer.py`: uses TE's final float32 scaled optimizer state as the DCP target for the alias-safe precision-aware path, avoiding a second CUDA-resident load skeleton and preserving the existing fallback for other optimizers/dtypes.
+- `.tmp/mcore-dcp-no-cast-14346/tests/unit_tests/optimizer/test_distrib_optimizer_load_state.py`: covers CPU fallback placeholders, the TE 2.15 initializer signature, tensor-identity preservation, repeat loads, and param-group metadata restoration; 3/3 focused tests pass.
+- `infra/slurm/cscs/autoresearch/submit_glm51_cross_allocation_checkpoint.sh`: rejects uninitialized or gitlink-mismatched recursive submodules before allocating nodes.
+- `tests/unit/infra/test_glm51_cross_allocation_checkpoint.py`: launcher preflight plus topology/cluster contracts; 10/10 focused tests pass.
