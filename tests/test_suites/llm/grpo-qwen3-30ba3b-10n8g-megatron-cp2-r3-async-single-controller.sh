@@ -51,6 +51,7 @@ if [[ $(jq 'to_entries | .[] | select(.key == "train/loss") | .value | keys | ma
         'median(data["train/token_mult_prob_error"]) < 1.02'
 
     uv run tools/check_r3_trace.py "$NRL_R3_TRACE_DIR" \
+        --transport-contract transfer-queue \
         --require-forward-verify \
         --require-cp-identity
 
