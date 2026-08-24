@@ -20,6 +20,39 @@ from typing import Any, List, Tuple
 import torch
 
 
+def tensor_to_contiguous_bytes(
+    tensor: torch.Tensor,
+    *,
+    device: torch.device | str | int | None = None,
+) -> torch.Tensor:
+    """Return a contiguous one-dimensional byte view of ``tensor``.
+
+    Raw-byte transport does not swap bytes, so producer and consumer must run
+    on a same-endian fleet. ``device`` lets the transport own placement before
+    byte packing instead of relying on every upstream producer to agree.
+    """
+    if device is not None:
+        tensor = tensor.to(device)
+    tensor = tensor.contiguous().reshape(-1)
+    assert tensor.is_contiguous()
+    return tensor.view(torch.uint8)
+
+
+def restore_tensor_from_bytes(
+    tensor: torch.Tensor,
+    shape: torch.Size | tuple[int, ...] | list[int],
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Restore dtype and shape for a tensor from an unpadded byte stream."""
+    assert tensor.dtype == torch.uint8
+    if tensor.storage_offset() % dtype.itemsize:
+        tensor = tensor.clone()
+    restored = tensor.view(dtype).reshape(tuple(shape))
+    assert restored.dtype == dtype
+    assert tuple(restored.shape) == tuple(shape)
+    return restored
+
+
 @lru_cache(maxsize=1)
 def get_target_packed_tensor_size():
     memory_ratio = os.getenv("NRL_REFIT_BUFFER_MEMORY_RATIO", "0.02")
@@ -91,15 +124,10 @@ def packed_broadcast_producer(
                     # Apply backend specific post processing and then convert to linearized uint8 tensor.
                     # contiguous() is required because the upstream iterator may
                     # yield non-contiguous tensors that view(...) cannot handle.
-                    tensor = post_iter_func(next(iterator))
-                    if tensor.device.type != "cuda":
-                        # Everything here is concatenated into one buffer and
-                        # broadcast over a CUDA collective, so a single host
-                        # tensor anywhere in the stream fails the cat. The
-                        # producer owns its buffer's device rather than
-                        # trusting every upstream exporter to agree.
-                        tensor = tensor.to(torch.cuda.current_device())
-                    tensor = tensor.contiguous().reshape(-1).view(torch.uint8)
+                    tensor = tensor_to_contiguous_bytes(
+                        post_iter_func(next(iterator)),
+                        device=torch.cuda.current_device(),
+                    )
                     packing_tensor_list[buffer_idx].append(tensor)
                     packing_tensor_sizes[buffer_idx] += tensor.numel()
                     if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
@@ -157,25 +185,12 @@ def packed_broadcast_consumer(iterator, group, src, post_unpack_func):
         packed_tensor_sizes = list(map(lambda x: x[4], meta_data_list))
         unpacked_tensor = packed_tensor.split_with_sizes(packed_tensor_sizes)
 
-        def restore_tensor(
-            tensor: torch.Tensor, shape: torch.Size | list[int], dtype: torch.dtype
-        ) -> torch.Tensor:
-            """Restore dtype and shape for a tensor from the packed byte stream.
-
-            Unlike the 512-byte-aligned IPC/ZMQ refit path, packed collective
-            refit adds no padding between tensors. Scalar GEMM or K/V amax can
-            therefore leave the next mixed-dtype slice unaligned. Cloning moves
-            only such slices to offset zero. ``reshape(tuple(shape))`` accepts an
-            empty tuple and therefore also restores scalar tensors.
-            """
-            if tensor.storage_offset() % dtype.itemsize:
-                tensor = tensor.clone()
-            return tensor.view(dtype).reshape(tuple(shape))
-
         unpacked_list = [
             (
                 meta_data_list[i][0],
-                restore_tensor(tensor, meta_data_list[i][1], meta_data_list[i][2]),
+                restore_tensor_from_bytes(
+                    tensor, meta_data_list[i][1], meta_data_list[i][2]
+                ),
             )
             for i, tensor in enumerate(unpacked_tensor)
         ]
