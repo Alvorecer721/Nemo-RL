@@ -1,7 +1,7 @@
 # Session State
 
 - Goal: turn the GLM-5.1 scale prototype into production evidence for optimizer checkpoint completion, fresh-allocation resume, reference KL, and endurance.
-- Branch: `main`
+- Branch: `autoresearch/glm51-r3-10step-20260824`
 - Published merge: NeMo-RL PR #26, `c85af58d9aa815504e006e736df6dc16042ee76c`
 - Certified image: `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus-vllm-0.25.1-8f22e59195f5-2a9bd7b13c00.aarch64.sqsh`
 - Reservation: `SD-69241-apertus-1-5-0`, expires 2026-08-31 12:00 CEST. Do not cancel it.
@@ -22,8 +22,15 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 - [x] Runtime-prove nonzero reference KL (`0.0025` after restore/refit in `3169314`).
 - [x] Publish the runtime-proven checkpoint and integration changes through NeMo-RL PR #26.
 - [ ] Run representative endurance as a separate production gate.
+- [ ] Characterize GLM train-vs-rollout mismatch over ten R3-enabled steps, including tail probability error and route integrity.
 
-## Current subtask (2026-08-24 03:36 CEST)
+## Current subtask (2026-08-24 09:28 CEST)
+
+- Run a fresh ten-step TP2/PP18/EP16 async-GRPO experiment with TP32/EP32 vLLM and `policy.router_replay.enabled=true`.
+- Compare all ten KL and token-probability-error values with the preserved R3-off ten-step body from job `3147936`, whose KL mean was about `0.00250` but whose 3,858,221 valid training tokens included 7,873 `abs(delta log p) > 0.5`, 570 above `1.0`, and a maximum of `37.7`.
+- Require strict route validation, a verified route trace, no missing-route fallback, at least eight learning-signal steps, and a clean terminal artifact. Do not write a new checkpoint or mutate the valid TP2 checkpoint.
+
+## Published checkpoint status
 
 - MCore PR #1 is merged at `9c82d4cad8c2aba345903cefee56989ba46f7013`; Bridge PR #5 is merged at `6b24b9e7944300a2a908c4e710841a679d435b95`; NeMo-RL PR #26 is merged at `c85af58d9aa815504e006e736df6dc16042ee76c` and pins that Bridge commit.
 - Keep the valid TP2 checkpoint for endurance and future scale validation even though publication is complete.

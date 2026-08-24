@@ -78,3 +78,9 @@
 - Merged PR #26 as `c85af58d9aa815504e006e736df6dc16042ee76c`. The merge tree is byte-identical to tested head `12c16cb23af3d1e1548a3d3bd22074558dd4ae33`; local `main` is clean and level with `origin/main`.
 - Proved clean public MCore reachability by fetching `9c82d4ca` into an empty repository directly from the Bridge-recorded NVIDIA URL. Removed the two clean NeMo task worktrees and restored the exact submodule pins in the sole remaining main checkout.
 - Reverified the preserved TP2 checkpoint under `step_1/policy/weights/iter_0000000`: 288 `.distcp` shards totaling 8,946,006,731,964 bytes, 35,338,056-byte `.metadata`, and three small control files. No reservation, checkpoint, or conversion-cache mutation was issued.
+
+## 2026-08-24 09:28 CEST
+
+- User requested deeper analysis of the `0.0027` GLM generation KL and a ten-step run rather than relying on one checkpoint step.
+- Recovered the ten-step R3-off body from job `3147936`. Per-step KL ranged from `0.0022966` to `0.0027089` with mean about `0.00250`; however, token-multiplicative-error tails were severe. Applying both token and sample loss masks leaves 3,858,221 valid tokens: 7,873 had `abs(delta log p) > 0.5`, 570 exceeded `1.0`, and the maximum reached `37.7257`.
+- Decision: run a fresh TP2 ten-step R3-on experiment from the merged stack, not from the route-less saved replay buffer. Gate average metrics, tail metrics, route trace integrity, learning signal and clean finalization; disable checkpointing and preserve the complete checkpoint and reservation.
