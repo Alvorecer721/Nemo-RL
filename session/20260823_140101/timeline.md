@@ -100,3 +100,8 @@
 - Strengthened the next GLM gate to 2048 total / 1536 generated tokens, at least eight learning-signal and nonzero-loss steps, mean truncation below 0.9, no valid-token error above 1.0, and fewer than 1e-4 above 0.5.
 - Added fail-fast entrypoint and SingleController config validation, including unsupported transport/backend combinations and formerly accepted no-op controls. Applied configured GRPO advantage clipping in the SingleController training path.
 - Current-source compilation, shell syntax, diff hygiene, and 13 pure trace/completion unit tests passed. Dependency-bearing tests remain an exact-image gate because host Python lacks Ray.
+
+## 2026-08-24 15:32 CEST
+
+- Submitted exact-image changed-path job `3173736` from PR head `5143b429d`. It started Ray and passed 242 tests before the broad SingleController suite exposed one stale fixture: `_setup_master_config` modeled the new SingleController path but inherited the default legacy `grpo.async_grpo` block.
+- Decision: preserve the production fail-fast guard, set `async_grpo=None` in that fixture as the nearest SingleController fixture already does, and rerun the full exact-image gate from a new committed head. The 80-node GLM run remains held until the rerun exits green.

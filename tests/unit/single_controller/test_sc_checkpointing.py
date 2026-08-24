@@ -873,6 +873,7 @@ def _setup_master_config(checkpoint_dir: str) -> MasterConfig:
             "train": [{"env_name": "math"}],
         },
         grpo=GRPOConfig.model_construct(
+            async_grpo=None,
             max_num_steps=100,
             max_num_epochs=1,
             num_prompts_per_step=4,

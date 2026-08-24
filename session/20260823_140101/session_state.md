@@ -32,6 +32,11 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 - Compare all ten KL and token-probability-error values with the preserved R3-off ten-step body from job `3147936`, whose KL mean was about `0.00250` but whose 3,858,221 valid training tokens included 7,873 `abs(delta log p) > 0.5`, 570 above `1.0`, and a maximum of `37.7`.
 - Require strict route validation, a verified route trace, no missing-route fallback, at least eight learning-signal steps, and a clean terminal artifact. Do not write a new checkpoint or mutate the valid TP2 checkpoint.
 
+## PR #27 exact-image gate (2026-08-24 15:32 CEST)
+
+- Exact-image job `3173736` ran the broad changed-path selection from `5143b429d`: 242 tests passed before `test_sc_checkpointing.py::TestSetupResumeWiring::test_setup_forwards_latest_resume_paths` failed.
+- The failure is a fixture regression from the new fail-fast runtime contract. `_setup_master_config` constructs a SingleController config but omitted `async_grpo=None`, so it inherited the legacy async block that production now correctly rejects. Keep the production guard and make the fixture explicit, then rerun the complete gate before submitting the 80-node experiment.
+
 ## R3 characterization result (2026-08-24 11:16 CEST)
 
 - Job `3171492` completed all ten legacy-async GRPO training steps. Router Replay reduced generation KL from the historical R3-off mean `0.00250` to `0.000388`; all ten steps were below `0.000407`. Across 1,291,712 valid tokens only four had `abs(delta log p) > 0.5`, none exceeded `1.0`, and the maximum was `0.676`.
