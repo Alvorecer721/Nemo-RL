@@ -43,6 +43,10 @@ from nemo_rl.data_plane.schema import (
 )
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict, SequencePackingArgs
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
+from nemo_rl.utils.packed_tensor import (
+    restore_tensor_from_bytes,
+    tensor_to_contiguous_bytes,
+)
 from nemo_rl.utils.r3_trace import trace_tq_fetch_payload
 
 if TYPE_CHECKING:
@@ -119,15 +123,17 @@ def _broadcast_batched_data_dict(
                 source_tensor = out[key]
                 tensor = source_tensor
                 if tensor.dtype != wire_dtype:
-                    tensor = tensor.contiguous().view(wire_dtype).reshape(wire_shape)
-                if tensor.device.type != torch.device(bcast_device).type:
+                    tensor = tensor_to_contiguous_bytes(
+                        tensor, device=bcast_device
+                    ).reshape(wire_shape)
+                elif tensor.device.type != torch.device(bcast_device).type:
                     tensor = tensor.to(bcast_device)
             else:
                 tensor = torch.empty(wire_shape, dtype=wire_dtype, device=bcast_device)
             torch.distributed.broadcast(tensor, src=src, group=group)
             if not is_leader:
                 if tensor.dtype != dtype:
-                    tensor = tensor.view(dtype).reshape(shape)
+                    tensor = restore_tensor_from_bytes(tensor, shape, dtype)
                 if torch.device(src_device).type != torch.device(bcast_device).type:
                     tensor = tensor.to(src_device)
                 out[key] = tensor
