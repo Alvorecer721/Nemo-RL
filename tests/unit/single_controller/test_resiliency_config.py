@@ -150,9 +150,7 @@ class TestUnsupportedAlgorithmKnobsFailLoudly:
 
     def test_active_reward_penalty_is_rejected(self) -> None:
         cfg = _master_config()
-        cfg.reward_penalties = RewardPenaltyConfig(
-            penalize_empty_final_answer=True
-        )
+        cfg.reward_penalties = RewardPenaltyConfig(penalize_empty_final_answer=True)
 
         with pytest.raises(NotImplementedError, match="reward_penalties"):
             validate_single_controller_config(cfg)

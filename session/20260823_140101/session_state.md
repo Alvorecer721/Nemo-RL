@@ -36,6 +36,7 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 
 - Exact-image job `3173736` ran the broad changed-path selection from `5143b429d`: 242 tests passed before `test_sc_checkpointing.py::TestSetupResumeWiring::test_setup_forwards_latest_resume_paths` failed.
 - The failure is a fixture regression from the new fail-fast runtime contract. `_setup_master_config` constructs a SingleController config but omitted `async_grpo=None`, so it inherited the legacy async block that production now correctly rejects. Keep the production guard and make the fixture explicit, then rerun the complete gate before submitting the 80-node experiment.
+- Rerun `3173779` from `dfc9e50bb` passed all 420 selected tests and Ruff check, then failed only because Ruff format identified one mechanical reflow in `test_resiliency_config.py`. Exact-image formatter job `3173814` applied that one-line reflow; the final full gate remains required from the next committed head.
 
 ## R3 characterization result (2026-08-24 11:16 CEST)
 
