@@ -45,6 +45,10 @@ def _worker(rank: int, world_size: int, tmp_init_file: str, q):
                 {
                     "input_ids": torch.arange(12, dtype=torch.long).reshape(3, 4),
                     "input_lengths": torch.tensor([4, 3, 2], dtype=torch.int32),
+                    "routed_experts": torch.tensor(
+                        [[[-1, -1], [3, 7]], [[8, 9], [10, 11]]],
+                        dtype=torch.int16,
+                    ),
                     "scalar_meta": "step_42",
                 }
             )
@@ -61,6 +65,11 @@ def _worker(rank: int, world_size: int, tmp_init_file: str, q):
         assert torch.equal(
             out["input_lengths"], torch.tensor([4, 3, 2], dtype=torch.int32)
         )
+        assert torch.equal(
+            out["routed_experts"],
+            torch.tensor([[[-1, -1], [3, 7]], [[8, 9], [10, 11]]], dtype=torch.int16),
+        )
+        assert out["routed_experts"].dtype == torch.int16
         assert out["scalar_meta"] == "step_42"
         q.put((rank, "ok"))
     except Exception as e:  # pragma: no cover — surface failures to parent
@@ -99,3 +108,37 @@ def test_get_replica_group_default_is_none():
         pass
 
     assert _Stub()._get_replica_group() is None
+
+
+def _nccl_int16_worker(rank: int, world_size: int) -> None:
+    if rank == 0:
+        data = BatchedDataDict(
+            {
+                "routed_experts": torch.tensor(
+                    [[[-1, -1], [127, 128]], [[255, 256], [1024, 32767]]],
+                    dtype=torch.int16,
+                )
+            }
+        )
+    else:
+        data = None
+
+    out = _broadcast_batched_data_dict(
+        data,
+        is_leader=(rank == 0),
+        src=0,
+        group=dist.group.WORLD,
+    )
+
+    expected = torch.tensor(
+        [[[-1, -1], [127, 128]], [[255, 256], [1024, 32767]]],
+        dtype=torch.int16,
+    )
+    assert out["routed_experts"].device.type == "cpu"
+    assert out["routed_experts"].dtype == torch.int16
+    assert torch.equal(out["routed_experts"], expected)
+
+
+def test_leader_broadcast_int16_round_trip_nccl(distributed_test_runner):
+    """NCCL carries compact Router Replay routes through a byte wire view."""
+    distributed_test_runner(_nccl_int16_worker, world_size=2, backend="nccl")
