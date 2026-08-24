@@ -20,6 +20,7 @@ from omegaconf import OmegaConf
 
 from infra.slurm.cscs.autoresearch.validate_glm51_r3_10step import (
     summarize_logprob_tails,
+    validate_logprob_tails,
     validate_metrics,
 )
 from nemo_rl.algorithms.grpo import MasterConfig
@@ -45,6 +46,10 @@ def test_glm51_r3_recipe_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.grpo.async_grpo.enabled is True
     assert config.grpo.async_grpo.max_trajectory_age_steps == 1
     assert config.policy["router_replay"]["enabled"] is True
+    assert config.policy["max_total_sequence_length"] == 2048
+    assert generation["max_new_tokens"] == 1536
+    assert generation["vllm_cfg"]["max_model_len"] == 2048
+    assert not (config.data_plane or {}).get("enabled", False)
     assert config.checkpointing["enabled"] is False
     assert config.checkpointing["save_optimizer"] is False
     assert (config.cluster["num_nodes"], config.cluster["gpus_per_node"]) == (80, 4)
@@ -62,7 +67,7 @@ def test_glm51_r3_recipe_contract(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _metrics(
-    *, kl: float = 0.0015, signal_steps: int = 10, token_mult: float = 1.01
+    *, kl: float = 0.0005, signal_steps: int = 10, token_mult: float = 1.01
 ) -> dict:
     steps = range(1, 11)
     return {
@@ -81,6 +86,7 @@ def _metrics(
         "train/advantages/max": {
             str(step): 1.0 if step <= signal_steps else 0.0 for step in steps
         },
+        "train/truncation_rate": {str(step): 0.5 for step in steps},
     }
 
 
@@ -97,7 +103,7 @@ def test_glm51_r3_validator_reports_improvement_and_learning_signal() -> None:
 @pytest.mark.parametrize(
     "metrics",
     [
-        _metrics(kl=0.01),
+        _metrics(kl=0.001),
         _metrics(signal_steps=7),
         _metrics(token_mult=1.02),
     ],
@@ -127,6 +133,34 @@ def test_glm51_r3_validator_summarizes_direct_logprob_tails(tmp_path: Path) -> N
     assert summary["per_step"]["1"]["max_abs"] == 2.0
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [
+        {"total_tokens": 1_000_000, "count_gt_0_5": 100, "count_gt_1_0": 0},
+        {"total_tokens": 1_000_000, "count_gt_0_5": 1, "count_gt_1_0": 1},
+    ],
+)
+def test_glm51_r3_validator_rejects_logprob_tails(summary: dict) -> None:
+    with pytest.raises(ValueError):
+        validate_logprob_tails(summary)
+
+
+def test_glm51_r3_validator_accepts_observed_r3_tail() -> None:
+    summary = validate_logprob_tails(
+        {"total_tokens": 1_291_712, "count_gt_0_5": 4, "count_gt_1_0": 0}
+    )
+
+    assert summary["fraction_gt_0_5"] < 1.0e-4
+
+
+def test_glm51_r3_validator_rejects_old_truncation_regime() -> None:
+    metrics = _metrics()
+    metrics["train/truncation_rate"] = {str(step): 0.95 for step in range(1, 11)}
+
+    with pytest.raises(ValueError, match="truncates too many"):
+        validate_metrics(metrics)
+
+
 def test_glm51_r3_launcher_uses_cluster_and_route_safety_controls() -> None:
     submitter = (
         REPO_ROOT / "infra/slurm/cscs/autoresearch/submit_glm51_r3_10step.sh"
@@ -142,7 +176,13 @@ def test_glm51_r3_launcher_uses_cluster_and_route_safety_controls() -> None:
     assert "--mem=850000M" in submitter
     assert "NRL_ROUTER_REPLAY_VALIDATE=1" in runner
     assert "NRL_R3_TRACE_VERIFY_FORWARD=1" in runner
+    assert "--transport-contract legacy-async" in runner
     assert "--require-forward-verify" in runner
+    assert "--require-cp-identity" in runner
     assert "R3 router replay fallback:" in runner
     assert "--train-data-dir" in runner
     assert "checkpointing_enabled" in runner
+    assert "trap write_failure_terminal EXIT" in runner
+    assert '"failure_phase"' in runner
+    assert "RUN_DIR=$RUN_ROOT/${NRL_SLURM_JOB_ID:?}" in runner
+    assert "Refusing to reuse GLM attempt directory" in runner

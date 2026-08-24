@@ -84,3 +84,19 @@
 - User requested deeper analysis of the `0.0027` GLM generation KL and a ten-step run rather than relying on one checkpoint step.
 - Recovered the ten-step R3-off body from job `3147936`. Per-step KL ranged from `0.0022966` to `0.0027089` with mean about `0.00250`; however, token-multiplicative-error tails were severe. Applying both token and sample loss masks leaves 3,858,221 valid tokens: 7,873 had `abs(delta log p) > 0.5`, 570 exceeded `1.0`, and the maximum reached `37.7257`.
 - Decision: run a fresh TP2 ten-step R3-on experiment from the merged stack, not from the route-less saved replay buffer. Gate average metrics, tail metrics, route trace integrity, learning signal and clean finalization; disable checkpointing and preserve the complete checkpoint and reservation.
+
+## 2026-08-24 11:16 CEST
+
+- Job `3171492` completed ten TP2/PP18/EP16 legacy-async GRPO steps with TP32/EP32 vLLM and Router Replay enabled. Per-step generation KL was `0.0003615-0.0004061` (mean `0.0003876`), versus the R3-off control mean `0.00250`.
+- Direct masked-token evidence improved from 7,873 errors above `0.5`, 570 above `1.0`, and maximum `37.7` in the control to four above `0.5`, zero above `1.0`, and maximum `0.676` across 1,291,712 valid tokens.
+- Only five steps carried learning signal. Response truncation was `94.5-100%` per step under the 1536-total / 1024-new-token envelope; the next experiment will use 2048 total / 1536 new tokens and retain the strict eight-of-ten signal gate.
+- The training process printed `Async GRPO training complete!`; the wrapper failed afterward because its trace checker assumed the SingleController/TransferQueue event schema. The legacy async path correctly emitted Router Replay assignment/action/forward-verification and CP-identity records but no TransferQueue producer/fetch records. This is a harness contract bug, not a model or training failure.
+- A broader path audit is in progress before the rerun: make the trace transport contract explicit and reject unsupported legacy-async plus data-plane configurations before expensive setup.
+
+## 2026-08-24 publication preparation
+
+- Implemented explicit `legacy-async` and `transfer-queue` Router Replay trace contracts. Legacy async now rejects TransferQueue records, while the SingleController contract requires producer/fetch integrity and every expected forward stage.
+- Centralized test-suite completion handling so direct/final runs require `train/loss` through `MAX_STEPS`, chained intermediate runs remain valid, and original nonzero exit codes are preserved. GLM artifacts are now isolated by Slurm job ID to prevent stale evidence reuse.
+- Strengthened the next GLM gate to 2048 total / 1536 generated tokens, at least eight learning-signal and nonzero-loss steps, mean truncation below 0.9, no valid-token error above 1.0, and fewer than 1e-4 above 0.5.
+- Added fail-fast entrypoint and SingleController config validation, including unsupported transport/backend combinations and formerly accepted no-op controls. Applied configured GRPO advantage clipping in the SingleController training path.
+- Current-source compilation, shell syntax, diff hygiene, and 13 pure trace/completion unit tests passed. Dependency-bearing tests remain an exact-image gate because host Python lacks Ray.

@@ -22,13 +22,24 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 - [x] Runtime-prove nonzero reference KL (`0.0025` after restore/refit in `3169314`).
 - [x] Publish the runtime-proven checkpoint and integration changes through NeMo-RL PR #26.
 - [ ] Run representative endurance as a separate production gate.
-- [ ] Characterize GLM train-vs-rollout mismatch over ten R3-enabled steps, including tail probability error and route integrity.
+- [x] Characterize GLM train-vs-rollout mismatch over ten R3-enabled steps, including tail probability error and route integrity.
+- [x] Close the false-red legacy-async versus TransferQueue trace contract and reject unsupported mixed entrypoint configurations before setup.
+- [ ] Repeat ten R3-enabled steps with a 2048-token sequence / 1536-token response envelope to obtain representative learning-signal evidence.
 
 ## Current subtask (2026-08-24 09:28 CEST)
 
 - Run a fresh ten-step TP2/PP18/EP16 async-GRPO experiment with TP32/EP32 vLLM and `policy.router_replay.enabled=true`.
 - Compare all ten KL and token-probability-error values with the preserved R3-off ten-step body from job `3147936`, whose KL mean was about `0.00250` but whose 3,858,221 valid training tokens included 7,873 `abs(delta log p) > 0.5`, 570 above `1.0`, and a maximum of `37.7`.
 - Require strict route validation, a verified route trace, no missing-route fallback, at least eight learning-signal steps, and a clean terminal artifact. Do not write a new checkpoint or mutate the valid TP2 checkpoint.
+
+## R3 characterization result (2026-08-24 11:16 CEST)
+
+- Job `3171492` completed all ten legacy-async GRPO training steps. Router Replay reduced generation KL from the historical R3-off mean `0.00250` to `0.000388`; all ten steps were below `0.000407`. Across 1,291,712 valid tokens only four had `abs(delta log p) > 0.5`, none exceeded `1.0`, and the maximum was `0.676`.
+- The Slurm job was false-red after successful training: `tools/check_r3_trace.py` unconditionally required SingleController/TransferQueue producer and fetch events, while this recipe deliberately runs `examples.run_grpo` with `data_plane.enabled=false` and the legacy in-memory ReplayBuffer. Its 269,952 route records included assignments, actions, forward-verifier matches and CP identity, but TransferQueue records cannot exist on this path.
+- Learning evidence remains insufficient: only five of ten steps had nonzero reward/advantage/loss because 94.5-100% of responses were truncated at the 1024-token generation cap. The next rung extends the response envelope rather than weakening the eight-of-ten learning-signal gate.
+- The entrypoint audit found a related fail-open seam: `examples.run_grpo` can construct a TransferQueue policy for `async_grpo.enabled=true` plus `data_plane.enabled=true`, then call the legacy async trainer whose in-memory ReplayBuffer does not consume that transport. The unsupported mixed configuration must fail before Ray and actor setup.
+- The harness now selects an explicit `legacy-async` or `transfer-queue` trace contract, isolates every Slurm job's artifacts, and centralizes suite completion checks so a zero exit without `train/loss` at the configured final step cannot be reported as complete. Entrypoints reject incompatible transport and unsupported SingleController knobs before Ray setup; configured GRPO advantage clipping is now applied instead of accepted as a no-op.
+- Focused current-source validation is green: Python compilation, shell syntax, `git diff --check`, and 13 pure trace/completion tests passed. The dependency-bearing changed-path suite still needs the exact image because this host Python does not provide Ray.
 
 ## Published checkpoint status
 
