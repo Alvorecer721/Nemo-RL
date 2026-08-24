@@ -21,7 +21,10 @@ import pytest
 from examples import run_grpo_single_controller
 from nemo_rl.algorithms.grpo import GRPOConfig
 from nemo_rl.algorithms.metric_utils import SetupTimingMetrics
-from nemo_rl.algorithms.single_controller_utils.config import MasterConfig
+from nemo_rl.algorithms.single_controller_utils.config import (
+    AsyncRLConfig,
+    MasterConfig,
+)
 
 
 @pytest.fixture
@@ -33,15 +36,22 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             "generation": generation_config,
             "draft": {"enabled": False},
             "megatron_cfg": {"mtp_num_layers": 2},
+            "train_global_batch_size": 128,
         },
         env={},
         data_plane={"enabled": True},
         logger={"log_dir": "/tmp/logs"},
-        checkpointing={"enabled": False},
-        async_rl=SimpleNamespace(
-            stall_watchdog=SimpleNamespace(interval_s=30.0, stall_timeout_s=600.0)
+        checkpointing={"enabled": False, "metric_name": None},
+        loss_fn=SimpleNamespace(
+            reference_policy_kl_penalty=0,
+            use_importance_sampling_correction=True,
+            force_on_policy_ratio=False,
         ),
-        grpo=GRPOConfig(async_grpo=None),
+        async_rl=AsyncRLConfig(
+            min_groups_for_streaming_train=32,
+            max_buffered_rollouts=64,
+        ),
+        grpo=GRPOConfig(async_grpo=None, num_generations_per_prompt=4),
     )
     configured_generation = {"backend": "vllm", "_mtp_weights_from_refit": True}
     configure_generation = MagicMock(return_value=configured_generation)

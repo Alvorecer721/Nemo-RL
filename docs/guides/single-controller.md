@@ -172,6 +172,12 @@ The SC path is still under active development. Feature gaps are tracked in [issu
 
 - Train backend: only Megatron is supported and validated; the AutoModel training path has not been tested on SC.
 - Generation backend: only vLLM is supported and validated; Megatron generation, SGLang, and TRT-LLM have not been tested on SC.
-- Checkpointing and validation are not yet supported (setup raises if enabled).
+- Checkpointing is supported, including policy/optimizer, dataloader, replay-buffer,
+  replacement-reserve, and training-state recovery. Validation is not yet supported;
+  setup raises when `val_period`, `val_at_start`, or `val_at_end` enables it.
+- Dynamic sampling, reward scaling/shaping, overlong filtering, message-level
+  advantage/reward penalties, multimodal payload deduplication, and on-policy
+  distillation are not implemented by the SC pumps. Active settings fail during
+  entrypoint validation instead of being silently ignored.
 - The `windowed` sampler has no `over_sampling_ratio` cap — over-produced groups aged past the window are evicted, wasting rollout compute.
 - The drain gate in refit is not yet supported.

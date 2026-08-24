@@ -64,6 +64,7 @@ def _make_master_config(
             "train": [{"env_name": "math"}],
         },
         grpo=GRPOConfig.model_construct(
+            async_grpo=None,
             seed=42,
             max_num_steps=max_num_steps,
             max_num_epochs=max_num_epochs,
@@ -225,6 +226,13 @@ def test_build_clusters_rejects_non_colocated_megatron_generation():
 
 class TestSetup:
     """setup arg validation + actor_args assembly."""
+
+    def test_rejects_legacy_async_block(self):
+        mc = _make_master_config()
+        mc.grpo.async_grpo = GRPOConfig().async_grpo
+
+        with pytest.raises(ValueError, match="grpo.async_grpo: null"):
+            setup_single_controller(mc, MagicMock())
 
     def test_raises_when_data_plane_disabled(self):
         mc = _make_master_config(dp_enabled=False)

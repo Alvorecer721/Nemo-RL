@@ -34,6 +34,7 @@ from nemo_rl.algorithms.single_controller_utils import (
     MasterConfig,
     WatchdogConfig,
     setup_single_controller,
+    validate_single_controller_config,
 )
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.distributed.virtual_cluster import init_ray
@@ -104,6 +105,10 @@ def main() -> None:
             "run_grpo_single_controller requires data_plane.enabled=true. "
             "Use examples/run_grpo.py for the legacy / sync paths."
         )
+
+    # Cross-section no-op and compatibility checks belong before Ray or model
+    # setup. setup_single_controller repeats this defensively for library callers.
+    validate_single_controller_config(config)
 
     print("Final config:")
     pprint.pprint(config)
