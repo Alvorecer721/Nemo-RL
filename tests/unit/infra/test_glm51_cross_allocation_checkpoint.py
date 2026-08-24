@@ -119,6 +119,10 @@ def test_glm51_checkpoint_launcher_uses_cluster_safety_controls() -> None:
     assert 'SBATCH_RESERVATION_ARGS+=(--reservation="$GLM_RESERVATION")' in launcher
     assert '--nodes="$GLM_NUM_NODES"' in launcher
     assert "GLM_PHASE_A_TERMINAL" in launcher
+    assert 'git -C "$REPO_DIR" submodule status --recursive' in launcher
+    assert (
+        "Submodules are uninitialized or do not match the recorded gitlinks" in launcher
+    )
 
 
 def test_glm51_checkpoint_runner_captures_rank_writer_failures() -> None:

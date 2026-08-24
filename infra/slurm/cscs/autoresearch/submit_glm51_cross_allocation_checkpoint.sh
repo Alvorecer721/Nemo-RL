@@ -34,6 +34,12 @@ CACHE_METADATA=$(find "$GLM_MEGATRON_CACHE" -mindepth 2 -maxdepth 3 -type f -nam
 [[ -n "$CACHE_METADATA" && -r "$CACHE_METADATA" ]] || { echo "Missing Megatron cache: $GLM_MEGATRON_CACHE" >&2; exit 1; }
 SOURCE_STATUS=$(git -C "$REPO_DIR" status --porcelain --untracked-files=no --ignore-submodules=untracked)
 [[ -z "$SOURCE_STATUS" ]] || { echo "Tracked source is dirty: $SOURCE_STATUS" >&2; exit 1; }
+SUBMODULE_STATUS=$(git -C "$REPO_DIR" submodule status --recursive)
+INVALID_SUBMODULES=$(printf '%s\n' "$SUBMODULE_STATUS" | awk 'substr($0, 1, 1) == "-" || substr($0, 1, 1) == "+"')
+[[ -z "$INVALID_SUBMODULES" ]] || {
+  echo "Submodules are uninitialized or do not match the recorded gitlinks: $INVALID_SUBMODULES" >&2
+  exit 1
+}
 if [[ "$PHASE" == "save" ]]; then
   [[ ! -e "$GLM_RESUME_CHECKPOINT_DIR" ]] || { echo "Refusing existing checkpoint namespace: $GLM_RESUME_CHECKPOINT_DIR" >&2; exit 1; }
   WALLTIME=06:00:00
