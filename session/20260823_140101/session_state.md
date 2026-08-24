@@ -32,6 +32,13 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 - Compare all ten KL and token-probability-error values with the preserved R3-off ten-step body from job `3147936`, whose KL mean was about `0.00250` but whose 3,858,221 valid training tokens included 7,873 `abs(delta log p) > 0.5`, 570 above `1.0`, and a maximum of `37.7`.
 - Require strict route validation, a verified route trace, no missing-route fallback, at least eight learning-signal steps, and a clean terminal artifact. Do not write a new checkpoint or mutate the valid TP2 checkpoint.
 
+## SingleController characterization (2026-08-24 18:28 CEST)
+
+- The ten-step legacy-async control completed training but failed its final learning-quality gate because 94.77% of responses were truncated; its R3 transport evidence itself is complete and clean.
+- The next experiment changes orchestration to the current SingleController + TransferQueue path and extends the response envelope to 3072 total / 2560 generated tokens. It preserves the exact 80-node TP2/PP18/EP16 Megatron and TP32/EP32 vLLM topology.
+- Start with a one-step runtime characterization. Require in-image Pydantic validation, TransferQueue producer/fetch integrity, verified R3 forward replay and CP identity, generation KL below 0.001, token multiplier below 1.02, positive valid-token count, and a clean terminal artifact before launching the ten-step gate.
+- Host-side Pydantic validation is unavailable because the login Python does not include Ray; this is expected and the same validation runs inside the certified image before Ray setup.
+
 ## PR #27 exact-image gate (2026-08-24 15:32 CEST)
 
 - Exact-image job `3173736` ran the broad changed-path selection from `5143b429d`: 242 tests passed before `test_sc_checkpointing.py::TestSetupResumeWiring::test_setup_forwards_latest_resume_paths` failed.

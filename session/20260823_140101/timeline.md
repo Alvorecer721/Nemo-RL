@@ -106,3 +106,9 @@
 - Submitted exact-image changed-path job `3173736` from PR head `5143b429d`. It started Ray and passed 242 tests before the broad SingleController suite exposed one stale fixture: `_setup_master_config` modeled the new SingleController path but inherited the default legacy `grpo.async_grpo` block.
 - Decision: preserve the production fail-fast guard, set `async_grpo=None` in that fixture as the nearest SingleController fixture already does, and rerun the full exact-image gate from a new committed head. The 80-node GLM run remains held until the rerun exits green.
 - Committed and pushed the fixture correction as `dfc9e50bb`. Exact-image rerun `3173779` passed all 420 tests and Ruff check, then failed closed on Ruff format for a single existing PR-side line in `test_resiliency_config.py`. Exact-image job `3173814` applied only Ruff's mechanical reflow and completed `0:0`; a new immutable-head full rerun is next.
+
+## 2026-08-24 18:28 CEST
+
+- Preserved the complete ten-step legacy-async run as the Router Replay control: all ten train steps completed, mean generation KL was `0.0003867`, and only one of 1,918,607 valid tokens exceeded absolute logprob delta `0.5`; the terminal failure was the independent 94.77% response-truncation gate.
+- Decided to certify the current SingleController + TransferQueue path instead of rerunning legacy async. Prepared an ignored one-step probe at `.tmp/glm51-sc-probe/` with the same 80-node GLM topology, a 3072/2560-token envelope, R3 validation, and fail-closed terminal checks.
+- Host config validation stopped at the known environment boundary (`ModuleNotFoundError: ray`). The probe repeats Pydantic construction and cross-section validation inside the certified image before actor setup.
