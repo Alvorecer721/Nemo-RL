@@ -22,8 +22,18 @@ from pathlib import Path
 from typing import Any
 
 EXPECTED_STEPS = 10
-GLM_KL_SAFETY_CEILING = 0.01
+# R3-on job 3171492 stayed between 0.0003615 and 0.0004061 for all ten
+# steps. A 0.001 ceiling retains more than 2x headroom while rejecting the
+# historical R3-off 0.00230-0.00271 regime.
+GLM_KL_SAFETY_CEILING = 0.001
 R3_TOKEN_MULT_MEDIAN_CEILING = 1.02
+# R3-on job 3171492 had 4/1,291,712 valid tokens above 0.5 and none above
+# 1.0. The historical R3-off run had 7,873 above 0.5 and 570 above 1.0.
+R3_ABS_LOGPROB_GT_0_5_FRACTION_CEILING = 1.0e-4
+# The 1024-token response envelope truncated 94.5-100% of each batch. The
+# stronger rung is only representative if its larger envelope materially
+# changes that regime rather than merely accumulating more truncated tokens.
+TRUNCATION_RATE_MEAN_CEILING = 0.9
 HISTORICAL_R3_OFF_KL = (
     0.0026317706797271967,
     0.0025273626670241356,
@@ -141,6 +151,29 @@ def summarize_logprob_tails(train_data_dir: Path) -> dict[str, Any]:
     }
 
 
+def validate_logprob_tails(summary: dict[str, Any]) -> dict[str, Any]:
+    total_tokens = int(summary["total_tokens"])
+    count_gt_0_5 = int(summary["count_gt_0_5"])
+    count_gt_1_0 = int(summary["count_gt_1_0"])
+    if total_tokens <= 0:
+        raise ValueError("Per-token logprob evidence contains no valid tokens")
+    fraction_gt_0_5 = count_gt_0_5 / total_tokens
+    if count_gt_1_0:
+        raise ValueError(
+            "Router Replay left valid tokens with abs(delta log p) > 1.0: "
+            f"count={count_gt_1_0}/{total_tokens}"
+        )
+    if fraction_gt_0_5 >= R3_ABS_LOGPROB_GT_0_5_FRACTION_CEILING:
+        raise ValueError(
+            "Router Replay per-token tail exceeded its safety envelope: "
+            f"count_gt_0_5={count_gt_0_5}/{total_tokens} "
+            f"({fraction_gt_0_5:.6g}), required < "
+            f"{R3_ABS_LOGPROB_GT_0_5_FRACTION_CEILING}"
+        )
+    summary["fraction_gt_0_5"] = fraction_gt_0_5
+    return summary
+
+
 def validate_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     kl = _series(metrics, "train/gen_kl_error")
     token_mult = _series(metrics, "train/token_mult_prob_error")
@@ -149,6 +182,7 @@ def validate_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     reward = _series(metrics, "train/reward")
     advantage_min = _series(metrics, "train/advantages/min")
     advantage_max = _series(metrics, "train/advantages/max")
+    truncation_rate = _series(metrics, "train/truncation_rate")
 
     if min(kl) < 0 or max(kl) >= GLM_KL_SAFETY_CEILING:
         raise ValueError(
@@ -169,6 +203,19 @@ def validate_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         )
     if min(js) < 0:
         raise ValueError(f"JS divergence cannot be negative: min={min(js):.6g}")
+    truncation_mean = statistics.fmean(truncation_rate)
+    if min(truncation_rate) < 0 or max(truncation_rate) > 1:
+        raise ValueError(
+            "Truncation rate must stay in [0, 1]: "
+            f"min={min(truncation_rate):.6g}, max={max(truncation_rate):.6g}"
+        )
+    if truncation_mean >= TRUNCATION_RATE_MEAN_CEILING:
+        raise ValueError(
+            "Response envelope still truncates too many trajectories for a "
+            "representative learning run: "
+            f"mean={truncation_mean:.6g}, required < "
+            f"{TRUNCATION_RATE_MEAN_CEILING}"
+        )
 
     signal_steps = sum(
         low < 0 < high for low, high in zip(advantage_min, advantage_max, strict=True)
@@ -209,6 +256,11 @@ def validate_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "learning_signal_steps": signal_steps,
         "nonzero_loss_steps": nonzero_loss_steps,
         "positive_reward_steps": sum(value > 0 for value in reward),
+        "truncation_rate": {
+            "min": min(truncation_rate),
+            "max": max(truncation_rate),
+            "mean": truncation_mean,
+        },
     }
 
 
@@ -221,7 +273,9 @@ def main() -> int:
 
     metrics = json.loads(args.metrics.read_text())
     summary = validate_metrics(metrics)
-    summary["per_token_logprob_tails"] = summarize_logprob_tails(args.train_data_dir)
+    summary["per_token_logprob_tails"] = validate_logprob_tails(
+        summarize_logprob_tails(args.train_data_dir)
+    )
     args.output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
