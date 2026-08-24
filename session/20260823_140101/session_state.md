@@ -39,6 +39,14 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 - Start with a one-step runtime characterization. Require in-image Pydantic validation, TransferQueue producer/fetch integrity, verified R3 forward replay and CP identity, generation KL below 0.001, token multiplier below 1.02, positive valid-token count, and a clean terminal artifact before launching the ten-step gate.
 - Host-side Pydantic validation is unavailable because the login Python does not include Ray; this is expected and the same validation runs inside the certified image before Ray setup.
 
+## SingleController runtime result (2026-08-24 23:10 CEST)
+
+- One-step job `3175340` passed in-image config validation, built all 160 role environments, completed the initial Megatron-to-vLLM NCCL reshard refit in 5.817 seconds, generated all 16 prompt groups, and delivered one batch through TransferQueue.
+- The run failed before prev-logprob computation and training step 1. `TQWorkerMixin._broadcast_batched_data_dict` passed the Router Replay `routed_experts` tensor directly to NCCL as `torch.int16`; NCCL rejected `Short` with `TypeError: Input tensor data type is not supported for NCCL process group: Short`.
+- The R3 trace proves the failing payload field is `routed_experts`, shaped `[8, 2171, 78, 8]` and stored as `torch.int16`. This is an upstream-combination defect: compact R3 route storage and TransferQueue leader-broadcast are both inherited from upstream, but their combined NCCL path has no dtype-compatibility coverage.
+- Current fix contract: preserve the compact logical dtype and exact bits outside the collective, carry unsupported `int16` tensors as raw NCCL-supported bytes only during broadcast, restore the original device/dtype for every recipient, add CPU plus real NCCL regression coverage, then repeat the one-step gate before any ten-step launch.
+- The candidate implements that contract and adds Gloo plus two-GPU NCCL round trips. Exact-image job `3178396` showed Torch 2.11 Gloo rejects `Short` too, so the candidate uses the exact-byte wire for int16 on every process-group backend. Corrected job `3178422` passed Ruff, formatting, Gloo and real two-GPU NCCL coverage: 3 tests passed. The 80-node one-step gate is next.
+
 ## PR #27 exact-image gate (2026-08-24 15:32 CEST)
 
 - Exact-image job `3173736` ran the broad changed-path selection from `5143b429d`: 242 tests passed before `test_sc_checkpointing.py::TestSetupResumeWiring::test_setup_forwards_latest_resume_paths` failed.
