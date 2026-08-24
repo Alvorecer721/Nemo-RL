@@ -1,8 +1,8 @@
 # Session State
 
 - Goal: turn the GLM-5.1 scale prototype into production evidence for optimizer checkpoint completion, fresh-allocation resume, reference KL, and endurance.
-- Branch: `autoresearch/2026-08-24-glm51-tp2-cpu-placeholder`
-- Base: `b23a0d582`
+- Branch: `main`
+- Published merge: NeMo-RL PR #26, `c85af58d9aa815504e006e736df6dc16042ee76c`
 - Certified image: `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus-vllm-0.25.1-8f22e59195f5-2a9bd7b13c00.aarch64.sqsh`
 - Reservation: `SD-69241-apertus-1-5-0`, expires 2026-08-31 12:00 CEST. Do not cancel it.
 - Historical incomplete checkpoint and the 1.488-TB conversion cache are preservation boundaries.
@@ -20,14 +20,15 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 - [x] Runtime-attribute the checkpoint loss to strict per-worker NUMA memory binding and replace it with preferred-local placement that allows fallback.
 - [x] Complete a 288-rank GLM optimizer save and fresh-allocation resume. TP2 Phase A `3168499` wrote a complete 8.946-TB DCP checkpoint; patched Phase B `3169314` restored it and trained the next step.
 - [x] Runtime-prove nonzero reference KL (`0.0025` after restore/refit in `3169314`).
-- [ ] Run representative endurance and publish only runtime-proven changes.
+- [x] Publish the runtime-proven checkpoint and integration changes through NeMo-RL PR #26.
+- [ ] Run representative endurance as a separate production gate.
 
-## Current subtask (2026-08-24 02:47 CEST)
+## Current subtask (2026-08-24 03:36 CEST)
 
-- MCore PR #1 is merged at `9c82d4cad8c2aba345903cefee56989ba46f7013`; Bridge PR #5 is merged at `6b24b9e7944300a2a908c4e710841a679d435b95`, and this NeMo branch pins that Bridge commit.
-- Keep the valid TP2 checkpoint until PR evidence and integration pins are safely recorded.
+- MCore PR #1 is merged at `9c82d4cad8c2aba345903cefee56989ba46f7013`; Bridge PR #5 is merged at `6b24b9e7944300a2a908c4e710841a679d435b95`; NeMo-RL PR #26 is merged at `c85af58d9aa815504e006e736df6dc16042ee76c` and pins that Bridge commit.
+- Keep the valid TP2 checkpoint for endurance and future scale validation even though publication is complete.
 - Preserve reservation `SD-69241-apertus-1-5-0` and the reusable 1.488-TB model-conversion cache.
-- Publish the NeMo-RL branch and run its CI; the source overlay remains validation machinery, not the production install contract.
+- Main is level with `origin/main`; only the main NeMo worktree remains. The source overlay remains validation machinery, not the production install contract.
 
 ## Loaded skills
 
@@ -46,4 +47,4 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 - [x] Add a launcher preflight so uninitialized or mismatched recursive submodules fail before node allocation (`558dd58b5` after DCO replay; focused tests 10/10, Ruff and `bash -n` clean).
 - [x] Merge the clean MCore fix through fork PR #1, merge its Bridge gitlink through fork PR #5, and pin the merged Bridge SHA in NeMo-RL.
 - [x] Relock with image-owned uv 0.11.28 in job `3169750`; 549 packages resolved in 1.04 seconds and `uv.lock` remained byte-identical.
-- [ ] Publish the NeMo-RL branch, trigger CI with its full commit SHA, and address only substantive failures.
+- [x] Publish NeMo-RL PR #26, trigger CI at the full commit SHA, fix the copyright failure, and merge after every substantive check passed. The lone red check was the fork-only PR-comment publisher; its underlying submodule check passed.
