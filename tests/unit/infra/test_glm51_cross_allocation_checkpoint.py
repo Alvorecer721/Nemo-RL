@@ -20,7 +20,6 @@ from omegaconf import OmegaConf
 from nemo_rl.algorithms.grpo import MasterConfig
 from nemo_rl.utils.config import load_config, register_omegaconf_resolvers
 
-
 REPO_ROOT = Path(__file__).parents[3]
 RECIPE_ROOT = REPO_ROOT / "examples/configs/recipes/llm/autoresearch"
 

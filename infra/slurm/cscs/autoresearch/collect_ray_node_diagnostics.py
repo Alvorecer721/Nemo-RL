@@ -13,7 +13,6 @@ from pathlib import Path
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-
 CGROUP_FILES = (
     "memory.current",
     "memory.max",
