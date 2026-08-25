@@ -95,6 +95,7 @@ def reduce_advantage_pump_metrics(
     masked_advantages: list[torch.Tensor],
     sequence_lengths: list[int],
     seq_logprob_error_metrics: list[dict[str, float]] | None = None,
+    token_logprob_tail_metrics: list[dict[str, float]] | None = None,
 ) -> dict[str, float]:
     """Reduce per-step accumulators from _advantage_stage into step scalars.
 
@@ -104,6 +105,8 @@ def reduce_advantage_pump_metrics(
         sequence_lengths: All input_lengths trained on this step.
         seq_logprob_error_metrics: Sequence-error metrics and their aggregation
             counts, one record per streaming chunk.
+        token_logprob_tail_metrics: Compact valid-token absolute log-probability
+            error statistics, one record per streaming chunk.
 
     Returns:
         Step-level reward, advantage, token-count, and optional sequence
@@ -126,7 +129,45 @@ def reduce_advantage_pump_metrics(
         out["total_num_tokens"] = float(sum(sequence_lengths))
     if seq_logprob_error_metrics:
         out.update(_reduce_seq_logprob_error_metrics(seq_logprob_error_metrics))
+    if token_logprob_tail_metrics:
+        out.update(_reduce_token_logprob_tail_metrics(token_logprob_tail_metrics))
     return out
+
+
+def compute_token_logprob_tail_metrics(
+    generation_logprobs: torch.Tensor,
+    prev_logprobs: torch.Tensor,
+    token_mask: torch.Tensor,
+    sample_mask: torch.Tensor,
+) -> dict[str, float]:
+    """Summarize valid-token generation/training log-probability differences."""
+    errors = torch.abs(generation_logprobs[:, 1:] - prev_logprobs[:, 1:])
+    mask = token_mask[:, 1:].bool() & sample_mask.unsqueeze(-1).bool()
+    valid_errors = torch.masked_select(errors, mask)
+    if valid_errors.numel() and not torch.isfinite(valid_errors).all():
+        raise ValueError("valid-token log-probability errors must be finite")
+    return {
+        "valid_tokens": float(valid_errors.numel()),
+        "sum_abs": float(valid_errors.sum()),
+        "max_abs": float(valid_errors.max()) if valid_errors.numel() else 0.0,
+        "count_gt_0_5": float((valid_errors > 0.5).sum()),
+        "count_gt_1_0": float((valid_errors > 1.0).sum()),
+    }
+
+
+def _reduce_token_logprob_tail_metrics(
+    records: list[dict[str, float]],
+) -> dict[str, float]:
+    """Reduce compact valid-token tail statistics across streaming chunks."""
+    valid_tokens = sum(record["valid_tokens"] for record in records)
+    sum_abs = sum(record["sum_abs"] for record in records)
+    return {
+        "logprob_tail/valid_tokens": valid_tokens,
+        "logprob_tail/mean_abs": sum_abs / valid_tokens if valid_tokens else 0.0,
+        "logprob_tail/max_abs": max(record["max_abs"] for record in records),
+        "logprob_tail/count_gt_0_5": sum(record["count_gt_0_5"] for record in records),
+        "logprob_tail/count_gt_1_0": sum(record["count_gt_1_0"] for record in records),
+    }
 
 
 def _reduce_seq_logprob_error_metrics(

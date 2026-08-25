@@ -20,6 +20,7 @@ from omegaconf import OmegaConf
 
 from infra.slurm.cscs.autoresearch.validate_glm51_r3_10step import (
     summarize_logprob_tails,
+    summarize_logprob_tails_from_metrics,
     validate_logprob_tails,
     validate_metrics,
 )
@@ -131,6 +132,30 @@ def test_glm51_r3_validator_summarizes_direct_logprob_tails(tmp_path: Path) -> N
     assert summary["count_gt_0_5"] == 20
     assert summary["count_gt_1_0"] == 10
     assert summary["per_step"]["1"]["max_abs"] == 2.0
+
+
+def test_glm51_r3_validator_summarizes_single_controller_tail_metrics() -> None:
+    metrics = _metrics()
+    metrics.update(
+        {
+            "train/logprob_tail/valid_tokens": {
+                str(step): 1000 for step in range(1, 11)
+            },
+            "train/logprob_tail/mean_abs": {str(step): 0.01 for step in range(1, 11)},
+            "train/logprob_tail/max_abs": {str(step): 0.6 for step in range(1, 11)},
+            "train/logprob_tail/count_gt_0_5": {
+                str(step): int(step == 1) for step in range(1, 11)
+            },
+            "train/logprob_tail/count_gt_1_0": {str(step): 0 for step in range(1, 11)},
+        }
+    )
+
+    summary = summarize_logprob_tails_from_metrics(metrics)
+
+    assert summary["total_tokens"] == 10_000
+    assert summary["count_gt_0_5"] == 1
+    assert summary["count_gt_1_0"] == 0
+    assert summary["per_step"]["1"]["max_abs"] == pytest.approx(0.6)
 
 
 @pytest.mark.parametrize(

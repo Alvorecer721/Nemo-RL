@@ -63,6 +63,7 @@ from nemo_rl.algorithms.single_controller_utils.config import (
 from nemo_rl.algorithms.single_controller_utils.setup import SingleControllerActorArgs
 from nemo_rl.algorithms.single_controller_utils.utils import (
     aggregate_step_metrics,
+    compute_token_logprob_tail_metrics,
     fields_for_put,
     reduce_advantage_pump_metrics,
     squeeze_trailing_unit_dim,
@@ -262,6 +263,7 @@ class SingleControllerActor:
             "masked_advantages": [],
             "sequence_lengths": [],
             "seq_logprob_error_metrics": [],
+            "token_logprob_tail_metrics": [],
         }
 
         print(
@@ -1738,6 +1740,14 @@ class SingleControllerActor:
                 seq_logprob_error_threshold=seq_logprob_error_threshold,
             )
             sample_mask = masking_data["sample_mask"]
+            self._step_log_dict["token_logprob_tail_metrics"].append(
+                compute_token_logprob_tail_metrics(
+                    generation_logprobs=masking_data["generation_logprobs"],
+                    prev_logprobs=masking_data["prev_logprobs"],
+                    token_mask=masking_data["token_mask"],
+                    sample_mask=sample_mask,
+                )
+            )
             num_valid_seqs_after = float(
                 ((token_mask[:, 1:] * sample_mask.unsqueeze(-1)).sum(dim=-1) > 0)
                 .sum()

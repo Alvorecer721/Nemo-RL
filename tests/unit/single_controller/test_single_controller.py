@@ -352,6 +352,7 @@ def test_advantage_stage_applies_seq_logprob_error_mask_before_streaming_train(
         "masked_advantages": [],
         "sequence_lengths": [],
         "seq_logprob_error_metrics": [],
+        "token_logprob_tail_metrics": [],
     }
     meta = KVBatchMeta(
         partition_id="rollout_data",
@@ -380,6 +381,16 @@ def test_advantage_stage_applies_seq_logprob_error_mask_before_streaming_train(
     assert metrics[0]["num_masked_seqs_by_logprob_error"] == 1
     assert metrics[0]["max_seq_mult_prob_error"] == pytest.approx(math.e)
     assert metrics[0]["max_seq_mult_prob_error_after_mask"] == pytest.approx(1.0)
+    tails = ctrl._step_log_dict["token_logprob_tail_metrics"]
+    assert tails == [
+        {
+            "valid_tokens": 12.0,
+            "sum_abs": 0.0,
+            "max_abs": 0.0,
+            "count_gt_0_5": 0.0,
+            "count_gt_1_0": 0.0,
+        }
+    ]
     assert "advantages" in (result_meta.fields or [])
 
 
@@ -416,6 +427,7 @@ def test_advantage_stage_reports_seq_logprob_metrics_without_masking() -> None:
         "masked_advantages": [],
         "sequence_lengths": [],
         "seq_logprob_error_metrics": [],
+        "token_logprob_tail_metrics": [],
     }
     meta = KVBatchMeta(
         partition_id="rollout_data",
@@ -439,6 +451,12 @@ def test_advantage_stage_reports_seq_logprob_metrics_without_masking() -> None:
     assert metrics[0]["num_masked_seqs_by_logprob_error"] == 0
     assert metrics[0]["max_seq_mult_prob_error"] == pytest.approx(math.e)
     assert metrics[0]["max_seq_mult_prob_error_after_mask"] == pytest.approx(math.e)
+    tails = ctrl._step_log_dict["token_logprob_tail_metrics"]
+    assert tails[0]["valid_tokens"] == 8
+    assert tails[0]["sum_abs"] == pytest.approx(4.0)
+    assert tails[0]["max_abs"] == pytest.approx(1.0)
+    assert tails[0]["count_gt_0_5"] == 4
+    assert tails[0]["count_gt_1_0"] == 0
 
 
 def test_advantage_stage_skips_estimator_when_seq_mask_removes_whole_chunk(
@@ -476,6 +494,7 @@ def test_advantage_stage_skips_estimator_when_seq_mask_removes_whole_chunk(
         "masked_advantages": [],
         "sequence_lengths": [],
         "seq_logprob_error_metrics": [],
+        "token_logprob_tail_metrics": [],
     }
     meta = KVBatchMeta(
         partition_id="rollout_data",
@@ -527,6 +546,7 @@ def test_advantage_stage_skips_preexisting_empty_mask_without_seq_threshold() ->
         "masked_advantages": [],
         "sequence_lengths": [],
         "seq_logprob_error_metrics": [],
+        "token_logprob_tail_metrics": [],
     }
     meta = KVBatchMeta(
         partition_id="rollout_data",
@@ -582,6 +602,7 @@ def test_advantage_stage_applies_configured_clipping() -> None:
         "masked_advantages": [],
         "sequence_lengths": [],
         "seq_logprob_error_metrics": [],
+        "token_logprob_tail_metrics": [],
     }
     meta = KVBatchMeta(
         partition_id="rollout_data",

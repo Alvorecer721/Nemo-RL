@@ -24,6 +24,7 @@ from tensordict import TensorDict
 
 from nemo_rl.algorithms.single_controller_utils.utils import (
     aggregate_step_metrics,
+    compute_token_logprob_tail_metrics,
     fields_for_put,
     reduce_advantage_pump_metrics,
     squeeze_trailing_unit_dim,
@@ -133,6 +134,22 @@ class TestAggregateStepMetrics:
 
 
 class TestReduceAdvantagePumpMetrics:
+    def test_token_logprob_tail_metrics_use_shifted_training_mask(self) -> None:
+        generation = torch.tensor([[9.0, 0.1, 0.7], [9.0, 2.0, 3.0]])
+        previous = torch.zeros_like(generation)
+        token_mask = torch.tensor([[1, 1, 1], [1, 1, 1]])
+        sample_mask = torch.tensor([1, 0])
+
+        out = compute_token_logprob_tail_metrics(
+            generation, previous, token_mask, sample_mask
+        )
+
+        assert out["valid_tokens"] == 2
+        assert out["sum_abs"] == pytest.approx(0.8)
+        assert out["max_abs"] == pytest.approx(0.7)
+        assert out["count_gt_0_5"] == 1
+        assert out["count_gt_1_0"] == 0
+
     def test_reward_and_advantages_and_tokens(self) -> None:
         out = reduce_advantage_pump_metrics(
             rewards=[torch.tensor([1.0, 3.0])],
@@ -159,6 +176,35 @@ class TestReduceAdvantagePumpMetrics:
 
     def test_all_empty_inputs_returns_empty_dict(self) -> None:
         assert reduce_advantage_pump_metrics([], [], []) == {}
+
+    def test_token_logprob_tails_are_reduced_across_streaming_chunks(self) -> None:
+        out = reduce_advantage_pump_metrics(
+            rewards=[],
+            masked_advantages=[],
+            sequence_lengths=[],
+            token_logprob_tail_metrics=[
+                {
+                    "valid_tokens": 4,
+                    "sum_abs": 0.8,
+                    "max_abs": 0.6,
+                    "count_gt_0_5": 1,
+                    "count_gt_1_0": 0,
+                },
+                {
+                    "valid_tokens": 6,
+                    "sum_abs": 1.2,
+                    "max_abs": 1.1,
+                    "count_gt_0_5": 2,
+                    "count_gt_1_0": 1,
+                },
+            ],
+        )
+
+        assert out["logprob_tail/valid_tokens"] == 10
+        assert out["logprob_tail/mean_abs"] == pytest.approx(0.2)
+        assert out["logprob_tail/max_abs"] == pytest.approx(1.1)
+        assert out["logprob_tail/count_gt_0_5"] == 3
+        assert out["logprob_tail/count_gt_1_0"] == 1
 
     def test_seq_logprob_error_metrics_are_reduced_across_streaming_chunks(
         self,

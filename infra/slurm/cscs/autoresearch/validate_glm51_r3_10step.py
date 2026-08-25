@@ -151,6 +151,62 @@ def summarize_logprob_tails(train_data_dir: Path) -> dict[str, Any]:
     }
 
 
+def summarize_logprob_tails_from_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Read SingleController's compact per-token tail metrics."""
+    valid_tokens = _series(metrics, "train/logprob_tail/valid_tokens")
+    mean_abs = _series(metrics, "train/logprob_tail/mean_abs")
+    max_abs = _series(metrics, "train/logprob_tail/max_abs")
+    count_gt_0_5 = _series(metrics, "train/logprob_tail/count_gt_0_5")
+    count_gt_1_0 = _series(metrics, "train/logprob_tail/count_gt_1_0")
+
+    per_step: dict[str, dict[str, float | int]] = {}
+    total_tokens = 0
+    total_gt_0_5 = 0
+    total_gt_1_0 = 0
+    for step, values in enumerate(
+        zip(
+            valid_tokens,
+            mean_abs,
+            max_abs,
+            count_gt_0_5,
+            count_gt_1_0,
+            strict=True,
+        ),
+        start=1,
+    ):
+        tokens_value, mean_value, max_value, gt_0_5_value, gt_1_0_value = values
+        counts = (tokens_value, gt_0_5_value, gt_1_0_value)
+        if any(value < 0 or not value.is_integer() for value in counts):
+            raise ValueError(f"Step {step} has invalid logprob tail counts: {counts}")
+        tokens, gt_0_5, gt_1_0 = (int(value) for value in counts)
+        if tokens <= 0 or not 0 <= gt_1_0 <= gt_0_5 <= tokens:
+            raise ValueError(
+                f"Step {step} has inconsistent logprob tail counts: {counts}"
+            )
+        if not 0 <= mean_value <= max_value:
+            raise ValueError(
+                f"Step {step} has inconsistent logprob tail magnitudes: "
+                f"mean={mean_value}, max={max_value}"
+            )
+        per_step[str(step)] = {
+            "tokens": tokens,
+            "mean_abs": mean_value,
+            "max_abs": max_value,
+            "count_gt_0_5": gt_0_5,
+            "count_gt_1_0": gt_1_0,
+        }
+        total_tokens += tokens
+        total_gt_0_5 += gt_0_5
+        total_gt_1_0 += gt_1_0
+
+    return {
+        "per_step": per_step,
+        "total_tokens": total_tokens,
+        "count_gt_0_5": total_gt_0_5,
+        "count_gt_1_0": total_gt_1_0,
+    }
+
+
 def validate_logprob_tails(summary: dict[str, Any]) -> dict[str, Any]:
     total_tokens = int(summary["total_tokens"])
     count_gt_0_5 = int(summary["count_gt_0_5"])
@@ -267,15 +323,22 @@ def validate_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate the GLM-5.1 R3 ten-step run")
     parser.add_argument("metrics", type=Path)
-    parser.add_argument("--train-data-dir", type=Path, required=True)
+    parser.add_argument(
+        "--train-data-dir",
+        type=Path,
+        help="Legacy async train_data_step JSONL root; omit for SC tail metrics",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
     metrics = json.loads(args.metrics.read_text())
     summary = validate_metrics(metrics)
-    summary["per_token_logprob_tails"] = validate_logprob_tails(
+    tail_summary = (
         summarize_logprob_tails(args.train_data_dir)
+        if args.train_data_dir is not None
+        else summarize_logprob_tails_from_metrics(metrics)
     )
+    summary["per_token_logprob_tails"] = validate_logprob_tails(tail_summary)
     args.output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
