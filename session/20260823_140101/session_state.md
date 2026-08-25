@@ -32,6 +32,15 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 - Compare all ten KL and token-probability-error values with the preserved R3-off ten-step body from job `3147936`, whose KL mean was about `0.00250` but whose 3,858,221 valid training tokens included 7,873 `abs(delta log p) > 0.5`, 570 above `1.0`, and a maximum of `37.7`.
 - Require strict route validation, a verified route trace, no missing-route fallback, at least eight learning-signal steps, and a clean terminal artifact. Do not write a new checkpoint or mutate the valid TP2 checkpoint.
 
+## Current subtask (2026-08-25 10:00 CEST)
+
+- Branch head `68c9f52c0` contains shared bit-exact byte transport, a consumer-owned TP/CP alignment invariant, corrected process-local trace validation, and compact SingleController logprob-tail metrics.
+- The padding fix was simplified from 60 lines across five producer/buffer files to 25 changed lines across the policy and its focused test; it also recomputes stale checkpoint metadata for the current topology.
+- Controlled 80-node one-step job `3181802` completed training with loss `0.07355`, reward `0.14844`, generation KL `0.0003694`, and no stale/dropped groups. Its postcheck exposed only a harness bug: independently sampled policy fetches need not appear in the rollout actor's process-local trace window.
+- The corrected trace rule retains producer-to-both-consumer hash/length checks. SingleController now emits compact valid-token mean/max and counts above absolute logprob differences `0.5`/`1.0`, avoiding legacy raw JSONL dumps while preserving the production tail gate.
+- Exact-image job `3182189` passed 76/76 tests plus Ruff and formatting, including validator compatibility, Gloo, and real two-GPU NCCL.
+- Next, run 88 nodes with the same 72-node trainer, 16 inference nodes (two TP32 vLLM replicas), and 4096 total / 3584 generated tokens. Keep the truncation, KL, direct-tail, and eight-of-ten learning-signal gates strict.
+
 ## SingleController characterization (2026-08-24 18:28 CEST)
 
 - The ten-step legacy-async control completed training but failed its final learning-quality gate because 94.77% of responses were truncated; its R3 transport evidence itself is complete and clean.

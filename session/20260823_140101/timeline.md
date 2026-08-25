@@ -122,3 +122,18 @@
 - Host Python compilation, Ruff check/format, `git diff --check`, and a standalone bit-exact int16 byte-view round trip passed. Attempts to submit the exact-image one-node gate did not create a job because `sbatch` and `squeue` timed out against the Slurm controller; the reservation was not mutated.
 - The controller calls were sandbox-blocked rather than unhealthy. Exact-image job `3178396` started immediately and exposed that Torch 2.11 Gloo also rejects int16 with `RuntimeError: Invalid scalar type`. Generalized the byte wire from NCCL-only to every backend; this makes the existing CPU/Gloo test exercise the conversion as well as the dedicated NCCL test.
 - Corrected exact-image job `3178422` passed all three focused tests, including the real two-GPU NCCL round trip, in 57.98 seconds; Ruff and formatting also passed. Online source review confirmed NCCL exposes 8-, 32- and 64-bit integer types but no 16-bit integer type, PyTorch's NCCL mapping omits `Short`, and established arbitrary-payload broadcasters use `uint8` wire buffers. Keep the exact byte view rather than widening route IDs to int32.
+
+## 2026-08-25 08:46 CEST
+
+- Refactored the int16 wire conversion through the existing packed-tensor abstraction and added non-contiguous plus scalar coverage in signed commit `070abefa6`.
+- Rejected a 60-line producer-side padding candidate because the policy consumer already owns the topology and the candidate could preserve a stale `global_forward_pad_seqlen` after restore. Replaced it with a recomputed consumer invariant and one focused regression in signed commit `314e22e20`.
+- Local pure policy tests passed 10/10; local Ray/Gloo startup was unavailable due hostname resolution, so exact-image job `3181797` ran the authoritative focused gate. It passed all 17 tests, Ruff, formatting, Gloo, and real two-GPU NCCL in 58.18 seconds.
+- Submitted controlled 80-node one-step SingleController/TransferQueue job `3181802` from immutable head `314e22e20`. It uses the proven 72-train/8-inference split and 3072/2560 token envelope.
+- User directed the next scale run to spend more nodes and tokens on inference. On a green one-step result, use 88 total nodes with 16 inference nodes (two TP32 vLLM replicas) and 4096/3584 tokens; do not relax the truncation or learning-signal gates.
+
+## 2026-08-25 10:00 CEST
+
+- Controlled 80-node job `3181802` completed one SingleController step: loss `0.0735495`, grad norm `0.305298`, reward `0.1484375`, advantage range `-2.26778..1`, generation KL `0.0003694103`, 306,986 valid tokens, and no stale/dropped/replaced/promoted groups. The terminal postcheck alone failed because the rollout actor and 288 policy ranks independently sampled different trace windows.
+- Corrected the trace validator to retain the forward producer-to-`prev_lp`/`train` contract while allowing independently sampled worker fetches. The complete job trace then passed with 144,200 records, 38,400 route assignments, 57,600 replay actions, 38,400 forward verifications, and 576 CP records covering 1,382,544 token rows.
+- Added compact SingleController valid-token logprob-tail metrics using the exact shifted GRPO loss mask. The fork validator now supports those scalar series as well as the legacy per-step JSONL mode, preserving the absolute-delta gates without large trajectory dumps.
+- Exact-image job `3182189` passed 76/76 focused tests in 60.61 seconds, including the SingleController metrics, both validator modes, trace contract, padding, Gloo, and real two-GPU NCCL. Ruff, formatting, shell syntax, and diff checks are clean.
