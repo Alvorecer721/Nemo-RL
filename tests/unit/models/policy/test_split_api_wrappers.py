@@ -32,7 +32,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from nemo_rl.data_plane import KVBatchMeta
-from nemo_rl.data_plane.schema import DP_TRAIN_FIELDS, ROUTED_EXPERTS_FIELD
+from nemo_rl.data_plane.schema import (
+    DP_TRAIN_FIELDS,
+    GLOBAL_FORWARD_PAD_SEQLEN,
+    ROUTED_EXPERTS_FIELD,
+)
 from nemo_rl.data_plane.worker_mixin import TQWorkerMixin
 from nemo_rl.models.policy.tq_policy import TQPolicy
 
@@ -115,7 +119,11 @@ class TestPreshardedWrappers:
 def _make_tq_policy() -> tuple[TQPolicy, MagicMock]:
     """Bare TQPolicy with the attributes the split fan-out touches."""
     p = object.__new__(TQPolicy)
-    p.cfg = {"train_global_batch_size": 8, "train_micro_batch_size": 2}
+    p.cfg = {
+        "train_global_batch_size": 8,
+        "train_micro_batch_size": 2,
+        "make_sequence_length_divisible_by": 2,
+    }
     p._router_replay_enabled = False
     p.flops_tracker = None
     wg = MagicMock()
@@ -127,6 +135,17 @@ def _make_tq_policy() -> tuple[TQPolicy, MagicMock]:
 
 
 class TestTQPolicySplitFanout:
+    def test_stamp_pad_seqlen_uses_current_policy_topology(self):
+        p, _ = _make_tq_policy()
+        meta = _meta()
+        meta.sequence_lengths = [2827, 1536]
+        meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] = 2827
+
+        with patch.object(TQPolicy, "_packing_args", return_value=(None, None)):
+            p._stamp_pad_seqlen(meta)
+
+        assert meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2828
+
     def test_begin_consumes_single_data_futures_with_ray_get(self):
         """run_all_workers_single_data returns plain ObjectRefs, not a
         MultiWorkerFuture — the fan-out must ray.get them (PR #2683
