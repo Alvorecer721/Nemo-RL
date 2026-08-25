@@ -143,3 +143,5 @@
 - User approved a matched `ready_first` comparison to test whether retaining late prompt groups reduces the trainer wait and wasted rollout work shown by the `windowed` baseline.
 - Baseline job `3182849` is running on 88 nodes from `6366a7599`; by step 6 it had logged completed training steps with strict KL/tail evidence and concrete stale-work waste, including 14 in-flight aborts after step 5.
 - Created isolated branch `autoresearch/glm51-ready-first-20260825` from the exact baseline source. The experiment changes only the sampler policy; all topology, model, response envelope, Router Replay, and validators remain fixed.
+- Committed the hypothesis and recipe as `d071be968`. Host YAML parsing and shell syntax passed; the in-container preflight remains fail-fast because the existing code allocation could not be reached through Slurm during validation.
+- Submitted ready-first job `3184823` with `afterok:3182849`. It is pending on the baseline dependency and cannot compete for the 88 reserved nodes.
