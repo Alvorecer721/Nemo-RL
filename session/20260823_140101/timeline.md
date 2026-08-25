@@ -145,3 +145,36 @@
 - Created isolated branch `autoresearch/glm51-ready-first-20260825` from the exact baseline source. The experiment changes only the sampler policy; all topology, model, response envelope, Router Replay, and validators remain fixed.
 - Committed the hypothesis and recipe as `d071be968`. Host YAML parsing and shell syntax passed; the in-container preflight remains fail-fast because the existing code allocation could not be reached through Slurm during validation.
 - Submitted ready-first job `3184823` with `afterok:3182849`. It is pending on the baseline dependency and cannot compete for the 88 reserved nodes.
+
+## 2026-08-25 14:08 CEST
+
+- Live baseline `3182849` remains running on all 88 nodes. It has completed eight of ten steps; logged step times are `1694.29`, `883.35`, `1519.22`, `1323.29`, `1639.41`, `1267.55`, `1472.70`, and `1152.62` seconds, averaging `1369.05s` (`22.82min`). Step 9 is in progress; matched ready-first job `3184823` remains dependency-pending.
+- The trainer's directly measured `exposed_generation` wait across those steps is `10044.23s`, averaging `1255.53s` (`20.93min`) per step and `91.71%` of step wall time. This is an upper bound on window-policy cost, not an attribution: it also includes unavoidable time to generate the 16 useful groups. The causal window penalty is the matched difference versus ready-first after job `3184823` runs.
+- Corrected the rollout-delay explanation against `single_controller.py`, `staleness_sampler.py`, `rollout_manager.py`, and the live log. Step 1 creates policy `v1`; step 2 trains `v1` using eligible `v0`/`v1` trajectories, then creates `v2`. The 21 `v0` tasks aborted after step 2 were not directly awaited; they occupied concurrency slots during step 2 and therefore constrained the rate at which fresh `v1` work could launch.
+- Replaced the misleading visualization with a preview that separates model-weight versions from rollout-data versions and explicitly shows `v0 -> v1 -> v2`: `/users/xyixuan/.codex/generated_images/01a014d5-9519-78d1-87a5-1decdc434e47/exec-d5dce044-1140-43e5-9c9b-1269dc1165ca.png`.
+- Baseline step 9 completed in `1449.77s`, with `1359.12s` of exposed generation and one additional completed-group eviction. Across nine steps the windowed means are now `22.97min` total and `21.12min` exposed generation; cumulative sampler waste is 67 aborted in-flight groups and 5 evicted completed groups.
+- Verified the experiment does not set sampler behavior through an OS variable. Commit `d071be968` carries a dedicated YAML recipe whose `async_rl.sampler.name` is `ready_first`; the launch environment only supplies output placement and Slurm dependency orchestration.
+
+## 2026-08-25 14:40 CEST
+
+- Windowed job `3182849` completed ten of ten training steps and printed `SC run complete`; final-step loss, grad norm, reward, and generation KL were finite and healthy. During the launcher's `finally` teardown, vLLM shut down its engine manager, Megatron ranks observed the closing TCPStore, and the driver returned exit code 2 without a training traceback. Because the shell remained in `GLM_PHASE=training`, the failure artifact over-broadly labels this as a training failure and the later trace/metric postchecks did not run.
+- Slurm therefore left matched ready-first job `3184823` in `DependencyNeverSatisfied` under its original `afterok` contract. Updated the existing job dependency to `afterany:3182849`; the same already-approved 88-node job started immediately, with output rooted at `/iopsstor/scratch/cscs/xyixuan/nemo_rl_glm51_ready_first/d071be968`.
+- Rebaseability reminder: the planned root `FORK_PATCHES.md` does not exist yet. Add it after this experiment to make nested MCore patches, upstream status, validation evidence, and absorption rules visible before future Bridge or NeMo-RL bumps.
+
+## 2026-08-25 15:50 CEST
+
+- Ready-first job `3184823` remains active with no Ray completion, exit, or fatal-error marker. It completed step 1 in `2456.12s`, of which `2154.79s` was exposed generation, and is now generating step 2.
+- Step-1 correctness is healthy: loss `0.06967`, grad norm `0.32295`, reward `0.21875`, generation KL `0.0004083`, three valid-token logprob deltas above `0.5`, none above `1.0`, and zero stale evictions, aborts, drops, or masked sequences.
+- The matched windowed step 1 was `1694.29s` total / `1430.13s` exposed generation. Do not attribute the ready-first step-1 slowdown to stale-work policy because no trajectory can yet be stale; evaluate the hypothesis from steps 2-10 and cumulative sampler waste. Slurm accounting was temporarily unavailable, so liveness was verified from the continuously updating submit-side log and absent Ray terminal markers.
+
+## 2026-08-25 16:20 CEST
+
+- Ready-first job `3184823` completed steps 2 and 3 in `852.25s` and `1559.06s`; step 4 is generating. All three completed steps remain correctness-green, with generation KL at or below `0.000521` and no stale eviction, abort, drop, or masking.
+- Against matched windowed steps 1-3, ready-first is `770.57s` slower cumulatively. Steps 2-3 alone differ by only `8.74s` (`0.36%`), so essentially the entire gap is the first rollout batch (`2456.12s` versus `1694.29s`). Stale reuse cannot affect step 1, but sampler admission can: ready-first caps admitted lookahead while windowed can refill freed rollout slots. Continue through ten steps before separating that tradeoff from warm-up and stochastic tail variance.
+- Direct timer/code audit confirms real trainer idleness: `exposed_generation` wraps the loop waiting for a selectable 16-group batch. Across ready-first steps 1-3, corrected idle time is about `90.4%`; the steady optimizer step is about `67s` versus `741-1447s` exposed generation. The 72-train/16-inference topology supplies 288 training GPUs but only two TP32 vLLM replicas on 64 inference GPUs, so rollout capacity is the dominant bottleneck.
+- Found an inherited upstream instrumentation bug in `nemo_rl/algorithms/utils.py`: `training_worker_idle_time_ratio` returns zero when `exposed_generation_time > 0.1`, exactly reversing the intended small-wait clamp. Keep diagnosis separate from a future source fix.
+
+## 2026-08-25 16:43 CEST
+
+- User chose not to spend the remaining hours on the 88-node ready-first run and explicitly requested cancellation. Cancelled only Slurm job `3184823`; reservation `SD-69241-apertus-1-5-0` remains untouched.
+- Preserve the three completed correctness-green steps as partial evidence. The next authorized experiment changes only inference capacity: 72 training nodes remain fixed, while inference increases from 16 to 32 nodes, producing four TP32 vLLM replicas in a 104-node allocation.
