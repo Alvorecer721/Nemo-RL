@@ -207,11 +207,12 @@ class TQPolicy(Policy):
         """
         if not meta.sequence_lengths:
             return
-        if GLOBAL_FORWARD_PAD_SEQLEN in meta.extra_info:
-            return
         _, dba = self._packing_args("train_mb_tokens")
         seq_round = int(dba["sequence_length_round"]) if dba is not None else 1
-        pad_mult = int(meta.extra_info.get("pad_to_multiple", 1))
+        pad_mult = max(
+            int(meta.extra_info.get("pad_to_multiple", 1)),
+            int(self.cfg["make_sequence_length_divisible_by"]),
+        )
         meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] = round_up(
             max(meta.sequence_lengths), max(pad_mult, seq_round)
         )
