@@ -92,9 +92,10 @@ def _failures_for_fetch_matches(
                         f"fetch={fetch_record.get('valid_length')}"
                     )
 
-    for stage, key in fetch_by_stage_key:
-        if key not in producer_by_key:
-            failures.append(f"TQ fetch has no rollout producer stage={stage} key={key}")
+    # Trace-step counters are process-local. The rollout actor and each policy
+    # rank therefore sample different windows: every sampled producer must be
+    # observed at both fetch stages, but a sampled fetch need not have fallen in
+    # the rollout actor's window.
     return failures
 
 

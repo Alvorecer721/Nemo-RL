@@ -108,6 +108,26 @@ def test_transfer_queue_contract_requires_and_matches_payload_trace(
     )
 
 
+def test_transfer_queue_contract_allows_independently_sampled_fetches(
+    tmp_path: Path,
+) -> None:
+    records = _tq_records() + _route_records()
+    records.append(
+        {
+            "event": "tq_fetch_sample",
+            "stage": "train",
+            "key": "sample-outside-producer-window",
+            "valid_length": 4,
+            "input_ids": _tensor_hash("other-input"),
+            "routed_experts": _tensor_hash("other-routes"),
+        }
+    )
+    trace_dir = tmp_path / "trace"
+    _write_trace(trace_dir, records)
+
+    assert check_trace(trace_dir, transport_contract="transfer-queue") == 0
+
+
 def test_legacy_async_contract_accepts_route_trace_without_tq_events(
     tmp_path: Path,
 ) -> None:
