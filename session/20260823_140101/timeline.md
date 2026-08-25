@@ -137,3 +137,9 @@
 - Corrected the trace validator to retain the forward producer-to-`prev_lp`/`train` contract while allowing independently sampled worker fetches. The complete job trace then passed with 144,200 records, 38,400 route assignments, 57,600 replay actions, 38,400 forward verifications, and 576 CP records covering 1,382,544 token rows.
 - Added compact SingleController valid-token logprob-tail metrics using the exact shifted GRPO loss mask. The fork validator now supports those scalar series as well as the legacy per-step JSONL mode, preserving the absolute-delta gates without large trajectory dumps.
 - Exact-image job `3182189` passed 76/76 focused tests in 60.61 seconds, including the SingleController metrics, both validator modes, trace contract, padding, Gloo, and real two-GPU NCCL. Ruff, formatting, shell syntax, and diff checks are clean.
+
+## 2026-08-25 ready-first matched experiment
+
+- User approved a matched `ready_first` comparison to test whether retaining late prompt groups reduces the trainer wait and wasted rollout work shown by the `windowed` baseline.
+- Baseline job `3182849` is running on 88 nodes from `6366a7599`; by step 6 it had logged completed training steps with strict KL/tail evidence and concrete stale-work waste, including 14 in-flight aborts after step 5.
+- Created isolated branch `autoresearch/glm51-ready-first-20260825` from the exact baseline source. The experiment changes only the sampler policy; all topology, model, response envelope, Router Replay, and validators remain fixed.

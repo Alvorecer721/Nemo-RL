@@ -41,6 +41,13 @@ Two independent memory faults are now isolated and runtime-proven. Save-side CPU
 - Exact-image job `3182189` passed 76/76 tests plus Ruff and formatting, including validator compatibility, Gloo, and real two-GPU NCCL.
 - Next, run 88 nodes with the same 72-node trainer, 16 inference nodes (two TP32 vLLM replicas), and 4096 total / 3584 generated tokens. Keep the truncation, KL, direct-tail, and eight-of-ten learning-signal gates strict.
 
+## Current subtask (2026-08-25 ready-first comparison)
+
+- The frozen 88-node `windowed` baseline is running as Slurm job `3182849` from source SHA `6366a7599`; it has already exposed stale-work waste, including 14 aborted in-flight prompt groups after step 5.
+- Hypothesis: changing only `async_rl.sampler.name` to `ready_first` will reduce exposed generation and trainer waiting by keeping every admitted late prompt group selectable instead of evicting or aborting it.
+- The matched branch is `autoresearch/glm51-ready-first-20260825`. Keep the 72-train/16-inference topology, TP2/PP18/ETP1/EP16 Megatron layout, two TP32 vLLM replicas, 4096/3584-token envelope, Router Replay, and all quality gates unchanged.
+- Queue the ready-first job with `afterok:3182849` so it neither competes with the baseline nor runs if the baseline fails. Compare total and per-step exposed generation, evicted/aborted groups, valid tokens per second, reward/loss coverage, generation KL, and compact logprob tails.
+
 ## SingleController characterization (2026-08-24 18:28 CEST)
 
 - The ten-step legacy-async control completed training but failed its final learning-quality gate because 94.77% of responses were truncated; its R3 transport evidence itself is complete and clean.
