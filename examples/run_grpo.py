@@ -29,6 +29,7 @@ from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
 from nemo_rl.distributed.virtual_cluster import init_ray
 from nemo_rl.models.generation import configure_generation_config
+from nemo_rl.models.generation.interfaces import should_use_async_rollouts
 from nemo_rl.utils.config import (
     load_config,
     parse_hydra_overrides,
@@ -52,6 +53,72 @@ def _select_trainer(master_config: MasterConfig):
         return grpo_train_sync
     print("🚀 Running synchronous GRPO training (legacy)")
     return grpo_train
+
+
+def _validate_entrypoint_contract(master_config: MasterConfig) -> None:
+    """Reject configs that select a training path this entrypoint cannot run.
+
+    This must run before Ray, tokenizer, dataset, or worker setup.  The legacy
+    async loop and the SingleController loop have different replay buffers and
+    transport contracts; constructing one path's policy and then calling the
+    other path's trainer is not a supported hybrid.
+    """
+    async_config = master_config.grpo.async_grpo
+    if async_config is None:
+        raise ValueError(
+            "examples/run_grpo.py requires grpo.async_grpo to be present. "
+            "A null block selects the SingleController config schema; launch it "
+            "with examples/run_grpo_single_controller.py instead."
+        )
+
+    # ``MasterConfig`` intentionally allows extension fields, so a SingleController
+    # block otherwise parses here and is silently ignored by the legacy trainer.
+    if getattr(master_config, "async_rl", None) is not None:
+        raise ValueError(
+            "async_rl.* is consumed only by examples/run_grpo_single_controller.py; "
+            "examples/run_grpo.py would ignore it. Remove async_rl or use the "
+            "SingleController entrypoint with grpo.async_grpo: null."
+        )
+
+    if not async_config.enabled:
+        return
+
+    if (master_config.data_plane or {}).get("enabled", False):
+        raise ValueError(
+            "Legacy async GRPO does not support data_plane.enabled=true. It uses "
+            "the in-memory ReplayBuffer, while TransferQueue async training is "
+            "owned by SingleController. Set data_plane.enabled=false, or use "
+            "examples/run_grpo_single_controller.py with grpo.async_grpo: null."
+        )
+
+    generation_config = master_config.policy.get("generation")
+    backend = generation_config.get("backend", "") if generation_config else ""
+    if backend not in ("vllm", "megatron", "trtllm", "dynamo"):
+        raise ValueError(
+            "Legacy async GRPO supports vLLM, Megatron, TRT-LLM, and Dynamo "
+            f"generation; got policy.generation.backend={backend!r}."
+        )
+    if not should_use_async_rollouts(generation_config):
+        raise ValueError(
+            "Legacy async GRPO requires an async generation engine. Enable the "
+            "backend's async engine before launching."
+        )
+
+    unsupported: list[str] = []
+    if master_config.grpo.use_dynamic_sampling:
+        unsupported.append("grpo.use_dynamic_sampling")
+    if master_config.grpo.reward_scaling.enabled:
+        unsupported.append("grpo.reward_scaling.enabled")
+    if master_config.grpo.reward_shaping.enabled:
+        unsupported.append("grpo.reward_shaping.enabled")
+    if master_config.data["use_multiple_dataloader"]:
+        unsupported.append("data.use_multiple_dataloader")
+    if unsupported:
+        raise NotImplementedError(
+            "Legacy async GRPO does not consume these enabled settings: "
+            + ", ".join(unsupported)
+            + ". Disable them or use synchronous GRPO."
+        )
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -93,6 +160,7 @@ def main() -> None:
 
         config = OmegaConf.to_container(config, resolve=True)
         config = MasterConfig(**config)
+        _validate_entrypoint_contract(config)
         print("Applied CLI overrides")
 
     # Print config
@@ -180,28 +248,9 @@ def main() -> None:
     print("=" * 60 + "\n", flush=True)
 
     try:
-        # Check if async mode is enabled
+        # Check if async mode is enabled. Unsupported combinations were rejected
+        # before Ray startup by _validate_entrypoint_contract.
         if config.grpo.async_grpo.enabled:
-            # Async GRPO does not support dynamic sampling, reward scaling, or reward shaping (DAPO features)
-            if config.grpo.use_dynamic_sampling:
-                raise NotImplementedError(
-                    "use_dynamic_sampling is not supported with async GRPO"
-                )
-            if config.grpo.reward_scaling.enabled:
-                raise NotImplementedError(
-                    "reward_scaling is not supported with async GRPO"
-                )
-            if config.grpo.reward_shaping.enabled:
-                raise NotImplementedError(
-                    "reward_shaping is not supported with async GRPO"
-                )
-
-            # Async GRPO does not support multiple dataloaders
-            if config.data["use_multiple_dataloader"]:
-                raise NotImplementedError(
-                    "use_multiple_dataloader is not supported with async GRPO"
-                )
-
             from nemo_rl.algorithms.grpo import async_grpo_train
 
             print("🚀 Running async GRPO training")

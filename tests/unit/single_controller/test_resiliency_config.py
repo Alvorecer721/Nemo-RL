@@ -28,7 +28,8 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_rl.algorithms.async_utils.staleness_sampler import SamplerConfig
-from nemo_rl.algorithms.grpo import GRPOConfig
+from nemo_rl.algorithms.grpo import GRPOConfig, RewardPenaltyConfig
+from nemo_rl.algorithms.opd import OnPolicyDistillationConfig
 from nemo_rl.algorithms.single_controller_utils.config import (
     AsyncRLConfig,
     FleetHealthConfig,
@@ -117,6 +118,64 @@ class TestDefaultsAreInert:
         )
         assert cfg.rollout_failure.nemo_gym.rollout_timeout_s is None
         assert cfg.rollout_failure.max_infra_attempts_per_prompt == 5
+
+
+class TestUnsupportedAlgorithmKnobsFailLoudly:
+    @pytest.mark.parametrize(
+        "grpo_override",
+        [
+            {"use_dynamic_sampling": True},
+            {"reward_scaling": {"enabled": True}},
+            {"reward_shaping": {"enabled": True}},
+            {"overlong_filtering": True},
+            {"invalid_tool_call_advantage": -5.0},
+            {"malformed_thinking_advantage": -5.0},
+            {"deduplicate_multimodal_data": True},
+            {"calculate_advantages_on_gpu": True},
+            {"debug_payload_metrics": True},
+            {"cot_think_token_ids": [1, 2]},
+        ],
+    )
+    def test_active_grpo_knob_is_rejected(self, grpo_override: dict) -> None:
+        cfg = _master_config()
+        cfg.grpo = GRPOConfig(
+            num_prompts_per_step=cfg.grpo.num_prompts_per_step,
+            num_generations_per_prompt=cfg.grpo.num_generations_per_prompt,
+            skip_reference_policy_logprobs_calculation=False,
+            **grpo_override,
+        )
+
+        with pytest.raises(NotImplementedError, match="does not consume"):
+            validate_single_controller_config(cfg)
+
+    def test_active_reward_penalty_is_rejected(self) -> None:
+        cfg = _master_config()
+        cfg.reward_penalties = RewardPenaltyConfig(penalize_empty_final_answer=True)
+
+        with pytest.raises(NotImplementedError, match="reward_penalties"):
+            validate_single_controller_config(cfg)
+
+    def test_on_policy_distillation_is_rejected(self) -> None:
+        cfg = _master_config()
+        cfg.on_policy_distillation = OnPolicyDistillationConfig(enabled=True)
+
+        with pytest.raises(NotImplementedError, match="on_policy_distillation"):
+            validate_single_controller_config(cfg)
+
+    def test_disabled_top_level_algorithm_blocks_are_inert(self) -> None:
+        cfg = _master_config()
+        cfg.reward_penalties = RewardPenaltyConfig()
+        cfg.on_policy_distillation = OnPolicyDistillationConfig(enabled=False)
+
+        validate_single_controller_config(cfg)
+
+    def test_validation_early_stop_is_rejected(self) -> None:
+        cfg = _master_config()
+        cfg.grpo.stop_at_validation_metric = "accuracy"
+        cfg.grpo.stop_at_validation_threshold = 0.9
+
+        with pytest.raises(NotImplementedError, match="never be evaluated"):
+            validate_single_controller_config(cfg)
 
 
 class TestRolloutFailureValidation:

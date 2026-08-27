@@ -20,6 +20,7 @@ from nemo_rl.algorithms.single_controller_utils.config import (
     MasterConfig,
     RolloutFailureConfig,
     WatchdogConfig,
+    validate_single_controller_config,
 )
 from nemo_rl.algorithms.single_controller_utils.setup import (
     SingleControllerActorArgs,
@@ -34,4 +35,5 @@ __all__ = [
     "SingleControllerActorArgs",
     "WatchdogConfig",
     "setup_single_controller",
+    "validate_single_controller_config",
 ]

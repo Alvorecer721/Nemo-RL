@@ -530,6 +530,12 @@ def setup_single_controller(
     generation_config = policy_config["generation"]
     data_config = master_config.data
 
+    if grpo_config.async_grpo is not None:
+        raise ValueError(
+            "setup_single_controller requires grpo.async_grpo: null; "
+            "SingleController reads async_rl.* instead of the legacy async block."
+        )
+
     if grpo_config.val_period > 0 or grpo_config.val_at_start or grpo_config.val_at_end:
         raise NotImplementedError(
             "SingleController doesn't support validation now, will support "

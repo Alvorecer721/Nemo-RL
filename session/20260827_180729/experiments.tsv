@@ -1,0 +1,2 @@
+index	branch	parent_commit	commit	recipe	metric_name	metric_value	memory_gb	elapsed_min	launcher	job_id	command	log_path	status	description
+1	autoresearch/2026-08-27-glm51-64inf-scale	d7ced9573	pending	grpo-glm5.1-136n4g-megatron-tp2pp18ep16-ready-first.yaml	steady_total_step_time_s	0	0	0	slurm	pending	submit_glm51_sc_scale.sh	/iopsstor/scratch/cscs/xyixuan/nemo_rl_glm51_ready_first_64inf/pending	pending	Three-step matched scale experiment; only rollout nodes change from 32 to 64

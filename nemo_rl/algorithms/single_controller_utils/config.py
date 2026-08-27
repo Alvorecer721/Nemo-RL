@@ -34,8 +34,13 @@ from nemo_rl.algorithms.async_utils.staleness_sampler import (
     SamplerConfig,
     required_buffer_capacity_for_config,
 )
-from nemo_rl.algorithms.grpo import GRPOConfig, GRPOLoggerConfig
+from nemo_rl.algorithms.grpo import (
+    GRPOConfig,
+    GRPOLoggerConfig,
+    RewardPenaltyConfig,
+)
 from nemo_rl.algorithms.loss import ClippedPGLossConfig
+from nemo_rl.algorithms.opd import OnPolicyDistillationConfig
 from nemo_rl.data import DataConfig
 from nemo_rl.data_plane.interfaces import DataPlaneConfig
 from nemo_rl.distributed.virtual_cluster import ClusterConfig
@@ -544,6 +549,8 @@ class MasterConfig(BaseModel, extra="allow"):
     checkpointing: CheckpointingConfig
     data_plane: DataPlaneConfig
     async_rl: AsyncRLConfig
+    reward_penalties: RewardPenaltyConfig = Field(default_factory=RewardPenaltyConfig)
+    on_policy_distillation: Optional[OnPolicyDistillationConfig] = None
 
 
 def validate_sampler_buffer_capacity(
@@ -679,6 +686,65 @@ def validate_single_controller_config(master_config: MasterConfig) -> None:
     """Validate cross-section SingleController constraints before setup."""
     async_config = master_config.async_rl
     num_prompts_per_step = master_config.grpo.num_prompts_per_step
+
+    # These knobs are implemented in the monolithic sync / legacy-async loops,
+    # not in SingleController's rollout and train pumps. Accepting an enabled
+    # value would make a valid-looking recipe train with different semantics.
+    unsupported: list[str] = []
+    grpo_config = master_config.grpo
+    if grpo_config.use_dynamic_sampling:
+        unsupported.append("grpo.use_dynamic_sampling")
+    if grpo_config.reward_scaling.enabled:
+        unsupported.append("grpo.reward_scaling.enabled")
+    if grpo_config.reward_shaping.enabled:
+        unsupported.append("grpo.reward_shaping.enabled")
+    if grpo_config.overlong_filtering:
+        unsupported.append("grpo.overlong_filtering")
+    if grpo_config.invalid_tool_call_advantage is not None:
+        unsupported.append("grpo.invalid_tool_call_advantage")
+    if grpo_config.malformed_thinking_advantage is not None:
+        unsupported.append("grpo.malformed_thinking_advantage")
+    if grpo_config.deduplicate_multimodal_data:
+        unsupported.append("grpo.deduplicate_multimodal_data")
+    if grpo_config.calculate_advantages_on_gpu:
+        unsupported.append("grpo.calculate_advantages_on_gpu")
+    if grpo_config.debug_payload_metrics:
+        unsupported.append("grpo.debug_payload_metrics")
+    if grpo_config.cot_think_token_ids is not None:
+        unsupported.append("grpo.cot_think_token_ids")
+
+    reward_penalties = master_config.reward_penalties
+    if any(
+        (
+            reward_penalties.penalize_duplicated_reasoning,
+            reward_penalties.penalize_empty_final_answer,
+            reward_penalties.penalize_unwanted_tokens,
+            reward_penalties.penalize_malformed_think_tag,
+        )
+    ):
+        unsupported.append("reward_penalties")
+    if (
+        master_config.on_policy_distillation is not None
+        and master_config.on_policy_distillation.enabled
+    ):
+        unsupported.append("on_policy_distillation")
+
+    if unsupported:
+        raise NotImplementedError(
+            "SingleController does not consume these enabled settings: "
+            + ", ".join(unsupported)
+            + ". Disable them or use the legacy/synchronous GRPO path."
+        )
+
+    if (
+        grpo_config.stop_at_validation_metric is not None
+        or grpo_config.stop_at_validation_threshold is not None
+    ):
+        raise NotImplementedError(
+            "SingleController has no validation loop, so "
+            "grpo.stop_at_validation_metric/threshold would never be evaluated."
+        )
+
     if num_prompts_per_step < async_config.min_groups_for_streaming_train:
         raise ValueError(
             f"grpo.num_prompts_per_step ({num_prompts_per_step}) "
