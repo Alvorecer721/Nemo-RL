@@ -87,43 +87,9 @@ export WANDB_DISABLED=true
 unset NEMO_RL_PY_EXECUTABLES_SYSTEM
 
 GLM_PHASE=config_preflight
-/opt/nemo_rl_venv/bin/python - <<'PY'
-import os
-from pathlib import Path
-
-from nemo_rl.algorithms.grpo import MasterConfig
-from nemo_rl.utils.config import load_config, register_omegaconf_resolvers
-from omegaconf import OmegaConf
-
-register_omegaconf_resolvers()
-recipe = Path(os.environ["GLM_RECIPE"])
-cfg = MasterConfig(**OmegaConf.to_container(load_config(recipe), resolve=True))
-megatron = cfg.policy["megatron_cfg"]
-generation = cfg.policy["generation"]
-vllm = generation["vllm_cfg"]
-
-assert (cfg.cluster["num_nodes"], cfg.cluster["gpus_per_node"]) == (80, 4)
-assert generation["colocated"]["resources"]["num_nodes"] == 8
-assert (
-    megatron["tensor_model_parallel_size"],
-    megatron["pipeline_model_parallel_size"],
-    megatron["expert_tensor_parallel_size"],
-    megatron["expert_model_parallel_size"],
-) == (2, 18, 1, 16)
-assert megatron["sequence_parallel"] is True
-assert (vllm["tensor_parallel_size"], vllm["expert_parallel_size"]) == (32, 32)
-assert generation["refit_transport"] == "nccl_reshard"
-assert cfg.policy["router_replay"]["enabled"] is True
-assert cfg.policy["max_total_sequence_length"] == 2048
-assert generation["max_new_tokens"] == 1536
-assert vllm["max_model_len"] == 2048
-assert cfg.grpo.max_num_steps == 10
-assert cfg.grpo.async_grpo.enabled is True
-assert cfg.grpo.async_grpo.max_trajectory_age_steps == 1
-assert not (cfg.data_plane or {}).get("enabled", False)
-assert cfg.checkpointing["enabled"] is False
-print("glm51_r3_10step_config=OK tp=2 pp=18 etp=1 ep=16 dense_dp=8 expert_dp=1 total_seq=2048 max_new=1536 transport=legacy-async")
-PY
+/opt/nemo_rl_venv/bin/python -m \
+  infra.slurm.cscs.autoresearch.glm51_r3_10step_profile \
+  --config "$RECIPE"
 
 RUN_LOG=$RUN_DIR/run.log
 GLM_PHASE=training

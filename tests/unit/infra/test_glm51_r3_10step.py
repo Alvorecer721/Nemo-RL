@@ -16,15 +16,16 @@ import json
 from pathlib import Path
 
 import pytest
-from omegaconf import OmegaConf
 
+from infra.slurm.cscs.autoresearch.glm51_r3_10step_profile import (
+    load_glm51_r3_config,
+    validate_glm51_r3_profile,
+)
 from infra.slurm.cscs.autoresearch.validate_glm51_r3_10step import (
     summarize_logprob_tails,
     validate_logprob_tails,
     validate_metrics,
 )
-from nemo_rl.algorithms.grpo import MasterConfig
-from nemo_rl.utils.config import load_config, register_omegaconf_resolvers
 
 REPO_ROOT = Path(__file__).parents[3]
 RECIPE = (
@@ -37,33 +38,28 @@ RECIPE = (
 def test_glm51_r3_recipe_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GLM_CKPT", "/models/glm-5.1")
     monkeypatch.setenv("GLM_RUN_DIR", "/run")
-    register_omegaconf_resolvers()
-    config = MasterConfig(**OmegaConf.to_container(load_config(RECIPE), resolve=True))
-    megatron = config.policy["megatron_cfg"]
-    generation = config.policy["generation"]
+    profile = validate_glm51_r3_profile(load_glm51_r3_config(RECIPE))
 
-    assert config.grpo.max_num_steps == 10
-    assert config.grpo.async_grpo.enabled is True
-    assert config.grpo.async_grpo.max_trajectory_age_steps == 1
-    assert config.policy["router_replay"]["enabled"] is True
-    assert config.policy["max_total_sequence_length"] == 2048
-    assert generation["max_new_tokens"] == 1536
-    assert generation["vllm_cfg"]["max_model_len"] == 2048
-    assert not (config.data_plane or {}).get("enabled", False)
-    assert config.checkpointing["enabled"] is False
-    assert config.checkpointing["save_optimizer"] is False
-    assert (config.cluster["num_nodes"], config.cluster["gpus_per_node"]) == (80, 4)
-    assert (
-        megatron["tensor_model_parallel_size"],
-        megatron["pipeline_model_parallel_size"],
-        megatron["expert_tensor_parallel_size"],
-        megatron["expert_model_parallel_size"],
-    ) == (2, 18, 1, 16)
-    assert generation["refit_transport"] == "nccl_reshard"
-    assert (
-        generation["vllm_cfg"]["tensor_parallel_size"],
-        generation["vllm_cfg"]["expert_parallel_size"],
-    ) == (32, 32)
+    assert profile.describe() == (
+        "glm51_r3_10step_config=OK tp=2 pp=18 etp=1 ep=16 "
+        "dense_dp=8 expert_dp=1 total_seq=2048 max_new=1536 "
+        "transport=legacy-async"
+    )
+
+
+def test_glm51_r3_recipe_contract_rejects_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GLM_CKPT", "/models/glm-5.1")
+    monkeypatch.setenv("GLM_RUN_DIR", "/run")
+    config = load_glm51_r3_config(RECIPE)
+    config.policy["generation"]["max_new_tokens"] = 1024
+
+    with pytest.raises(
+        ValueError,
+        match=r"policy\.generation\.max_new_tokens=1536.*resolved 1024",
+    ):
+        validate_glm51_r3_profile(config)
 
 
 def _metrics(
@@ -176,6 +172,7 @@ def test_glm51_r3_launcher_uses_cluster_and_route_safety_controls() -> None:
     assert "--mem=850000M" in submitter
     assert "NRL_ROUTER_REPLAY_VALIDATE=1" in runner
     assert "NRL_R3_TRACE_VERIFY_FORWARD=1" in runner
+    assert "infra.slurm.cscs.autoresearch.glm51_r3_10step_profile" in runner
     assert "--transport-contract legacy-async" in runner
     assert "--require-forward-verify" in runner
     assert "--require-cp-identity" in runner
