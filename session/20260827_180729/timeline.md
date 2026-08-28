@@ -10,3 +10,4 @@
 - Cancelled job `3203601` intentionally rather than leave 136 nodes idle; Slurm recorded `CANCELLED by 30214` and no training step ran.
 - Replaced the broad driver-side cleanliness query with an explicit runtime-input path set. Recovered the submit wrapper's writable scheduler-log path and non-recursive first-level submodule check.
 - Sampled infrastructure health 12 times on 2026-08-28: every Capstor, Git, Iopsstor, and Slurm probe succeeded with stable low latency.
+- Submitted two sequential exact-image 136-node Pyxis fan-out canaries on 2026-08-29. Jobs `3215160` and `3215161` both passed (`0` from `srun`), producing 136/136 completion markers from 136 unique nodes in 52 and 44 seconds respectively; neither produced a nonempty task error. This clears the earlier `520/544` worker startup failure as transient infrastructure evidence rather than a deterministic image or capacity failure.
