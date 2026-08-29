@@ -48,6 +48,77 @@ def test_run_grpo_dispatches_both_trainers():
     assert _select_trainer(cfg_sync) is grpo_train_sync
 
 
+def test_run_grpo_entrypoint_rejects_mixed_async_transport() -> None:
+    """Legacy async cannot construct TQ and then consume an in-memory buffer."""
+    import sys
+
+    sys.path.insert(0, str(REPO / "examples"))
+    try:
+        from run_grpo import _validate_entrypoint_contract
+    finally:
+        sys.path.pop(0)
+    from nemo_rl.algorithms.grpo import GRPOConfig, MasterConfig
+
+    cfg = MasterConfig.model_construct(
+        grpo=GRPOConfig(async_grpo={"enabled": True}),
+        data_plane={"enabled": True},
+        policy={"generation": {"backend": "vllm", "vllm_cfg": {"async_engine": True}}},
+        data={"use_multiple_dataloader": False},
+    )
+    with pytest.raises(ValueError, match="in-memory ReplayBuffer"):
+        _validate_entrypoint_contract(cfg)
+
+
+def test_run_grpo_entrypoint_accepts_each_supported_transport() -> None:
+    import sys
+
+    sys.path.insert(0, str(REPO / "examples"))
+    try:
+        from run_grpo import _validate_entrypoint_contract
+    finally:
+        sys.path.pop(0)
+    from nemo_rl.algorithms.grpo import GRPOConfig, MasterConfig
+
+    sync_tq = MasterConfig.model_construct(
+        grpo=GRPOConfig(async_grpo={"enabled": False}),
+        data_plane={"enabled": True},
+    )
+    _validate_entrypoint_contract(sync_tq)
+
+    legacy_async = MasterConfig.model_construct(
+        grpo=GRPOConfig(async_grpo={"enabled": True}),
+        data_plane={"enabled": False},
+        policy={"generation": {"backend": "vllm", "vllm_cfg": {"async_engine": True}}},
+        data={"use_multiple_dataloader": False},
+    )
+    _validate_entrypoint_contract(legacy_async)
+
+
+def test_run_grpo_entrypoint_rejects_single_controller_schema() -> None:
+    import sys
+
+    sys.path.insert(0, str(REPO / "examples"))
+    try:
+        from run_grpo import _validate_entrypoint_contract
+    finally:
+        sys.path.pop(0)
+    from nemo_rl.algorithms.grpo import GRPOConfig, MasterConfig
+
+    null_legacy_block = MasterConfig.model_construct(
+        grpo=GRPOConfig(async_grpo=None), data_plane={"enabled": True}
+    )
+    with pytest.raises(ValueError, match="SingleController"):
+        _validate_entrypoint_contract(null_legacy_block)
+
+    ignored_async_rl = MasterConfig.model_construct(
+        grpo=GRPOConfig(async_grpo={"enabled": False}),
+        data_plane={"enabled": False},
+        async_rl={"sampler": {"name": "in_order"}},
+    )
+    with pytest.raises(ValueError, match=r"async_rl\.\*"):
+        _validate_entrypoint_contract(ignored_async_rl)
+
+
 def test_sync_trainer_rejects_message_level_advantage_penalties():
     from nemo_rl.algorithms.grpo import GRPOConfig, MasterConfig
     from nemo_rl.algorithms.grpo_sync import (

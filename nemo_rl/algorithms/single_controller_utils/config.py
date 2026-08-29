@@ -824,6 +824,43 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
         )
 
     if not is_ppo_run(master_config):
+        grpo_cfg = master_config.grpo
+        assert grpo_cfg is not None
+
+        unsupported_grpo = [
+            name
+            for name, enabled in (
+                (
+                    "grpo.invalid_tool_call_advantage",
+                    grpo_cfg.invalid_tool_call_advantage is not None,
+                ),
+                (
+                    "grpo.malformed_thinking_advantage",
+                    grpo_cfg.malformed_thinking_advantage is not None,
+                ),
+                (
+                    "grpo.calculate_advantages_on_gpu",
+                    grpo_cfg.calculate_advantages_on_gpu,
+                ),
+            )
+            if enabled
+        ]
+        if unsupported_grpo:
+            raise NotImplementedError(
+                "SingleController does not consume these enabled GRPO settings: "
+                + ", ".join(unsupported_grpo)
+                + ". Disable them or use the legacy/synchronous GRPO path."
+            )
+
+        if (
+            grpo_cfg.stop_at_validation_metric is not None
+            or grpo_cfg.stop_at_validation_threshold is not None
+        ):
+            raise NotImplementedError(
+                "SingleController has no validation loop, so "
+                "grpo.stop_at_validation_metric/threshold would never be evaluated."
+            )
+
         # A value block without `ppo` is inert -- nothing builds the critic --
         # and a config carrying one is asking for PPO by every reading except
         # the one the code uses. Say so rather than training GRPO silently.

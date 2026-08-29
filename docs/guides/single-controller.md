@@ -242,5 +242,10 @@ The SC path is still under active development. Feature gaps are tracked in [issu
 - Validation is not yet supported (setup raises on `val_period > 0`, `val_at_start`, or `val_at_end`); checkpointing is.
 - (PPO) Rollout drop budgets — `async_rl.rollout_failure.max_skipped_prompts` and `max_consecutive_dropped_prompts` must both be `0`. A drop shortens the step, and the critic shards it against the configured `value.train_global_batch_size` rather than its actual size, so setup rejects a non-zero budget. The resiliency layer stays available on GRPO.
 - Reward shaping and sample filtering — `overlong_filtering`, `reward_shaping`, `reward_scaling`, and `use_dynamic_sampling` are implemented on neither algorithm block, so setup rejects them rather than silently skipping the shaping.
+- GRPO message-level advantage overrides (`invalid_tool_call_advantage`,
+  `malformed_thinking_advantage`), GPU-side advantage calculation, and
+  validation-based early stopping are not implemented; setup rejects active
+  settings instead of silently ignoring them. Normalized advantage clipping is
+  supported.
 - The `windowed` sampler has no `over_sampling_ratio` cap — over-produced groups aged past the window are evicted, wasting rollout compute.
 - The drain gate in refit is not yet supported.

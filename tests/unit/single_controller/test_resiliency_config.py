@@ -122,6 +122,36 @@ class TestDefaultsAreInert:
         assert cfg.rollout_failure.max_infra_attempts_per_prompt == 5
 
 
+class TestUnsupportedGRPOKnobsFailLoudly:
+    @pytest.mark.parametrize(
+        "grpo_override",
+        [
+            {"invalid_tool_call_advantage": -5.0},
+            {"malformed_thinking_advantage": -5.0},
+            {"calculate_advantages_on_gpu": True},
+        ],
+    )
+    def test_active_grpo_knob_is_rejected(self, grpo_override: dict) -> None:
+        cfg = _master_config()
+        cfg.grpo = GRPOConfig(
+            num_prompts_per_step=cfg.grpo.num_prompts_per_step,
+            num_generations_per_prompt=cfg.grpo.num_generations_per_prompt,
+            skip_reference_policy_logprobs_calculation=False,
+            **grpo_override,
+        )
+
+        with pytest.raises(NotImplementedError, match="does not consume"):
+            validate_single_controller_config(cfg)
+
+    def test_validation_early_stop_is_rejected(self) -> None:
+        cfg = _master_config()
+        cfg.grpo.stop_at_validation_metric = "accuracy"
+        cfg.grpo.stop_at_validation_threshold = 0.9
+
+        with pytest.raises(NotImplementedError, match="never be evaluated"):
+            validate_single_controller_config(cfg)
+
+
 class TestRolloutFailureValidation:
     def test_backoff_ceiling_below_base_is_rejected(self):
         with pytest.raises(ValidationError, match="max_backoff_s"):

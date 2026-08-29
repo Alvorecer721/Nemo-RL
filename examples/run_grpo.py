@@ -25,6 +25,9 @@ from nemo_rl.algorithms.grpo import (
     setup,
     shutdown_environments,
 )
+from nemo_rl.algorithms.grpo_runtime_contracts import (
+    validate_grpo_entrypoint_contract as _validate_entrypoint_contract,
+)
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
 from nemo_rl.data_plane.factory import maybe_configure_data_plane_env
@@ -95,6 +98,7 @@ def main() -> None:
 
         config = OmegaConf.to_container(config, resolve=True)
         config = MasterConfig(**config)
+        _validate_entrypoint_contract(config)
         print("Applied CLI overrides")
 
     # Print config

@@ -77,6 +77,7 @@ from nemo_rl.algorithms.async_utils.staleness_sampler import (
 )
 from nemo_rl.algorithms.grpo import (
     GRPOSaveState,
+    _clip_grpo_advantages,
     _write_latest_checkpoint_status,
     compute_and_apply_seq_logprob_error_masking,
 )
@@ -3264,6 +3265,13 @@ class SingleControllerActor:
             advantages = torch.zeros_like(mask)
             if self._is_ppo:
                 returns = torch.zeros_like(mask)
+
+        if not self._is_ppo:
+            assert self._master_config.grpo is not None
+            advantages = _clip_grpo_advantages(
+                advantages,
+                self._master_config.grpo,
+            )
 
         response_advantages = torch.masked_select(advantages, mask.bool())
         self._step_log_dict["rewards"].append(rewards.detach().cpu())
