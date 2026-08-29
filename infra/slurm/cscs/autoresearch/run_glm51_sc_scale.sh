@@ -163,7 +163,9 @@ if expected_spec_tokens:
     assert speculative is not None
     assert speculative["method"] == expected_spec_method
     assert speculative["num_speculative_tokens"] == expected_spec_tokens
-    assert speculative["use_local_argmax_reduction"] is True
+    # The vLLM 0.25.1 DeepSeekMTP class has no get_top_tokens() method and
+    # therefore rejects use_local_argmax_reduction during worker startup.
+    assert speculative.get("use_local_argmax_reduction", False) is False
 
     model_dir = Path(cfg.policy["model_name"])
     model_cfg = json.loads((model_dir / "config.json").read_text())

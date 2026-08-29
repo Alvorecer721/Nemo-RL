@@ -11,9 +11,8 @@ policy:
       speculative_config:
         method: deepseek_mtp
         num_speculative_tokens: 3
-        # At TP32, select the greedy draft token with a rank-local argmax plus
-        # a small reduction instead of gathering the full 154,880-token logits.
-        use_local_argmax_reduction: true
+        # vLLM 0.25.1 DeepSeekMTP does not implement get_top_tokens(), so its
+        # local-argmax optimization is not supported for this native drafter.
 
 logger:
   wandb:

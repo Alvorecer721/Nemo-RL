@@ -36,7 +36,6 @@ def test_glm51_mtp_recipe_preserves_topology(monkeypatch: pytest.MonkeyPatch) ->
     assert speculative == {
         "method": "deepseek_mtp",
         "num_speculative_tokens": 3,
-        "use_local_argmax_reduction": True,
     }
 
 
