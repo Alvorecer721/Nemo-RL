@@ -11,6 +11,8 @@ MEGATRON_CACHE=${GLM_MEGATRON_CACHE:?}
 RECIPE=${GLM_RECIPE:?}
 RUN_ROOT=${GLM_RUN_DIR:?}
 EXPECTED_STEPS=${GLM_EXPECTED_STEPS:-10}
+EXPECTED_SPEC_TOKENS=${GLM_EXPECTED_SPEC_TOKENS:-0}
+EXPECTED_SPEC_METHOD=${GLM_EXPECTED_SPEC_METHOD:-none}
 RUN_DIR=$RUN_ROOT/${NRL_SLURM_JOB_ID:?}
 export GLM_RUN_DIR=$RUN_DIR
 
@@ -99,6 +101,7 @@ unset NEMO_RL_PY_EXECUTABLES_SYSTEM
 
 GLM_PHASE=config_preflight
 /opt/nemo_rl_venv/bin/python - <<'PY'
+import json
 import os
 from pathlib import Path
 
@@ -116,6 +119,8 @@ expected_sampler = os.environ["GLM_EXPECTED_SAMPLER"]
 expected_total_nodes = int(os.environ["GLM_TOTAL_NODES"])
 expected_generation_nodes = int(os.environ["GLM_GENERATION_NODES"])
 expected_steps = int(os.environ["GLM_EXPECTED_STEPS"])
+expected_spec_tokens = int(os.environ["GLM_EXPECTED_SPEC_TOKENS"])
+expected_spec_method = os.environ["GLM_EXPECTED_SPEC_METHOD"]
 
 assert (cfg.cluster["num_nodes"], cfg.cluster["gpus_per_node"]) == (
     expected_total_nodes,
@@ -153,11 +158,31 @@ assert cfg.async_rl.min_groups_for_streaming_train == 16
 assert cfg.async_rl.max_inflight_prompts == 32
 assert cfg.async_rl.max_buffered_rollouts == 128
 assert cfg.checkpointing["enabled"] is False
+speculative = generation.get("vllm_kwargs", {}).get("speculative_config")
+if expected_spec_tokens:
+    assert speculative is not None
+    assert speculative["method"] == expected_spec_method
+    assert speculative["num_speculative_tokens"] == expected_spec_tokens
+    assert speculative["use_local_argmax_reduction"] is True
+
+    model_dir = Path(cfg.policy["model_name"])
+    model_cfg = json.loads((model_dir / "config.json").read_text())
+    assert model_cfg["model_type"] == "glm_moe_dsa"
+    assert model_cfg["num_nextn_predict_layers"] >= 1
+    mtp_start = model_cfg["num_hidden_layers"]
+    weight_map = json.loads(
+        (model_dir / "model.safetensors.index.json").read_text()
+    )["weight_map"]
+    assert any(name.startswith(f"model.layers.{mtp_start}.") for name in weight_map)
+else:
+    assert speculative is None
+    assert expected_spec_method == "none"
 print(
     "glm51_sc_scale_config=OK tp=2 pp=18 etp=1 ep=16 "
     "dense_dp=8 expert_dp=1 total_seq=4096 max_new=3584 "
     f"vllm_tp=32 vllm_dp={expected_vllm_dp} "
-    f"transport=transfer-queue sampler={expected_sampler} steps={expected_steps}"
+    f"transport=transfer-queue sampler={expected_sampler} steps={expected_steps} "
+    f"spec_method={expected_spec_method} spec_tokens={expected_spec_tokens}"
 )
 PY
 
@@ -172,6 +197,9 @@ grep -Fq "SC run complete:" "$RUN_LOG"
 if grep -Fq "R3 router replay fallback:" "$RUN_LOG"; then
   echo "Router Replay used missing-route fallback" >&2
   exit 1
+fi
+if [[ $EXPECTED_SPEC_TOKENS -gt 0 ]]; then
+  grep -Fq "[mtp] Loaded MTP draft weights" "$RUN_LOG"
 fi
 
 GLM_PHASE=route_trace_validation
@@ -189,6 +217,7 @@ GLM_PHASE=metrics_validation
 /opt/nemo_rl_venv/bin/python \
   infra/slurm/cscs/autoresearch/validate_glm51_sc_scale.py \
   "$METRICS_JSON" --expected-steps "$EXPECTED_STEPS" \
+  --speculative-tokens "$EXPECTED_SPEC_TOKENS" \
   --train-data-dir "$RUN_DIR/tb" --output "$SUMMARY_JSON" \
   >"$RUN_DIR/metrics_validation.log" 2>&1
 
@@ -205,6 +234,8 @@ payload = {
     "recipe": os.environ["GLM_RECIPE"],
     "runtime": "single-controller-transfer-queue",
     "sampler": os.environ["GLM_EXPECTED_SAMPLER"],
+    "speculative_method": os.environ["GLM_EXPECTED_SPEC_METHOD"],
+    "speculative_tokens": int(os.environ["GLM_EXPECTED_SPEC_TOKENS"]),
     "training_nodes": int(os.environ["GLM_TOTAL_NODES"])
     - int(os.environ["GLM_GENERATION_NODES"]),
     "generation_nodes": int(os.environ["GLM_GENERATION_NODES"]),

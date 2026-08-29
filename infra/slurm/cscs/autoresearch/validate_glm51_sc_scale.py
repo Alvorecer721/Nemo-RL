@@ -32,7 +32,67 @@ def _series(metrics: dict[str, Any], name: str, expected_steps: int) -> list[flo
     return series
 
 
-def validate_metrics(metrics: dict[str, Any], expected_steps: int) -> dict[str, Any]:
+def _validate_speculative_metrics(
+    metrics: dict[str, Any], expected_steps: int, speculative_tokens: int
+) -> dict[str, Any]:
+    names = (
+        "num_drafts",
+        "num_draft_tokens",
+        "num_accepted_tokens",
+        "acceptance_length",
+        "acceptance_rate",
+    )
+    spec = {
+        name: _series(metrics, f"train/vllm/spec_{name}", expected_steps)
+        for name in names
+    }
+    for step, (drafts, draft_tokens, accepted, length, rate) in enumerate(
+        zip(*(spec[name] for name in names), strict=True), start=1
+    ):
+        if min(drafts, draft_tokens, accepted) < 0:
+            raise ValueError(f"Negative speculative counter at step {step}")
+        if accepted > draft_tokens:
+            raise ValueError(
+                f"Accepted speculative tokens exceed drafts at step {step}"
+            )
+        if not 0 <= rate <= 1:
+            raise ValueError(
+                f"Invalid speculative acceptance rate at step {step}: {rate}"
+            )
+        if not 1 <= length <= speculative_tokens + 1:
+            raise ValueError(
+                f"Invalid speculative acceptance length at step {step}: {length}"
+            )
+        expected_rate = accepted / draft_tokens if draft_tokens else 0.0
+        expected_length = 1 + accepted / drafts if drafts else 1.0
+        if not math.isclose(rate, expected_rate, rel_tol=1.0e-6, abs_tol=1.0e-9):
+            raise ValueError(f"Inconsistent speculative acceptance rate at step {step}")
+        if not math.isclose(length, expected_length, rel_tol=1.0e-6, abs_tol=1.0e-9):
+            raise ValueError(
+                f"Inconsistent speculative acceptance length at step {step}"
+            )
+
+    total_drafts = sum(spec["num_drafts"])
+    total_draft_tokens = sum(spec["num_draft_tokens"])
+    total_accepted = sum(spec["num_accepted_tokens"])
+    if total_drafts <= 0 or total_draft_tokens <= 0:
+        raise ValueError("Speculative decoding produced no draft traffic")
+    if total_accepted <= 0:
+        raise ValueError("Speculative decoding accepted no draft tokens")
+    return {
+        "tokens_per_draft": speculative_tokens,
+        "total_drafts": total_drafts,
+        "total_draft_tokens": total_draft_tokens,
+        "total_accepted_tokens": total_accepted,
+        "aggregate_acceptance_rate": total_accepted / total_draft_tokens,
+        "aggregate_acceptance_length": 1 + total_accepted / total_drafts,
+        "per_step": spec,
+    }
+
+
+def validate_metrics(
+    metrics: dict[str, Any], expected_steps: int, speculative_tokens: int = 0
+) -> dict[str, Any]:
     if expected_steps < 1:
         raise ValueError("expected_steps must be positive")
 
@@ -91,7 +151,7 @@ def validate_metrics(metrics: dict[str, Any], expected_steps: int) -> dict[str, 
         name.removeprefix("timing/train/"): _series(metrics, name, expected_steps)
         for name in timing_names
     }
-    return {
+    summary = {
         "steps": expected_steps,
         "kl": {
             "min": min(kl),
@@ -114,18 +174,26 @@ def validate_metrics(metrics: dict[str, Any], expected_steps: int) -> dict[str, 
             for name, values in timing.items()
         },
     }
+    if speculative_tokens:
+        summary["speculative_decoding"] = _validate_speculative_metrics(
+            metrics, expected_steps, speculative_tokens
+        )
+    return summary
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("metrics", type=Path)
     parser.add_argument("--expected-steps", type=int, required=True)
+    parser.add_argument("--speculative-tokens", type=int, default=0)
     parser.add_argument("--train-data-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
     metrics = json.loads(args.metrics.read_text())
-    summary = validate_metrics(metrics, args.expected_steps)
+    summary = validate_metrics(
+        metrics, args.expected_steps, speculative_tokens=args.speculative_tokens
+    )
     original_expected_steps = r3_validator.EXPECTED_STEPS
     try:
         r3_validator.EXPECTED_STEPS = args.expected_steps
