@@ -4,7 +4,7 @@
 - Deleted exactly ten merged branch heads with `ahead_by=0`; verified 20 branches remain.
 - Confirmed completed job 3186645 used SingleController, TransferQueue, ready-first sampling, 72 training nodes, and 32 inference nodes.
 - Confirmed the historical 104-node launch depended on an untracked temporary runner; replaced it with tracked experiment files.
-- Confirmed the new experiment changes only inference capacity relative to that 104-node topology: 32 to 64 rollout nodes. It intentionally runs three measured steps.
+- Confirmed the new experiment changes only inference capacity relative to that 104-node topology: 32 to 64 rollout nodes. The user selected the full ten-step gate rather than the initially staged three-step throughput probe.
 - Shell syntax and Python byte-compilation passed. Host pytest was blocked by missing Ray; the exact EDF container performs config preflight before model setup.
 - Submitted job `3203601`; Ray connected all `544/544` worker units in 107 seconds, then the driver blocked before model loading in a broad `git status` preflight touching a stalled Capstor inode.
 - Cancelled job `3203601` intentionally rather than leave 136 nodes idle; Slurm recorded `CANCELLED by 30214` and no training step ran.

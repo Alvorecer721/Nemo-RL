@@ -3,10 +3,10 @@ defaults: ./grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-r3-10step.yam
 # Scaling follow-up to the completed 104-node SingleController run. Keep the
 # 72-node TP2/PP18/EP16 trainer, ready-first sampler, response envelope, Router
 # Replay, and quality gates fixed. Change only the rollout fleet from four to
-# eight TP32 replicas (32 -> 64 inference nodes) and stop after three measured
-# steps; this is a throughput experiment, not a replacement certification run.
+# eight TP32 replicas (32 -> 64 inference nodes) and run the full ten-step
+# correctness and throughput gate.
 grpo:
-  max_num_steps: 3
+  max_num_steps: 10
   async_grpo: null
   val_period: 0
   val_at_start: false

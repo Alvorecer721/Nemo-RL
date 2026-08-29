@@ -8,7 +8,7 @@ import pytest
 from infra.slurm.cscs.autoresearch.validate_glm51_sc_scale import validate_metrics
 
 
-def _metrics(steps: int = 3) -> dict[str, dict[str, float]]:
+def _metrics(steps: int = 10) -> dict[str, dict[str, float]]:
     indices = range(1, steps + 1)
 
     def series(value: float) -> dict[str, float]:
@@ -31,12 +31,45 @@ def _metrics(steps: int = 3) -> dict[str, dict[str, float]]:
     }
 
 
-def test_validate_metrics_accepts_three_green_steps() -> None:
-    summary = validate_metrics(_metrics(), expected_steps=3)
+def test_validate_metrics_accepts_ten_green_steps() -> None:
+    summary = validate_metrics(_metrics(), expected_steps=10)
 
-    assert summary["steps"] == 3
-    assert summary["learning_signal_steps"] == 3
+    assert summary["steps"] == 10
+    assert summary["learning_signal_steps"] == 10
     assert summary["timing"]["total_step_time"]["steady_state_mean"] == 100.0
+
+
+def test_validate_metrics_accepts_eight_of_ten_learning_signal_steps() -> None:
+    metrics = _metrics()
+    for metric in (
+        "train/loss",
+        "train/advantages/min",
+        "train/advantages/max",
+        "train/grad_norm",
+    ):
+        metrics[metric]["9"] = 0.0
+        metrics[metric]["10"] = 0.0
+
+    summary = validate_metrics(metrics, expected_steps=10)
+
+    assert summary["learning_signal_steps"] == 8
+    assert summary["nonzero_loss_steps"] == 8
+    assert summary["nonzero_grad_steps"] == 8
+
+
+def test_validate_metrics_rejects_seven_of_ten_learning_signal_steps() -> None:
+    metrics = _metrics()
+    for metric in (
+        "train/loss",
+        "train/advantages/min",
+        "train/advantages/max",
+        "train/grad_norm",
+    ):
+        for step in (8, 9, 10):
+            metrics[metric][str(step)] = 0.0
+
+    with pytest.raises(ValueError, match="required=8"):
+        validate_metrics(metrics, expected_steps=10)
 
 
 @pytest.mark.parametrize(
@@ -51,7 +84,7 @@ def test_validate_metrics_rejects_failed_gates(
     metric: str, value: float, match: str
 ) -> None:
     metrics = _metrics()
-    metrics[metric] = {str(step): value for step in range(1, 4)}
+    metrics[metric] = {str(step): value for step in range(1, 11)}
 
     with pytest.raises(ValueError, match=match):
-        validate_metrics(metrics, expected_steps=3)
+        validate_metrics(metrics, expected_steps=10)

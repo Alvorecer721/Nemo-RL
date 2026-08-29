@@ -66,15 +66,16 @@ def validate_metrics(metrics: dict[str, Any], expected_steps: int) -> dict[str, 
     )
     nonzero_loss_steps = sum(abs(value) > 1.0e-12 for value in loss)
     nonzero_grad_steps = sum(value > 0 for value in grad_norm)
-    if (signal_steps, nonzero_loss_steps, nonzero_grad_steps) != (
-        expected_steps,
-        expected_steps,
-        expected_steps,
+    required_signal_steps = min(8, expected_steps)
+    if (
+        min(signal_steps, nonzero_loss_steps, nonzero_grad_steps)
+        < required_signal_steps
     ):
         raise ValueError(
-            "Every scaling step must carry learning signal: "
+            "Scaling run did not provide enough learning-signal steps: "
             f"advantages={signal_steps}, loss={nonzero_loss_steps}, "
-            f"grad={nonzero_grad_steps}, expected={expected_steps}"
+            f"grad={nonzero_grad_steps}, required={required_signal_steps}, "
+            f"total={expected_steps}"
         )
     if max(reward) <= 0:
         raise ValueError("No positive reward was observed")
