@@ -135,16 +135,21 @@ def _make_tq_policy() -> tuple[TQPolicy, MagicMock]:
 
 
 class TestTQPolicySplitFanout:
-    def test_stamp_pad_seqlen_uses_current_policy_topology(self):
+    def test_isolated_meta_uses_current_policy_topology(self):
         p, _ = _make_tq_policy()
         meta = _meta()
         meta.sequence_lengths = [2827, 1536]
         meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] = 2827
 
         with patch.object(TQPolicy, "_packing_args", return_value=(None, None)):
-            p._stamp_pad_seqlen(meta)
+            isolated = p._isolated_meta(
+                meta,
+                fields=list(DP_TRAIN_FIELDS),
+                task_name="train",
+            )
 
-        assert meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2828
+        assert isolated.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2828
+        assert meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2827
 
     def test_begin_consumes_single_data_futures_with_ray_get(self):
         """run_all_workers_single_data returns plain ObjectRefs, not a
