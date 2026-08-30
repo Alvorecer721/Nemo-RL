@@ -38,11 +38,6 @@ OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 MAX_JOBS=${MAX_JOBS:-4}
 NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS:-90}
-# Clariden's unversioned python3 is Python 3.6, while the repository's
-# fingerprint helper uses modern stdlib/Python syntax. Pin the known host
-# interpreter explicitly so clean sbatch jobs do not depend on an inherited
-# container PATH.
-HOST_PYTHON=${HOST_PYTHON:-/usr/bin/python3.11}
 # This Apertus production image is validated with vLLM. Keep TensorRT-LLM an
 # explicit opt-in until its GH200 source build has independent evidence.
 BUILD_TRTLLM=${BUILD_TRTLLM:-0}
@@ -99,8 +94,8 @@ HERMETIC_FINGERPRINT_SHA256=9bc227075a277a848264e8296df88d9df9589a8897a8fad29061
 PODMAN_STORAGE_BASE=${PODMAN_STORAGE_BASE:-/tmp/nemo-rl-podman-$CSCS_USER-$SLURM_JOB_ID}
 
 cd "$REPO_DIR"
-command -v "$HOST_PYTHON" >/dev/null || {
-    echo "Host Python not found: HOST_PYTHON=$HOST_PYTHON" >&2
+command -v jq >/dev/null || {
+    echo "jq is required to generate the runtime fingerprint" >&2
     exit 1
 }
 [[ -f docker/Dockerfile ]] || {
@@ -149,15 +144,34 @@ BUILD_INPUTS_SHA256=$(
 SOURCE_ID="${SOURCE_REV}-${BUILD_INPUTS_SHA256:0:12}"
 IMAGE="nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
 SQSH_PATH="${OUTPUT_DIR}/nemo-rl-apertus-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
+generate_runtime_fingerprint() {
+    # Some Clariden compute nodes have no host Python. Reproduce
+    # tools/generate_fingerprint.py with the ubiquitous jq and coreutils
+    # binaries so clean sbatch jobs do not depend on the assigned node image.
+    {
+        printf 'pyproject.toml\t%s\n' "$(md5sum pyproject.toml | cut -d' ' -f1)"
+        printf 'uv.lock\t%s\n' "$(md5sum uv.lock | cut -d' ' -f1)"
+        git submodule status | while read -r revision path _; do
+            revision=${revision#-}
+            revision=${revision#+}
+            revision=${revision#U}
+            printf 'submodules/%s\t%s\n' "$path" "$revision"
+        done
+    } | jq -R -s -S '
+        split("\n")
+        | map(select(length > 0) | split("\t"))
+        | reduce .[] as $entry ({}; .[$entry[0]] = $entry[1])
+    '
+}
 generate_hermetic_cache_fingerprint() {
-    "$HOST_PYTHON" tools/generate_fingerprint.py
+    generate_runtime_fingerprint
     printf '\nbase_image=%s\nnvte_cuda_archs=%s\nbuild_trtllm=%s\ncustom_setup_fname=%s\n' \
         "$BASE_IMAGE" "$NVTE_CUDA_ARCHS" "$BUILD_TRTLLM" "$CUSTOM_SETUP_FNAME"
 }
 # The runtime version check expects this file to contain exactly one JSON
 # document. Image-construction choices participate only in the separate
 # hermetic cache key above.
-BUILD_FINGERPRINT_B64=$("$HOST_PYTHON" tools/generate_fingerprint.py | base64 -w0)
+BUILD_FINGERPRINT_B64=$(generate_runtime_fingerprint | base64 -w0)
 CURRENT_FINGERPRINT_SHA256=$(generate_hermetic_cache_fingerprint | sha256sum | cut -d' ' -f1)
 BUILD_TARGET=release
 if [[ "$HERMETIC_CACHE_TAG" == "rebuild" ]]; then
