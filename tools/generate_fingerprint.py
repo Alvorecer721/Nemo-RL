@@ -36,6 +36,9 @@ import subprocess
 from pathlib import Path
 
 
+SOURCE_FINGERPRINT_FILENAME = ".nemo_rl_source_fingerprint.json"
+
+
 def get_repo_root() -> Path:
     """Get the repository root directory relative to this script."""
     script_dir = Path(__file__).parent.resolve()
@@ -102,6 +105,30 @@ def get_submodule_shas(repo_root: Path) -> dict[str, str]:
     return submodules
 
 
+def get_embedded_submodule_shas(repo_root: Path) -> dict[str, str]:
+    """Read submodule SHAs embedded in a source-only release tree.
+
+    Release images intentionally omit ``.git``. Their build writes the exact
+    source fingerprint beside the copied source so runtime checks can still
+    validate submodule pins instead of reporting every dependency as missing.
+    """
+    fingerprint_path = repo_root / SOURCE_FINGERPRINT_FILENAME
+    try:
+        embedded = json.loads(fingerprint_path.read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+
+    if not isinstance(embedded, dict):
+        return {}
+
+    prefix = "submodules/"
+    return {
+        key.removeprefix(prefix): value
+        for key, value in embedded.items()
+        if isinstance(key, str) and key.startswith(prefix) and isinstance(value, str)
+    }
+
+
 def generate_fingerprint() -> dict[str, str]:
     """Generate a fingerprint for the current codebase state.
 
@@ -123,6 +150,8 @@ def generate_fingerprint() -> dict[str, str]:
 
     # Get submodule SHAs (sorted by path for consistency)
     submodules = get_submodule_shas(repo_root)
+    if not submodules:
+        submodules = get_embedded_submodule_shas(repo_root)
     for path, sha in sorted(submodules.items()):
         fingerprint[f"submodules/{path}"] = sha
 
