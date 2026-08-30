@@ -92,9 +92,10 @@ def _failures_for_fetch_matches(
                         f"fetch={fetch_record.get('valid_length')}"
                     )
 
-    for stage, key in fetch_by_stage_key:
-        if key not in producer_by_key:
-            failures.append(f"TQ fetch has no rollout producer stage={stage} key={key}")
+    # Trace-step counters are process-local. The rollout producer and each
+    # policy consumer can therefore sample different calls from an async
+    # stream. Require complete consumer coverage for every sampled producer,
+    # but do not treat additional consumer samples as orphaned payloads.
     return failures
 
 

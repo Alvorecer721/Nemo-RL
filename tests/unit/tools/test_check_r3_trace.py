@@ -181,7 +181,28 @@ def test_cp_identity_requirement_covers_every_cp_record(tmp_path: Path) -> None:
     )
 
 
-def test_tq_contract_rejects_fetch_with_no_producer(tmp_path: Path) -> None:
+def test_tq_contract_accepts_fetch_outside_producer_sample(tmp_path: Path) -> None:
+    records = _tq_records() + _route_records()
+    for stage in ("prev_lp", "train"):
+        records.append(
+            {
+                "event": "tq_fetch_sample",
+                "stage": stage,
+                "key": "consumer-only-sample",
+                "valid_length": 4,
+                "input_ids": _tensor_hash("other-input"),
+                "routed_experts": _tensor_hash("other-routes"),
+            }
+        )
+    trace_dir = tmp_path / "trace"
+    _write_trace(trace_dir, records)
+
+    assert check_trace(trace_dir, transport_contract="transfer-queue") == 0
+
+
+def test_tq_contract_rejects_missing_fetch_for_sampled_producer(
+    tmp_path: Path,
+) -> None:
     records = _tq_records() + _route_records()
     records[1]["key"] = "orphan"
     trace_dir = tmp_path / "trace"
