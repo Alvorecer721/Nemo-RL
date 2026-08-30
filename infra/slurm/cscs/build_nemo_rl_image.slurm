@@ -46,6 +46,13 @@ HOST_PYTHON=${HOST_PYTHON:-/usr/bin/python3.11}
 # This Apertus production image is validated with vLLM. Keep TensorRT-LLM an
 # explicit opt-in until its GH200 source build has independent evidence.
 BUILD_TRTLLM=${BUILD_TRTLLM:-0}
+# This production image trains through Megatron and generates through vLLM.
+# Keep other backends dependency-compatible in the hermetic base without
+# materializing their large, unused frozen Ray environments in the release.
+PREFETCH_SGLANG=${PREFETCH_SGLANG:-0}
+PREFETCH_DTENSOR=${PREFETCH_DTENSOR:-0}
+PREFETCH_AUTOMODEL=${PREFETCH_AUTOMODEL:-0}
+PREFETCH_MODELOPT=${PREFETCH_MODELOPT:-0}
 # Clariden launches the delivered SquashFS through Slurm/Pyxis/Enroot. It does
 # not run a nested container engine, so avoid the default arm64 Apptainer
 # source build and its anonymous GitHub dependency downloads. Set this to a
@@ -65,6 +72,20 @@ case "$BUILD_TRTLLM" in
         exit 1
         ;;
 esac
+prefetch_skip_arg() {
+    case "$1" in
+        0) printf '1' ;;
+        1) ;;
+        *)
+            echo "$2 must be 0 or 1, got: $1" >&2
+            return 1
+            ;;
+    esac
+}
+SKIP_SGLANG_PREFETCH=$(prefetch_skip_arg "$PREFETCH_SGLANG" PREFETCH_SGLANG)
+SKIP_DTENSOR_PREFETCH=$(prefetch_skip_arg "$PREFETCH_DTENSOR" PREFETCH_DTENSOR)
+SKIP_AUTOMODEL_PREFETCH=$(prefetch_skip_arg "$PREFETCH_AUTOMODEL" PREFETCH_AUTOMODEL)
+SKIP_MODELOPT_PREFETCH=$(prefetch_skip_arg "$PREFETCH_MODELOPT" PREFETCH_MODELOPT)
 # Completed hermetic stage for the dependency fingerprint below. Source-only
 # releases resume directly from this content-addressed manifest, avoiding
 # Podman's named-context identity bug that otherwise invalidates uv.lock when
@@ -116,6 +137,10 @@ BUILD_INPUTS_SHA256=$(
         printf 'max_jobs\0%s\0' "$MAX_JOBS"
         printf 'nvte_cuda_archs\0%s\0' "$NVTE_CUDA_ARCHS"
         printf 'build_trtllm\0%s\0' "$BUILD_TRTLLM"
+        printf 'prefetch_sglang\0%s\0' "$PREFETCH_SGLANG"
+        printf 'prefetch_dtensor\0%s\0' "$PREFETCH_DTENSOR"
+        printf 'prefetch_automodel\0%s\0' "$PREFETCH_AUTOMODEL"
+        printf 'prefetch_modelopt\0%s\0' "$PREFETCH_MODELOPT"
         printf 'custom_setup_fname\0%s\0' "$CUSTOM_SETUP_FNAME"
         printf 'platform\0linux/arm64\0'
         printf 'hermetic_cache_tag\0%s\0' "$HERMETIC_CACHE_TAG"
@@ -145,6 +170,8 @@ echo "Base image:  $BASE_IMAGE"
 echo "Inputs SHA:  $BUILD_INPUTS_SHA256"
 echo "Hermetic:    $HERMETIC_CACHE_TAG"
 echo "TensorRT-LLM build: $BUILD_TRTLLM"
+echo "Release prefetch: vLLM Megatron async Gym"
+echo "Optional prefetch: SGLang=$PREFETCH_SGLANG DTensor=$PREFETCH_DTENSOR Automodel=$PREFETCH_AUTOMODEL ModelOpt=$PREFETCH_MODELOPT"
 echo "Custom setup: ${CUSTOM_SETUP_FNAME:-disabled}"
 echo "Podman tag:  $IMAGE"
 echo "Layer cache: $CACHE_DIR"
@@ -379,6 +406,10 @@ podman build \
     --build-arg "MAX_JOBS=$MAX_JOBS" \
     --build-arg "NVTE_CUDA_ARCHS=$NVTE_CUDA_ARCHS" \
     --build-arg "SKIP_TRTLLM_BUILD=$SKIP_TRTLLM_BUILD" \
+    --build-arg "SKIP_SGLANG_PREFETCH=$SKIP_SGLANG_PREFETCH" \
+    --build-arg "SKIP_DTENSOR_PREFETCH=$SKIP_DTENSOR_PREFETCH" \
+    --build-arg "SKIP_AUTOMODEL_PREFETCH=$SKIP_AUTOMODEL_PREFETCH" \
+    --build-arg "SKIP_MODELOPT_PREFETCH=$SKIP_MODELOPT_PREFETCH" \
     --build-arg "CUSTOM_SETUP_FNAME=$CUSTOM_SETUP_FNAME" \
     --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
     --build-arg "NEMO_RL_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \

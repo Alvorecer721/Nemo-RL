@@ -22,6 +22,12 @@
 #   --build-arg SKIP_VLLM_BUILD=1    # Skip vLLM dependencies
 #   --build-arg SKIP_SGLANG_BUILD=1  # Skip SGLang dependencies
 #   --build-arg SKIP_TRTLLM_BUILD=1  # Skip TRT-LLM dependencies
+# Optional release-only args to omit unused frozen worker environments while
+# retaining their dependencies in the hermetic base:
+#   --build-arg SKIP_SGLANG_PREFETCH=1
+#   --build-arg SKIP_DTENSOR_PREFETCH=1
+#   --build-arg SKIP_AUTOMODEL_PREFETCH=1
+#   --build-arg SKIP_MODELOPT_PREFETCH=1
 # Optional isolated managed Dynamo runtime (Dynamo + vLLM only):
 #   --build-arg BUILD_DYNAMO=1
 
@@ -421,6 +427,10 @@ ENV UV_HTTP_TIMEOUT=60
 ARG SKIP_VLLM_BUILD
 ARG SKIP_SGLANG_BUILD
 ARG SKIP_TRTLLM_BUILD
+ARG SKIP_SGLANG_PREFETCH
+ARG SKIP_DTENSOR_PREFETCH
+ARG SKIP_AUTOMODEL_PREFETCH
+ARG SKIP_MODELOPT_PREFETCH
 ARG BUILD_DYNAMO
 ARG DYNAMO_PYTHON_VERSION=3.12.11
 ARG ETCD_VERSION=v3.5.21
@@ -487,11 +497,16 @@ RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallo
 # registry.
 RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
-    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs vllm
+    if [[ -n "${SKIP_MODELOPT_PREFETCH:-}" ]]; then
+        UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+            vllm --negative-filters modelopt
+    else
+        UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs vllm
+    fi
 fi
 EOF
 RUN <<"EOF" bash -exu
-if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
+if [[ -z "${SKIP_SGLANG_BUILD:-}" && -z "${SKIP_SGLANG_PREFETCH:-}" ]]; then
     UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs sglang
 fi
 EOF
@@ -508,22 +523,46 @@ if [[ -z "${SKIP_TRTLLM_BUILD:-}" ]]; then
     UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs trtllm
 fi
 EOF
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_policy_worker.DTensorPolicyWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_policy_worker_v2.DTensorPolicyWorkerV2
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_value_worker_v2.DTensorValueWorkerV2
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_quant_policy_worker.DTensorQuantPolicyWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_DTENSOR_PREFETCH:-}" ]]; then
+    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+        dtensor_policy_worker.DTensorPolicyWorker
+fi
+EOF
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_AUTOMODEL_PREFETCH:-}" ]]; then
+    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+        dtensor_policy_worker_v2.DTensorPolicyWorkerV2
+fi
+EOF
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_AUTOMODEL_PREFETCH:-}" ]]; then
+    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+        dtensor_value_worker_v2.DTensorValueWorkerV2
+fi
+EOF
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_MODELOPT_PREFETCH:-}" && -z "${SKIP_DTENSOR_PREFETCH:-}" ]]; then
+    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+        dtensor_quant_policy_worker.DTensorQuantPolicyWorker
+fi
+EOF
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_MODELOPT_PREFETCH:-}" && -z "${SKIP_AUTOMODEL_PREFETCH:-}" ]]; then
+    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+        dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2
+fi
+EOF
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
     megatron_policy_worker.MegatronPolicyWorker
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
     megatron_value_worker.MegatronValueWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    megatron_quant_policy_worker.MegatronQuantPolicyWorker
+RUN <<"EOF" bash -exu
+if [[ -z "${SKIP_MODELOPT_PREFETCH:-}" ]]; then
+    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+        megatron_quant_policy_worker.MegatronQuantPolicyWorker
+fi
+EOF
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
     async_utils.AsyncTrajectoryCollector
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
