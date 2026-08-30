@@ -558,9 +558,13 @@ EOF
 # Remote/default builds retain the existing in-container fallback.
 RUN if [[ -n "${NEMO_RL_BUILD_FINGERPRINT_B64:-}" ]]; then \
         printf '%s' "${NEMO_RL_BUILD_FINGERPRINT_B64}" \
-            | base64 -d > /opt/nemo_rl_container_fingerprint; \
+            | base64 -d \
+            | tee /opt/nemo_rl_container_fingerprint \
+                > /opt/nemo-rl/.nemo_rl_source_fingerprint.json; \
     else \
-        python tools/generate_fingerprint.py > /opt/nemo_rl_container_fingerprint; \
+        python tools/generate_fingerprint.py \
+            | tee /opt/nemo_rl_container_fingerprint \
+                > /opt/nemo-rl/.nemo_rl_source_fingerprint.json; \
     fi
 
 # NOTICES.txt file points to where the OSS source code is archived

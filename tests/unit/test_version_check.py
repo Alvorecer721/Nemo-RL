@@ -14,6 +14,8 @@
 
 """Tests for container version fingerprint checking."""
 
+import importlib.util
+import json
 import os
 from pathlib import Path
 from unittest import mock
@@ -46,6 +48,47 @@ def test_cscs_build_bakes_valid_json_with_separate_hermetic_inputs():
         "CURRENT_FINGERPRINT_SHA256=$(generate_hermetic_cache_fingerprint "
         "| sha256sum | cut -d' ' -f1)" in build_script
     )
+
+
+def test_release_bakes_fingerprint_beside_source():
+    """Source-only images must retain submodule pins for runtime validation."""
+    repo_root = Path(__file__).parent.parent.parent
+    dockerfile = (repo_root / "docker/Dockerfile").read_text()
+
+    assert "tee /opt/nemo_rl_container_fingerprint" in dockerfile
+    assert "> /opt/nemo-rl/.nemo_rl_source_fingerprint.json" in dockerfile
+
+
+def test_generate_fingerprint_uses_embedded_submodules_without_git(
+    monkeypatch, tmp_path
+):
+    """A release source tree without .git must recover its exact submodule pins."""
+    repo_root = Path(__file__).parent.parent.parent
+    module_path = repo_root / "tools/generate_fingerprint.py"
+    spec = importlib.util.spec_from_file_location("generate_fingerprint", module_path)
+    assert spec is not None and spec.loader is not None
+    fingerprint_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fingerprint_module)
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'\n")
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    (tmp_path / ".nemo_rl_source_fingerprint.json").write_text(
+        json.dumps(
+            {
+                "pyproject.toml": "build-time-hash",
+                "submodules/3rdparty/Gym": "abc123",
+                "submodules/3rdparty/Bridge": "def456",
+            }
+        )
+    )
+    monkeypatch.setattr(fingerprint_module, "get_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(fingerprint_module, "get_submodule_shas", lambda repo_root: {})
+
+    fingerprint = fingerprint_module.generate_fingerprint()
+
+    assert fingerprint["submodules/3rdparty/Gym"] == "abc123"
+    assert fingerprint["submodules/3rdparty/Bridge"] == "def456"
+    assert fingerprint["pyproject.toml"] != "build-time-hash"
 
 
 class TestContainerFingerprintCheck:
@@ -108,85 +151,60 @@ class TestContainerFingerprintCheck:
         # No exception raised
         assert True
 
-    @pytest.mark.skip(reason="Complex mocking - integration test more appropriate")
-    def test_check_raises_on_mismatch_without_ignore_flag(self, monkeypatch, tmp_path):
-        """Test that check raises RuntimeError when fingerprints don't match."""
-        # Set up environment to simulate container
+    @pytest.mark.parametrize("ignore_mismatch", [False, True])
+    def test_check_requires_explicit_ignore_on_mismatch(
+        self, monkeypatch, caplog, ignore_mismatch
+    ):
+        """A mismatch must raise unless the bypass is explicitly enabled."""
         monkeypatch.setenv("NRL_CONTAINER", "1")
-        monkeypatch.delenv("NRL_IGNORE_VERSION_MISMATCH", raising=False)
+        if ignore_mismatch:
+            monkeypatch.setenv("NRL_IGNORE_VERSION_MISMATCH", "1")
+        else:
+            monkeypatch.delenv("NRL_IGNORE_VERSION_MISMATCH", raising=False)
 
-        # Create actual files with different fingerprints
-        container_fingerprint = "abc123def456"
-        code_fingerprint = "different999"
+        current_fingerprint = {
+            "pyproject.toml": "current",
+            "uv.lock": "same",
+        }
+        container_fingerprint = {
+            "pyproject.toml": "container",
+            "uv.lock": "same",
+        }
 
-        # Create a fake fingerprint script that just prints code_fingerprint
-        fake_script = tmp_path / "generate_fingerprint.py"
-        fake_script.write_text(f"#!/usr/bin/env python3\nprint('{code_fingerprint}')\n")
-
-        # Create container fingerprint file
-        container_fp_file = tmp_path / "nemo_rl_container_fingerprint"
-        container_fp_file.write_text(container_fingerprint)
-
-        # Patch Path to point to our temp files
-        original_path_init = Path.__init__
-
-        def mock_path_init(self, *args):
-            path_str = str(args[0]) if args else ""
-            if "/opt/nemo_rl_container_fingerprint" in path_str:
-                original_path_init(self, container_fp_file)
-            elif "generate_fingerprint.py" in path_str:
-                original_path_init(self, fake_script)
-            else:
-                original_path_init(self, *args)
-
-        with mock.patch.object(Path, "__init__", mock_path_init):
-            # Should raise RuntimeError
-            with pytest.raises(RuntimeError, match="Container/Code Version Mismatch"):
-                _check_container_fingerprint()
-
-    @pytest.mark.skip(reason="Complex mocking - integration test more appropriate")
-    def test_check_logs_warning_with_ignore_flag(self, monkeypatch, caplog):
-        """Test that check logs warning but continues when NRL_IGNORE_VERSION_MISMATCH is set."""
-        # Set up environment to simulate container with ignore flag
-        monkeypatch.setenv("NRL_CONTAINER", "1")
-        monkeypatch.setenv("NRL_IGNORE_VERSION_MISMATCH", "1")
-
-        # Create a mock fingerprint file with different fingerprint
-        container_fingerprint = "abc123def456"
-        code_fingerprint = "different999"
-
-        # Mock runpy to return a different fingerprint
         def mock_run_path(path, run_name=None):
-            print(code_fingerprint)
+            print(json.dumps(current_fingerprint))
 
-        with mock.patch("runpy.run_path", side_effect=mock_run_path):
-            # Mock the Path class
+        def run_check():
+            container_json = json.dumps(container_fingerprint)
             with mock.patch("nemo_rl.Path") as mock_path_class:
-                mock_repo_root = mock.MagicMock()
                 mock_fingerprint_script = mock.MagicMock()
                 mock_fingerprint_script.exists.return_value = True
-                mock_repo_root.__truediv__ = mock.MagicMock(
-                    return_value=mock_fingerprint_script
-                )
 
                 mock_container_fp = mock.MagicMock()
                 mock_container_fp.exists.return_value = True
-                mock_container_fp.read_text.return_value = container_fingerprint
+                mock_container_fp.read_text.return_value = container_json
 
                 def path_side_effect(arg):
                     if str(arg) == "/opt/nemo_rl_container_fingerprint":
                         return mock_container_fp
-                    return Path(arg)
+                    repo_path = mock.MagicMock()
+                    repo_path.exists.return_value = True
+                    repo_path.__truediv__ = mock.MagicMock(
+                        return_value=mock_fingerprint_script
+                    )
+                    return repo_path
 
                 mock_path_class.side_effect = path_side_effect
+                with mock.patch("runpy.run_path", side_effect=mock_run_path):
+                    _check_container_fingerprint()
 
-                from nemo_rl import _check_container_fingerprint
-
-                # Should not raise, just log warning
-                _check_container_fingerprint()
-
-        # No exception raised
-        assert True
+        if ignore_mismatch:
+            run_check()
+            assert "Proceeding anyway" in caplog.text
+        else:
+            with pytest.raises(RuntimeError, match="Container/Code Version Mismatch"):
+                run_check()
+            assert "Proceeding anyway" not in caplog.text
 
     @pytest.mark.skip(reason="Complex mocking - integration test more appropriate")
     def test_check_handles_missing_fingerprint_file(self, monkeypatch):
