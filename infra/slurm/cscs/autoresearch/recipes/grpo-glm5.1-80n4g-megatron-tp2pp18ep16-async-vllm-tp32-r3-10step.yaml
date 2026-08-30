@@ -1,4 +1,4 @@
-defaults: grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-checkpoint-save.yaml
+defaults: ./grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-checkpoint-save.yaml
 
 # Ten-step GLM-5.1 production characterization on CSCS GH200. This keeps the
 # runtime-proven TP2/PP18/EP16 trainer and TP32/EP32 vLLM topology, but records

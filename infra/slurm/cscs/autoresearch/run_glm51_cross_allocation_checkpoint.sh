@@ -28,9 +28,9 @@ DIAGNOSTIC_LOG=$RUN_DIR/checkpoint_stall_diagnostics.txt
 NODE_DIAGNOSTIC_SCRIPT=$REPO_DIR/infra/slurm/cscs/autoresearch/collect_ray_node_diagnostics.py
 
 if [[ "$PHASE" == "save" ]]; then
-  DEFAULT_RECIPE=$REPO_DIR/examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml
+  DEFAULT_RECIPE=$REPO_DIR/infra/slurm/cscs/autoresearch/recipes/grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml
 else
-  DEFAULT_RECIPE=$REPO_DIR/examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml
+  DEFAULT_RECIPE=$REPO_DIR/infra/slurm/cscs/autoresearch/recipes/grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml
 fi
 RECIPE=${GLM_RECIPE:-$DEFAULT_RECIPE}
 export GLM_RECIPE=$RECIPE

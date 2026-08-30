@@ -1,4 +1,4 @@
-defaults: ../grpo-glm5.1-64n8g-megatron.yaml
+defaults: ../../../../../examples/configs/recipes/llm/grpo-glm5.1-64n8g-megatron.yaml
 
 # Phase A of the GLM-5.1 cross-allocation checkpoint proof on CSCS GH200.
 # Training uses 72 nodes (288 ranks); rollout uses eight nodes (32 ranks).

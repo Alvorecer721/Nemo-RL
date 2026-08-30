@@ -30,7 +30,7 @@ from infra.slurm.cscs.autoresearch.validate_glm51_r3_10step import (
 REPO_ROOT = Path(__file__).parents[3]
 RECIPE = (
     REPO_ROOT
-    / "examples/configs/recipes/llm/autoresearch"
+    / "infra/slurm/cscs/autoresearch/recipes"
     / "grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-r3-10step.yaml"
 )
 

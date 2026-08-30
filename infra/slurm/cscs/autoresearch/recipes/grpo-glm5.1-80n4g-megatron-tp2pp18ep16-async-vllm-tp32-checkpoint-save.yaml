@@ -1,4 +1,4 @@
-defaults: grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml
+defaults: ./grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml
 
 # Capacity diagnostic without the Megatron CPU-placeholder fix. The 72-node
 # trainer remains 288 ranks, with dense DP8 and expert DP1. TP2 halves the

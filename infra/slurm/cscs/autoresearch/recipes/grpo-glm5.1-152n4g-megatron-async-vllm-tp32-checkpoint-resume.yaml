@@ -1,4 +1,4 @@
-defaults: grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml
+defaults: ./grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-resume.yaml
 
 # Capacity-only Phase-B probe. TP1/PP18 stays checkpoint-compatible while
 # training DP grows from 16 to 32, halving DP-sharded optimizer state per rank.

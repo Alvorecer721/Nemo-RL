@@ -1,4 +1,4 @@
-defaults: grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml
+defaults: ./grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml
 
 # Phase B runs in a new allocation. It discovers step_1, restores optimizer,
 # scheduler, replay and data cursors, then performs step 2. A second multi-TiB
