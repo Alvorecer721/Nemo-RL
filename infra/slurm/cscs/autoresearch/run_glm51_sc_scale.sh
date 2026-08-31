@@ -11,6 +11,7 @@ MEGATRON_CACHE=${GLM_MEGATRON_CACHE:?}
 RECIPE=${GLM_RECIPE:?}
 RUN_ROOT=${GLM_RUN_DIR:?}
 EXPECTED_STEPS=${GLM_EXPECTED_STEPS:-10}
+EXPECTED_MIN_GROUPS_FOR_STREAMING_TRAIN=${GLM_EXPECTED_MIN_GROUPS_FOR_STREAMING_TRAIN:-16}
 EXPECTED_SPEC_TOKENS=${GLM_EXPECTED_SPEC_TOKENS:-0}
 EXPECTED_SPEC_METHOD=${GLM_EXPECTED_SPEC_METHOD:-none}
 RUN_DIR=$RUN_ROOT/${NRL_SLURM_JOB_ID:?}
@@ -123,6 +124,9 @@ profile = validate_scale_config(
     expected_generation_nodes=int(os.environ["GLM_GENERATION_NODES"]),
     expected_steps=int(os.environ["GLM_EXPECTED_STEPS"]),
     expected_sampler=os.environ["GLM_EXPECTED_SAMPLER"],
+    expected_min_groups_for_streaming_train=int(
+        os.environ["GLM_EXPECTED_MIN_GROUPS_FOR_STREAMING_TRAIN"]
+    ),
     expected_speculative_tokens=int(os.environ["GLM_EXPECTED_SPEC_TOKENS"]),
     expected_speculative_method=os.environ["GLM_EXPECTED_SPEC_METHOD"],
     expected_fused_linear_logprobs=expected_fused == "1",

@@ -40,6 +40,7 @@ class GLM51ScaleProfile:
     max_new_tokens: int
     sampler: str
     steps: int
+    min_groups_for_streaming_train: int
     speculative_method: str
     speculative_tokens: int
     fused_linear_logprobs: bool
@@ -71,6 +72,7 @@ class GLM51ScaleProfile:
             f"max_new={self.max_new_tokens} "
             f"vllm_tp={self.vllm_tensor_parallel_size} vllm_dp={vllm_dp} "
             f"transport=transfer-queue sampler={self.sampler} steps={self.steps} "
+            f"stream_min_groups={self.min_groups_for_streaming_train} "
             f"spec_method={self.speculative_method} "
             f"spec_tokens={self.speculative_tokens} "
             f"fused_logprobs={str(self.fused_linear_logprobs).lower()} "
@@ -111,6 +113,7 @@ def validate_scale_config(
     expected_generation_nodes: int,
     expected_steps: int,
     expected_sampler: str,
+    expected_min_groups_for_streaming_train: int,
     expected_speculative_tokens: int,
     expected_speculative_method: str,
     expected_fused_linear_logprobs: bool,
@@ -133,6 +136,7 @@ def validate_scale_config(
         max_new_tokens=generation["max_new_tokens"],
         sampler=config.async_rl.sampler.name,
         steps=config.grpo.max_num_steps,
+        min_groups_for_streaming_train=(config.async_rl.min_groups_for_streaming_train),
         speculative_method=expected_speculative_method,
         speculative_tokens=expected_speculative_tokens,
         fused_linear_logprobs=megatron["use_fused_linear_logprobs"],
@@ -222,8 +226,8 @@ def validate_scale_config(
         ),
         (
             "async_rl.min_groups_for_streaming_train",
-            config.async_rl.min_groups_for_streaming_train,
-            16,
+            profile.min_groups_for_streaming_train,
+            expected_min_groups_for_streaming_train,
         ),
         ("async_rl.max_inflight_prompts", config.async_rl.max_inflight_prompts, 32),
         ("async_rl.max_buffered_rollouts", config.async_rl.max_buffered_rollouts, 128),

@@ -30,6 +30,16 @@ MTP_RECIPE = (
     / "examples/configs/recipes/llm/autoresearch"
     / "grpo-glm5.1-136n4g-megatron-tp2pp18ep16-ready-first-mtp3.yaml"
 )
+STREAM8_RECIPE = (
+    REPO_ROOT
+    / "infra/slurm/cscs/autoresearch/recipes"
+    / "grpo-glm5.1-136n4g-megatron-tp2pp18ep16-ready-first-stream8-fused.yaml"
+)
+STREAM8_MTP_RECIPE = (
+    REPO_ROOT
+    / "infra/slurm/cscs/autoresearch/recipes"
+    / "grpo-glm5.1-136n4g-megatron-tp2pp18ep16-ready-first-stream8-fused-mtp3.yaml"
+)
 
 
 def _load_recipe(
@@ -46,6 +56,7 @@ def _validate_config(
     speculative_tokens: int,
     speculative_method: str,
     fused_linear_logprobs: bool,
+    min_groups_for_streaming_train: int,
 ) -> GLM51ScaleProfile:
     return validate_scale_config(
         config,
@@ -53,6 +64,7 @@ def _validate_config(
         expected_generation_nodes=64,
         expected_steps=10,
         expected_sampler="ready_first",
+        expected_min_groups_for_streaming_train=min_groups_for_streaming_train,
         expected_speculative_tokens=speculative_tokens,
         expected_speculative_method=speculative_method,
         expected_fused_linear_logprobs=fused_linear_logprobs,
@@ -92,6 +104,7 @@ def test_glm51_mtp_recipe_preserves_topology(
         speculative_tokens=3,
         speculative_method="deepseek_mtp",
         fused_linear_logprobs=True,
+        min_groups_for_streaming_train=16,
     )
 
     generation = config.policy["generation"]
@@ -129,15 +142,58 @@ def test_validate_scale_config_accepts_baseline(
         speculative_tokens=0,
         speculative_method="none",
         fused_linear_logprobs=False,
+        min_groups_for_streaming_train=16,
     )
 
     assert profile.describe() == (
         "glm51_sc_scale_config=OK tp=2 pp=18 etp=1 ep=16 "
         "dense_dp=8 expert_dp=1 total_seq=4096 max_new=3584 "
         "vllm_tp=32 vllm_dp=8 transport=transfer-queue "
-        "sampler=ready_first steps=10 spec_method=none spec_tokens=0 "
+        "sampler=ready_first steps=10 stream_min_groups=16 "
+        "spec_method=none spec_tokens=0 "
         "fused_logprobs=false logprob_chunk=256 overlap_param_gather=true"
     )
+
+
+def test_glm51_stream8_pair_preserves_step_volume_and_fused_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    model_dir = tmp_path / "glm-5.1"
+    _write_mtp_model(model_dir)
+    control = _load_recipe(monkeypatch, STREAM8_RECIPE, model_dir)
+    challenger = _load_recipe(monkeypatch, STREAM8_MTP_RECIPE, model_dir)
+
+    control_profile = _validate_config(
+        control,
+        speculative_tokens=0,
+        speculative_method="none",
+        fused_linear_logprobs=True,
+        min_groups_for_streaming_train=8,
+    )
+    challenger_profile = _validate_config(
+        challenger,
+        speculative_tokens=3,
+        speculative_method="deepseek_mtp",
+        fused_linear_logprobs=True,
+        min_groups_for_streaming_train=8,
+    )
+
+    for config in (control, challenger):
+        assert config.grpo.num_prompts_per_step == 16
+        assert config.grpo.num_generations_per_prompt == 8
+        assert config.policy["train_global_batch_size"] == 128
+        assert config.grpo.max_num_steps == 10
+        assert config.async_rl.min_groups_for_streaming_train == 8
+    assert control_profile.min_groups_for_streaming_train == 8
+    assert challenger_profile.min_groups_for_streaming_train == 8
+    assert (
+        control.policy["generation"].get("vllm_kwargs", {}).get("speculative_config")
+        is None
+    )
+    assert challenger.policy["generation"]["vllm_kwargs"]["speculative_config"] == {
+        "method": "deepseek_mtp",
+        "num_speculative_tokens": 3,
+    }
 
 
 def test_validate_scale_config_rejects_drift(
@@ -157,6 +213,7 @@ def test_validate_scale_config_rejects_drift(
             speculative_tokens=0,
             speculative_method="none",
             fused_linear_logprobs=False,
+            min_groups_for_streaming_train=16,
         )
 
 
@@ -220,6 +277,7 @@ validate_scale_config(
     expected_generation_nodes=64,
     expected_steps=10,
     expected_sampler="ready_first",
+    expected_min_groups_for_streaming_train=16,
     expected_speculative_tokens=0,
     expected_speculative_method="none",
     expected_fused_linear_logprobs=False,
@@ -251,6 +309,7 @@ def test_scale_runner_uses_fail_closed_validator() -> None:
     )[0]
 
     assert "validate_scale_config(" in preflight
+    assert "GLM_EXPECTED_MIN_GROUPS_FOR_STREAMING_TRAIN" in preflight
     assert "\nassert " not in preflight
 
 
