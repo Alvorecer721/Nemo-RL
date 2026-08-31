@@ -1,7 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Three-GPU reproduction for concurrent nccl_reshard PP-stage groups.
+"""Three-rank reproduction for concurrent nccl_reshard PP-stage groups.
 
 The topology is the smallest one that preserves the production overlap:
 
@@ -9,7 +9,8 @@ The topology is the smallest one that preserves the production overlap:
 * global rank 1 is the source for PP stage 1 and joins communicator 1;
 * global rank 2 is the generation receiver and joins both communicators.
 
-The receiver queues the stage transfers with the same stream/event schedule as
+The ranks may be colocated or spread across nodes.  The receiver queues the
+stage transfers with the same stream/event schedule as
 ``VllmInternalWorkerExtension._nccl_reshard_refit``.  The payload goes through
 the repository's real ``StatelessProcessGroup`` and Python exact-transfer
 ``xferdtensor`` fallback, without loading a model or starting Ray/vLLM.
@@ -73,7 +74,7 @@ def _find_free_ports(count: int) -> list[int]:
     try:
         for _ in range(count):
             candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            candidate.bind(("127.0.0.1", 0))
+            candidate.bind(("", 0))
             sockets.append(candidate)
         return [int(candidate.getsockname()[1]) for candidate in sockets]
     finally:
@@ -81,32 +82,37 @@ def _find_free_ports(count: int) -> list[int]:
             candidate.close()
 
 
-def _broadcast_ports(rank: int) -> list[int]:
-    payload: list[Optional[list[int]]] = [
-        _find_free_ports(STAGE_COUNT) if rank == 0 else None
-    ]
-    dist.broadcast_object_list(payload, src=0)
-    ports = payload[0]
-    if ports is None or len(ports) != STAGE_COUNT:
-        raise RuntimeError(f"failed to distribute {STAGE_COUNT} rendezvous ports")
-    return ports
+def _collect_endpoints(rank: int) -> list[tuple[str, int]]:
+    local_endpoint = (
+        (socket.gethostname(), _find_free_ports(1)[0])
+        if rank < STAGE_COUNT
+        else None
+    )
+    gathered: list[Optional[tuple[str, int]]] = [None] * WORLD_SIZE
+    dist.all_gather_object(gathered, local_endpoint)
+    endpoints = gathered[:STAGE_COUNT]
+    if any(endpoint is None for endpoint in endpoints):
+        raise RuntimeError(f"failed to collect stage endpoints: {gathered}")
+    return [endpoint for endpoint in endpoints if endpoint is not None]
 
 
 def _build_groups(
-    rank: int, ports: list[int], device: int
+    rank: int, endpoints: list[tuple[str, int]], device: int
 ) -> dict[int, StatelessProcessGroup]:
     stages = range(STAGE_COUNT) if rank == GENERATION_RANK else (rank,)
     groups = {}
     for stage in stages:
+        master_address, port = endpoints[stage]
         group_rank = 1 if rank == GENERATION_RANK else 0
         print(
-            f"rank={rank} group_init stage={stage} port={ports[stage]} "
+            f"rank={rank} group_init stage={stage} address={master_address} "
+            f"port={port} "
             f"group_rank={group_rank}/2",
             flush=True,
         )
         group = StatelessProcessGroup(
-            master_address="127.0.0.1",
-            port=ports[stage],
+            master_address=master_address,
+            port=port,
             rank=group_rank,
             world_size=2,
         )
@@ -274,12 +280,19 @@ def main() -> None:
     world_size = dist.get_world_size()
     if world_size != WORLD_SIZE:
         raise RuntimeError(f"expected world size {WORLD_SIZE}, got {world_size}")
-    local_rank = int(os.environ["LOCAL_RANK"])
-    if torch.cuda.device_count() < WORLD_SIZE:
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if torch.cuda.device_count() <= local_rank:
         raise RuntimeError(
-            f"expected at least {WORLD_SIZE} visible GPUs, got {torch.cuda.device_count()}"
+            f"local rank {local_rank} is outside the "
+            f"{torch.cuda.device_count()} visible GPUs"
         )
     torch.cuda.set_device(local_rank)
+
+    master_address = os.environ.get("REFIT_REPRO_GROUP_ADDR") or os.environ.get(
+        "MASTER_ADDR"
+    )
+    if not master_address:
+        raise RuntimeError("MASTER_ADDR or REFIT_REPRO_GROUP_ADDR must be set")
 
     implicit_order = os.environ.get("NCCL_LAUNCH_ORDER_IMPLICIT")
     if implicit_order not in ("0", "1"):
@@ -300,8 +313,8 @@ def main() -> None:
         raise RuntimeError("tensor byte count is not divisible by BF16 element size")
     numel = tensor_bytes // element_size
 
-    ports = _broadcast_ports(rank)
-    groups = _build_groups(rank, ports, local_rank)
+    endpoints = _collect_endpoints(rank)
+    groups = _build_groups(rank, endpoints, local_rank)
     dist.barrier()
     if rank == 0:
         print(
@@ -311,6 +324,8 @@ def main() -> None:
                     "implicit_order": int(implicit_order),
                     "iterations": args.iterations,
                     "jitter_ms": args.jitter_ms,
+                    "master_address": master_address,
+                    "stage_endpoints": endpoints,
                     "streams": args.streams,
                     "tensor_mib": args.tensor_mib,
                     "transfers_per_stage": args.transfers_per_stage,
