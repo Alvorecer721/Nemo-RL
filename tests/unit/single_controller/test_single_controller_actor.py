@@ -1430,6 +1430,8 @@ def test_train_pump_logs_vllm_speculative_metrics(monkeypatch) -> None:
         tags=[{"weight_version": 0}, {"weight_version": 0}],
     )
     ctrl = _train_pump_controller(sampler=_OneThenEmptySampler(meta))
+    # _OneThenEmptySampler represents one prompt group containing two samples.
+    ctrl._algo_cfg.num_prompts_per_step = 1
     generation = FakeVllmGeneration()
     ctrl._gen = generation
     ctrl._sync_weights = AsyncMock(return_value=0)
