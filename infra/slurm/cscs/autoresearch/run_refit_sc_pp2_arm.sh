@@ -49,6 +49,26 @@ MCORE_ACTOR_PY=$NEMO_RL_VENV_DIR/nemo_rl.models.policy.workers.megatron_policy_w
 [[ -x "$MCORE_ACTOR_PY" ]] || { echo "Missing certified MCore actor Python" >&2; exit 1; }
 "$VLLM_ACTOR_PY" -c 'import vllm; print(f"certified_vllm={vllm.__version__}")'
 "$MCORE_ACTOR_PY" -c 'import megatron; print("certified_megatron=OK")'
+/opt/nemo_rl_venv/bin/python - <<'PY'
+from pathlib import Path
+
+from nemo_rl.distributed.ray_actor_environment_registry import get_actor_python_env
+from nemo_rl.utils.venvs import VENV_READY_MARKER, venv_is_current
+
+root = Path("/opt/ray_venvs")
+actors = (
+    "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker",
+    "nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker",
+)
+for actor in actors:
+    worker_command = get_actor_python_env(actor)
+    marker = root / actor / VENV_READY_MARKER
+    if not venv_is_current(marker, worker_command):
+        raise RuntimeError(
+            f"certified actor venv fingerprint mismatch for {actor}; refusing to rebuild"
+        )
+print("certified_actor_fingerprints=OK")
+PY
 
 printf 'arm=%s\nhead=%s\nsteps=%s\nstreams=%s\nimplicit_order=%s\n' \
   "$ARM_NAME" "$EXPECTED_HEAD" "$EXPECTED_STEPS" \
