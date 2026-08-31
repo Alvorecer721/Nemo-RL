@@ -110,6 +110,13 @@ from infra.slurm.cscs.autoresearch.validate_glm51_sc_scale import (
     validate_scale_config,
 )
 
+expected_fused = os.environ["GLM_EXPECTED_FUSED_LINEAR_LOGPROBS"]
+if expected_fused not in {"0", "1"}:
+    raise ValueError(
+        "GLM_EXPECTED_FUSED_LINEAR_LOGPROBS must be 0 or 1; "
+        f"got {expected_fused!r}"
+    )
+
 profile = validate_scale_config(
     load_scale_config(Path(os.environ["GLM_RECIPE"])),
     expected_total_nodes=int(os.environ["GLM_TOTAL_NODES"]),
@@ -118,6 +125,7 @@ profile = validate_scale_config(
     expected_sampler=os.environ["GLM_EXPECTED_SAMPLER"],
     expected_speculative_tokens=int(os.environ["GLM_EXPECTED_SPEC_TOKENS"]),
     expected_speculative_method=os.environ["GLM_EXPECTED_SPEC_METHOD"],
+    expected_fused_linear_logprobs=expected_fused == "1",
 )
 print(profile.describe())
 PY

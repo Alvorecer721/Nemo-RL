@@ -41,7 +41,11 @@ def _load_recipe(
 
 
 def _validate_config(
-    config: MasterConfig, *, speculative_tokens: int, speculative_method: str
+    config: MasterConfig,
+    *,
+    speculative_tokens: int,
+    speculative_method: str,
+    fused_linear_logprobs: bool,
 ) -> GLM51ScaleProfile:
     return validate_scale_config(
         config,
@@ -51,6 +55,7 @@ def _validate_config(
         expected_sampler="ready_first",
         expected_speculative_tokens=speculative_tokens,
         expected_speculative_method=speculative_method,
+        expected_fused_linear_logprobs=fused_linear_logprobs,
     )
 
 
@@ -83,7 +88,10 @@ def test_glm51_mtp_recipe_preserves_topology(
     _write_mtp_model(model_dir)
     config = _load_recipe(monkeypatch, MTP_RECIPE, model_dir)
     profile = _validate_config(
-        config, speculative_tokens=3, speculative_method="deepseek_mtp"
+        config,
+        speculative_tokens=3,
+        speculative_method="deepseek_mtp",
+        fused_linear_logprobs=True,
     )
 
     generation = config.policy["generation"]
@@ -97,7 +105,18 @@ def test_glm51_mtp_recipe_preserves_topology(
         "method": "deepseek_mtp",
         "num_speculative_tokens": 3,
     }
-    assert profile.describe().endswith("spec_method=deepseek_mtp spec_tokens=3")
+    assert config.policy["megatron_cfg"]["use_fused_linear_logprobs"] is True
+    assert config.policy["megatron_cfg"]["fused_linear_logprobs_chunk_size"] == 256
+    assert (
+        config.policy["megatron_cfg"]["distributed_data_parallel_config"][
+            "overlap_param_gather"
+        ]
+        is False
+    )
+    assert profile.describe().endswith(
+        "spec_method=deepseek_mtp spec_tokens=3 fused_logprobs=true "
+        "logprob_chunk=256 overlap_param_gather=false"
+    )
 
 
 def test_validate_scale_config_accepts_baseline(
@@ -105,13 +124,19 @@ def test_validate_scale_config_accepts_baseline(
 ) -> None:
     config = _load_recipe(monkeypatch, BASE_RECIPE, tmp_path / "glm-5.1")
 
-    profile = _validate_config(config, speculative_tokens=0, speculative_method="none")
+    profile = _validate_config(
+        config,
+        speculative_tokens=0,
+        speculative_method="none",
+        fused_linear_logprobs=False,
+    )
 
     assert profile.describe() == (
         "glm51_sc_scale_config=OK tp=2 pp=18 etp=1 ep=16 "
         "dense_dp=8 expert_dp=1 total_seq=4096 max_new=3584 "
         "vllm_tp=32 vllm_dp=8 transport=transfer-queue "
-        "sampler=ready_first steps=10 spec_method=none spec_tokens=0"
+        "sampler=ready_first steps=10 spec_method=none spec_tokens=0 "
+        "fused_logprobs=false logprob_chunk=256 overlap_param_gather=true"
     )
 
 
@@ -127,7 +152,12 @@ def test_validate_scale_config_rejects_drift(
             "requires policy.generation.refit_transport='nccl_reshard'; resolved 'ipc'"
         ),
     ):
-        _validate_config(config, speculative_tokens=0, speculative_method="none")
+        _validate_config(
+            config,
+            speculative_tokens=0,
+            speculative_method="none",
+            fused_linear_logprobs=False,
+        )
 
 
 def test_validate_scale_config_applies_single_controller_contract(
@@ -192,6 +222,7 @@ validate_scale_config(
     expected_sampler="ready_first",
     expected_speculative_tokens=0,
     expected_speculative_method="none",
+    expected_fused_linear_logprobs=False,
 )
 """
 

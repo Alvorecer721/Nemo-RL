@@ -12,5 +12,6 @@ export GLM_RUN_ROOT=${GLM_RUN_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_glm51
 export SBATCH_LOG_ROOT=${SBATCH_LOG_ROOT:-$REPO_DIR/.tmp/slurm-logs/glm51-ready-first-64inf-mtp3/$SOURCE_HEAD}
 export GLM_EXPECTED_SPEC_TOKENS=3
 export GLM_EXPECTED_SPEC_METHOD=deepseek_mtp
+export GLM_EXPECTED_FUSED_LINEAR_LOGPROBS=1
 
 exec "$REPO_DIR/infra/slurm/cscs/autoresearch/submit_glm51_sc_scale.sh"

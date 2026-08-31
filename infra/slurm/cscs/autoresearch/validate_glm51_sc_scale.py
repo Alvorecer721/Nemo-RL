@@ -42,6 +42,9 @@ class GLM51ScaleProfile:
     steps: int
     speculative_method: str
     speculative_tokens: int
+    fused_linear_logprobs: bool
+    fused_linear_logprobs_chunk_size: int
+    overlap_param_gather: bool
 
     def describe(self) -> str:
         """Return the stable configuration marker consumed by operators."""
@@ -69,7 +72,10 @@ class GLM51ScaleProfile:
             f"vllm_tp={self.vllm_tensor_parallel_size} vllm_dp={vllm_dp} "
             f"transport=transfer-queue sampler={self.sampler} steps={self.steps} "
             f"spec_method={self.speculative_method} "
-            f"spec_tokens={self.speculative_tokens}"
+            f"spec_tokens={self.speculative_tokens} "
+            f"fused_logprobs={str(self.fused_linear_logprobs).lower()} "
+            f"logprob_chunk={self.fused_linear_logprobs_chunk_size} "
+            f"overlap_param_gather={str(self.overlap_param_gather).lower()}"
         )
 
 
@@ -107,6 +113,7 @@ def validate_scale_config(
     expected_sampler: str,
     expected_speculative_tokens: int,
     expected_speculative_method: str,
+    expected_fused_linear_logprobs: bool,
 ) -> GLM51ScaleProfile:
     """Validate the exact runtime envelope certified by the scale gate."""
     megatron = config.policy["megatron_cfg"]
@@ -128,6 +135,11 @@ def validate_scale_config(
         steps=config.grpo.max_num_steps,
         speculative_method=expected_speculative_method,
         speculative_tokens=expected_speculative_tokens,
+        fused_linear_logprobs=megatron["use_fused_linear_logprobs"],
+        fused_linear_logprobs_chunk_size=megatron["fused_linear_logprobs_chunk_size"],
+        overlap_param_gather=megatron["distributed_data_parallel_config"][
+            "overlap_param_gather"
+        ],
     )
 
     # These are certification invariants, not fallback defaults. Changing one
@@ -216,6 +228,21 @@ def validate_scale_config(
         ("async_rl.max_inflight_prompts", config.async_rl.max_inflight_prompts, 32),
         ("async_rl.max_buffered_rollouts", config.async_rl.max_buffered_rollouts, 128),
         ("checkpointing.enabled", config.checkpointing["enabled"], False),
+        (
+            "policy.megatron_cfg.use_fused_linear_logprobs",
+            profile.fused_linear_logprobs,
+            expected_fused_linear_logprobs,
+        ),
+        (
+            "policy.megatron_cfg.fused_linear_logprobs_chunk_size",
+            profile.fused_linear_logprobs_chunk_size,
+            256,
+        ),
+        (
+            "policy.megatron_cfg.distributed_data_parallel_config.overlap_param_gather",
+            profile.overlap_param_gather,
+            not expected_fused_linear_logprobs,
+        ),
     )
     for field, actual, expected in checks:
         _require_equal(field, actual, expected)
