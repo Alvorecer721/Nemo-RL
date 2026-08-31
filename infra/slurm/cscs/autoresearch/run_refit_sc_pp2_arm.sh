@@ -11,7 +11,22 @@ ARM_DIR=${REFIT_SC_ARM_DIR:?}
 ARM_NAME=${REFIT_SC_ARM_NAME:?}
 EXPECTED_STEPS=${REFIT_SC_STEPS:-12}
 ARM_TIMEOUT_S=${REFIT_SC_ARM_TIMEOUT_S:-900}
+PP_SIZE=${REFIT_SC_PP_SIZE:-2}
+GEN_TP_SIZE=${REFIT_SC_GEN_TP_SIZE:-1}
+GEN_NUM_NODES=${REFIT_SC_GEN_NUM_NODES:-1}
+GEN_GPUS_PER_NODE=${REFIT_SC_GEN_GPUS_PER_NODE:-1}
+CLUSTER_NUM_NODES=${REFIT_SC_CLUSTER_NUM_NODES:-1}
+CLUSTER_GPUS_PER_NODE=${REFIT_SC_CLUSTER_GPUS_PER_NODE:-3}
 RUN_LOG=$ARM_DIR/run.log
+
+for value in \
+  "$EXPECTED_STEPS" "$PP_SIZE" "$GEN_TP_SIZE" "$GEN_NUM_NODES" \
+  "$GEN_GPUS_PER_NODE" "$CLUSTER_NUM_NODES" "$CLUSTER_GPUS_PER_NODE"; do
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
+    echo "SingleController topology values must be positive integers: $value" >&2
+    exit 1
+  }
+done
 
 [[ $(git -C "$SOURCE_REPO_DIR" rev-parse HEAD) == "$EXPECTED_HEAD" ]] || {
   echo "Source HEAD changed after submission" >&2
@@ -71,9 +86,10 @@ for actor in actors:
 print("certified_actor_fingerprints=OK")
 PY
 
-printf 'arm=%s\nhead=%s\nsteps=%s\nstreams=%s\nimplicit_order=%s\n' \
+printf 'arm=%s\nhead=%s\nsteps=%s\nstreams=%s\nimplicit_order=%s\npp_size=%s\ngen_tp_size=%s\ncluster=%sx%s\n' \
   "$ARM_NAME" "$EXPECTED_HEAD" "$EXPECTED_STEPS" \
-  "${NRL_REFIT_NUM_STREAMS:?}" "${NCCL_LAUNCH_ORDER_IMPLICIT:?}"
+  "${NRL_REFIT_NUM_STREAMS:?}" "${NCCL_LAUNCH_ORDER_IMPLICIT:?}" \
+  "$PP_SIZE" "$GEN_TP_SIZE" "$CLUSTER_NUM_NODES" "$CLUSTER_GPUS_PER_NODE"
 
 set +e
 timeout --signal=TERM --kill-after=30s "${ARM_TIMEOUT_S}s" \
@@ -93,17 +109,17 @@ timeout --signal=TERM --kill-after=30s "${ARM_TIMEOUT_S}s" \
     policy.max_total_sequence_length=512 \
     policy.megatron_cfg.enabled=true \
     policy.megatron_cfg.tensor_model_parallel_size=1 \
-    policy.megatron_cfg.pipeline_model_parallel_size=2 \
+    policy.megatron_cfg.pipeline_model_parallel_size="$PP_SIZE" \
     policy.dtensor_cfg.enabled=false \
     policy.generation.backend=vllm \
     policy.generation.colocated.enabled=false \
-    policy.generation.colocated.resources.num_nodes=1 \
-    policy.generation.colocated.resources.gpus_per_node=1 \
-    policy.generation.vllm_cfg.tensor_parallel_size=1 \
+    policy.generation.colocated.resources.num_nodes="$GEN_NUM_NODES" \
+    policy.generation.colocated.resources.gpus_per_node="$GEN_GPUS_PER_NODE" \
+    policy.generation.vllm_cfg.tensor_parallel_size="$GEN_TP_SIZE" \
     policy.generation.vllm_cfg.async_engine=true \
     policy.generation.refit_transport=nccl_reshard \
-    cluster.num_nodes=1 \
-    cluster.gpus_per_node=3 \
+    cluster.num_nodes="$CLUSTER_NUM_NODES" \
+    cluster.gpus_per_node="$CLUSTER_GPUS_PER_NODE" \
     checkpointing.enabled=false \
     logger.log_dir="$ARM_DIR/tb" \
     logger.wandb_enabled=false \
