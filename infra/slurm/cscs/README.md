@@ -93,13 +93,12 @@ image built from this checkout. It runs the baked `/opt/nemo-rl` tree and
 frozen environments under `/opt/ray_venvs`; it does not require checkout-local
 `.venv` or `venvs` directories.
 
-The current SquashFS is a clean, standalone build from `7c68228e4f09`. It
-contains the `packed_broadcast` stream joins, RayExecutorV2 TCPStore and
-MessageQueue port patches, the post-v0.25.1 invalid-MNNVL-workspace fix, FP8
-in-place refit fix, and dependency-aware frozen environment markers. It
-supersedes the earlier
-`336136c10490-dirty-fd360335e307` artifact, which required a checkout overlay
-and must not be used for multi-node startup or refit certification.
+The current SquashFS is the clean, standalone release build from
+`ad878283417cfa2fc60d371164a120904a57a0cc`. It contains the curated upstream
+sync, vLLM 0.25.1, fail-closed embedded source fingerprints, and the frozen
+worker environments required by the Apertus and GLM direct-Megatron workflows.
+Unused SGLang, DTensor, Automodel, ModelOpt-worker, and optional Gym-server
+environments are intentionally omitted.
 
 The EDF ships with the checkout and points at the shared certified copy below
 (no build needed, readable by all of `infra01`). To run your own build instead,
@@ -108,13 +107,23 @@ path — and leave the checked-in default on the shared copy.
 
 | Field | Value |
 | --- | --- |
-| Shared SquashFS | `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus+v0.7.0+vllm-0.25.1.aarch64.sqsh` |
-| Builder original | `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-7c68228e4f09-38c6b702948c.sqsh` |
-| Size | 48,752,754,688 bytes (about 45.4 GiB) |
-| SHA-256 | `d50f39e45f6104d13e12b9323dbe28cc91b0f13e3a250d029ce6cc7e7646742a` |
-| OCI tag | `nemo-rl-apertus:vllm-0.25.1-7c68228e4f09-38c6b702948c` |
-| OCI image ID | `18c36e6a31df01fc0370f65f9446c373d741198abf821b35a89be8214c11e79e` |
+| Production SquashFS | `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus-vllm-0.25.1-ad878283417c-3f68ccb671f5.aarch64.sqsh` |
+| Legacy compatibility alias (old 7c682; not production) | `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus+v0.7.0+vllm-0.25.1.aarch64.sqsh` |
+| Immutable rollback | `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus-vllm-0.25.1-7c68228e4f09-38c6b702948c.aarch64.sqsh` |
+| Builder original | `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-ad878283417c-3f68ccb671f5.sqsh` |
+| Source revision | `ad878283417cfa2fc60d371164a120904a57a0cc` |
+| Build job | `3237975` (`COMPLETED 0:0`) |
+| Fingerprint/import probe | `3238351` (`COMPLETED 0:0`) |
+| GRPO acceptance | `3238475` (`COMPLETED 0:0`; generation KL error `0.0003`) |
+| Production-path probe | `3238722` (`COMPLETED 0:0`) |
+| Size | 44,101,795,840 bytes (about 41.1 GiB) |
+| SHA-256 | `377a8a5a7469b8b1b6382e06c6fb947a910e4592e769a5975261e3aa6ec94db0` |
+| OCI tag | `nemo-rl-apertus:vllm-0.25.1-ad878283417c-3f68ccb671f5` |
+| OCI image ID | `746cba51b0851c5c165960a34ac86977175f59164963271de7718e97a7ad071e` |
 | Persistent OCI data | `/iopsstor/scratch/cscs/xyixuan/podman-cache/nemo-rl` |
+
+The legacy compatibility alias is a prior locally built CSCS artifact, not an
+NVIDIA release image. No checked-in launcher uses it.
 
 The image ID suffix is `<12-char-git-revision>-<12-char-build-input-hash>`.
 Release builds reject dirty repositories and dirty recursive submodules. The
