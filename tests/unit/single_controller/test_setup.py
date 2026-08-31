@@ -871,6 +871,10 @@ class TestSetup:
             patched_factories["_create_advantage_estimator"].return_value
         )
         assert actor_args.loss_fn is patched_factories["ClippedPGLossFn"].return_value
+        patched_factories["ClippedPGLossFn"].assert_called_once_with(
+            mc.loss_fn,
+            use_fused_linear_logprobs=False,
+        )
         # tq_buffer + rollout_manager are constructed inline (not mocked).
         assert actor_args.tq_buffer is not None
         assert actor_args.rollout_manager is not None
@@ -888,6 +892,17 @@ class TestSetup:
         assert "teacher_reference_logprobs" in warmup["fields"]
         assert warmup["num_samples"] == 16
         assert warmup["grpo_group_size"] == 2
+
+    def test_propagates_fused_linear_logprobs_to_loss(self, patched_factories):
+        mc = _make_master_config(megatron_enabled=True)
+        mc.policy["megatron_cfg"]["use_fused_linear_logprobs"] = True
+
+        setup_single_controller(mc, MagicMock(pad_token_id=0))
+
+        patched_factories["ClippedPGLossFn"].assert_called_once_with(
+            mc.loss_fn,
+            use_fused_linear_logprobs=True,
+        )
 
     def test_reserves_topology_constrained_training_before_builds(
         self, patched_factories

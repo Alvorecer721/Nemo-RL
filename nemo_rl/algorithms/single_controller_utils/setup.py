@@ -1400,7 +1400,14 @@ def setup_single_controller(
     # Setup Algorithm + Rollout Wiring
     # ==========================
     advantage_estimator = _build_advantage_estimator(master_config)
-    loss_fn: LossFunction = ClippedPGLossFn(master_config.loss_fn)
+    megatron_cfg = policy_config.get("megatron_cfg", {})
+    use_fused_linear_logprobs = bool(
+        megatron_cfg.get("enabled") and megatron_cfg.get("use_fused_linear_logprobs")
+    )
+    loss_fn: LossFunction = ClippedPGLossFn(
+        master_config.loss_fn,
+        use_fused_linear_logprobs=use_fused_linear_logprobs,
+    )
     value_loss_fn: Optional[LossFunction] = (
         MseValueLossFn(master_config.value_loss_fn)  # type: ignore
         if is_ppo_run(master_config)
