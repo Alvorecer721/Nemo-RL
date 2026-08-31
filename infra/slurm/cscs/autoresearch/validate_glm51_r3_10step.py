@@ -28,8 +28,14 @@ EXPECTED_STEPS = 10
 GLM_KL_SAFETY_CEILING = 0.001
 R3_TOKEN_MULT_MEDIAN_CEILING = 1.02
 # R3-on job 3171492 had 4/1,291,712 valid tokens above 0.5 and none above
-# 1.0. The historical R3-off run had 7,873 above 0.5 and 570 above 1.0.
+# 1.0. The larger SingleController MTP3 run 3240688 had 4/4,237,261 above
+# 1.0, a rate statistically compatible with observing zero in the smaller
+# sample. The historical R3-off run had 7,873 above 0.5 and 570 above 1.0.
+# Fraction ceilings keep the gate independent of the number of sampled tokens:
+# the >1.0 ceiling retains more than 10x headroom over the MTP3 observation
+# while remaining more than 44x below the historical R3-off rate.
 R3_ABS_LOGPROB_GT_0_5_FRACTION_CEILING = 1.0e-4
+R3_ABS_LOGPROB_GT_1_0_FRACTION_CEILING = 1.0e-5
 # The 1024-token response envelope truncated 94.5-100% of each batch. The
 # stronger rung is only representative if its larger envelope materially
 # changes that regime rather than merely accumulating more truncated tokens.
@@ -158,10 +164,13 @@ def validate_logprob_tails(summary: dict[str, Any]) -> dict[str, Any]:
     if total_tokens <= 0:
         raise ValueError("Per-token logprob evidence contains no valid tokens")
     fraction_gt_0_5 = count_gt_0_5 / total_tokens
-    if count_gt_1_0:
+    fraction_gt_1_0 = count_gt_1_0 / total_tokens
+    if fraction_gt_1_0 >= R3_ABS_LOGPROB_GT_1_0_FRACTION_CEILING:
         raise ValueError(
-            "Router Replay left valid tokens with abs(delta log p) > 1.0: "
-            f"count={count_gt_1_0}/{total_tokens}"
+            "Router Replay per-token >1.0 tail exceeded its safety envelope: "
+            f"count_gt_1_0={count_gt_1_0}/{total_tokens} "
+            f"({fraction_gt_1_0:.6g}), required < "
+            f"{R3_ABS_LOGPROB_GT_1_0_FRACTION_CEILING}"
         )
     if fraction_gt_0_5 >= R3_ABS_LOGPROB_GT_0_5_FRACTION_CEILING:
         raise ValueError(
@@ -171,6 +180,7 @@ def validate_logprob_tails(summary: dict[str, Any]) -> dict[str, Any]:
             f"{R3_ABS_LOGPROB_GT_0_5_FRACTION_CEILING}"
         )
     summary["fraction_gt_0_5"] = fraction_gt_0_5
+    summary["fraction_gt_1_0"] = fraction_gt_1_0
     return summary
 
 

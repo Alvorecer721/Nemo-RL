@@ -451,6 +451,7 @@ def validate_metrics(
 
     kl = _series(metrics, "train/gen_kl_error", expected_steps)
     token_mult = _series(metrics, "train/token_mult_prob_error", expected_steps)
+    max_seq_mult = _series(metrics, "train/max_seq_mult_prob_error", expected_steps)
     js = _series(metrics, "train/js_divergence_error", expected_steps)
     loss = _series(metrics, "train/loss", expected_steps)
     reward = _series(metrics, "train/reward", expected_steps)
@@ -470,6 +471,16 @@ def validate_metrics(
         raise ValueError(
             "Router Replay probability parity failed: "
             f"min={min(token_mult):.6g}, median={token_mult_median:.6g}"
+        )
+    # A fractional per-token gate must not let one extreme token dominate its
+    # sequence. This metric is the per-sequence mean of exp(abs(delta log p));
+    # keeping its maximum below 1.1 bounds that aggregate probability mismatch
+    # to less than ten percent for every trained sequence.
+    if min(max_seq_mult) < 1 or max(max_seq_mult) >= 1.1:
+        raise ValueError(
+            "Router Replay sequence probability parity failed: "
+            f"min={min(max_seq_mult):.6g}, max={max(max_seq_mult):.6g}, "
+            "required 1 <= value < 1.1"
         )
     if min(js) < 0:
         raise ValueError(f"JS divergence cannot be negative: min={min(js):.6g}")
@@ -512,6 +523,7 @@ def validate_metrics(
             "mean": statistics.fmean(kl),
         },
         "token_mult_prob_error_median": token_mult_median,
+        "max_seq_mult_prob_error": max(max_seq_mult),
         "learning_signal_steps": signal_steps,
         "nonzero_loss_steps": nonzero_loss_steps,
         "nonzero_grad_steps": nonzero_grad_steps,

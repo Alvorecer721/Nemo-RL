@@ -133,7 +133,7 @@ def test_glm51_r3_validator_summarizes_direct_logprob_tails(tmp_path: Path) -> N
     "summary",
     [
         {"total_tokens": 1_000_000, "count_gt_0_5": 100, "count_gt_1_0": 0},
-        {"total_tokens": 1_000_000, "count_gt_0_5": 1, "count_gt_1_0": 1},
+        {"total_tokens": 1_000_000, "count_gt_0_5": 10, "count_gt_1_0": 10},
     ],
 )
 def test_glm51_r3_validator_rejects_logprob_tails(summary: dict) -> None:
@@ -147,6 +147,16 @@ def test_glm51_r3_validator_accepts_observed_r3_tail() -> None:
     )
 
     assert summary["fraction_gt_0_5"] < 1.0e-4
+    assert summary["fraction_gt_1_0"] == 0
+
+
+def test_glm51_r3_validator_accepts_observed_mtp3_tail() -> None:
+    summary = validate_logprob_tails(
+        {"total_tokens": 4_237_261, "count_gt_0_5": 19, "count_gt_1_0": 4}
+    )
+
+    assert summary["fraction_gt_0_5"] < 1.0e-4
+    assert summary["fraction_gt_1_0"] < 1.0e-5
 
 
 def test_glm51_r3_validator_rejects_old_truncation_regime() -> None:

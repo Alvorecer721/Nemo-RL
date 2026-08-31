@@ -263,6 +263,7 @@ def _metrics(steps: int = 10) -> dict[str, dict[str, float]]:
     return {
         "train/gen_kl_error": series(0.0004),
         "train/token_mult_prob_error": series(1.01),
+        "train/max_seq_mult_prob_error": series(1.02),
         "train/js_divergence_error": series(0.0001),
         "train/loss": series(-0.01),
         "train/reward": series(0.5),
@@ -299,6 +300,7 @@ def test_validate_metrics_accepts_ten_green_steps() -> None:
     assert summary["per_token_logprob_tails"]["fraction_gt_0_5"] == pytest.approx(
         1.0e-5
     )
+    assert summary["max_seq_mult_prob_error"] == pytest.approx(1.02)
 
 
 def test_validate_metrics_accepts_eight_of_ten_learning_signal_steps() -> None:
@@ -338,9 +340,19 @@ def test_validate_metrics_rejects_inconsistent_speculative_counters() -> None:
 
 def test_validate_metrics_rejects_bad_logprob_tail_counters() -> None:
     metrics = _metrics()
-    metrics["train/logprob_tails/count_gt_1_0"]["4"] = 1.0
+    metrics["train/logprob_tails/max_abs"]["4"] = 1.1
+    metrics["train/logprob_tails/count_gt_0_5"]["4"] = 10.0
+    metrics["train/logprob_tails/count_gt_1_0"]["4"] = 10.0
 
-    with pytest.raises(ValueError, match=r"abs\(delta log p\) > 1.0"):
+    with pytest.raises(ValueError, match=r">1.0 tail exceeded"):
+        validate_metrics(metrics, expected_steps=10)
+
+
+def test_validate_metrics_rejects_bad_max_sequence_probability_error() -> None:
+    metrics = _metrics()
+    metrics["train/max_seq_mult_prob_error"]["4"] = 1.1
+
+    with pytest.raises(ValueError, match="sequence probability parity failed"):
         validate_metrics(metrics, expected_steps=10)
 
 
