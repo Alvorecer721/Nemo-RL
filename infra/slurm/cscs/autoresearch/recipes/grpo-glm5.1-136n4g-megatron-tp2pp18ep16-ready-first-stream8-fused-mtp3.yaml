@@ -1,0 +1,15 @@
+defaults: ./grpo-glm5.1-136n4g-megatron-tp2pp18ep16-ready-first-stream8-fused.yaml
+
+# Matched stream8 challenger using the checkpoint's native MTP layer for three
+# draft tokens. All trainer, rollout, sampler, and fused-logprob settings inherit
+# unchanged from the non-MTP stream8 control.
+policy:
+  generation:
+    vllm_kwargs:
+      speculative_config:
+        method: deepseek_mtp
+        num_speculative_tokens: 3
+
+logger:
+  wandb:
+    name: glm51-r3-ready-first-136n-tp2-vllm-dp8-stream8-fused-mtp3
