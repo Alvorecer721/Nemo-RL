@@ -97,6 +97,7 @@ def reduce_advantage_pump_metrics(
     *,
     seq_logprob_error_metrics: list[dict[str, float]] | None = None,
     num_mask_sample_filtered: list[int] | None = None,
+    logprob_errors: list[torch.Tensor] | None = None,
     num_invalid_tool_calls: list[int] | None = None,
     num_malformed_thinking: list[int] | None = None,
     num_assistant_messages: list[int] | None = None,
@@ -111,6 +112,8 @@ def reduce_advantage_pump_metrics(
             counts, one record per streaming chunk.
         num_mask_sample_filtered: Environment-flagged sample counts, one per
             streaming chunk.
+        logprob_errors: Absolute generation/training log-probability deltas for
+            every valid response token, one tensor per streaming chunk.
         num_invalid_tool_calls: Per-sample invalid tool-call counts.
         num_malformed_thinking: Per-sample malformed-thinking counts.
         num_assistant_messages: Per-sample assistant message counts (rate denominator).
@@ -140,6 +143,8 @@ def reduce_advantage_pump_metrics(
         out["num_mask_sample_filtered"] = float(sum(num_mask_sample_filtered))
     if seq_logprob_error_metrics:
         out.update(_reduce_seq_logprob_error_metrics(seq_logprob_error_metrics))
+    if logprob_errors:
+        out.update(_reduce_token_logprob_error_tails(logprob_errors))
     n_asst = sum(num_assistant_messages or [])
     if n_asst:
         n_invalid = sum(num_invalid_tool_calls or [])
@@ -150,6 +155,30 @@ def reduce_advantage_pump_metrics(
         out["num_malformed_thinking"] = float(n_malformed)
         out["num_assistant_messages"] = float(n_asst)
     return out
+
+
+def _reduce_token_logprob_error_tails(
+    records: list[torch.Tensor],
+) -> dict[str, float]:
+    """Reduce exact valid-token log-probability tail evidence for one step."""
+    errors = torch.cat([record.flatten().double() for record in records])
+    if errors.numel() == 0:
+        raise ValueError("Log-probability tail evidence contains no valid tokens")
+    if not torch.isfinite(errors).all():
+        raise ValueError("Log-probability tail evidence contains non-finite values")
+
+    quantiles = torch.quantile(
+        errors, torch.tensor([0.95, 0.99], dtype=errors.dtype)
+    ).tolist()
+    return {
+        "logprob_tails/valid_tokens": float(errors.numel()),
+        "logprob_tails/mean_abs": float(errors.mean()),
+        "logprob_tails/p95_abs": float(quantiles[0]),
+        "logprob_tails/p99_abs": float(quantiles[1]),
+        "logprob_tails/max_abs": float(errors.max()),
+        "logprob_tails/count_gt_0_5": float((errors > 0.5).sum()),
+        "logprob_tails/count_gt_1_0": float((errors > 1.0).sum()),
+    }
 
 
 def _reduce_seq_logprob_error_metrics(

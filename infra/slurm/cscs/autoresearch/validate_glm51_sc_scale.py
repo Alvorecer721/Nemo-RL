@@ -385,6 +385,64 @@ def _validate_speculative_metrics(
     }
 
 
+def _validate_logprob_tail_metrics(
+    metrics: dict[str, Any], expected_steps: int
+) -> dict[str, Any]:
+    """Validate SingleController's compact per-token Router Replay evidence."""
+    names = (
+        "valid_tokens",
+        "mean_abs",
+        "p95_abs",
+        "p99_abs",
+        "max_abs",
+        "count_gt_0_5",
+        "count_gt_1_0",
+    )
+    tails = {
+        name: _series(metrics, f"train/logprob_tails/{name}", expected_steps)
+        for name in names
+    }
+
+    per_step: dict[str, dict[str, float | int]] = {}
+    for step, values in enumerate(
+        zip(*(tails[name] for name in names), strict=True), start=1
+    ):
+        tokens, mean_abs, p95_abs, p99_abs, max_abs, gt_0_5, gt_1_0 = values
+        integer_values = (tokens, gt_0_5, gt_1_0)
+        if any(value < 0 or not value.is_integer() for value in integer_values):
+            raise ValueError(
+                f"Invalid log-probability tail counters at step {step}: "
+                f"tokens={tokens}, count_gt_0_5={gt_0_5}, count_gt_1_0={gt_1_0}"
+            )
+        if tokens <= 0 or not (0 <= gt_1_0 <= gt_0_5 <= tokens):
+            raise ValueError(
+                f"Inconsistent log-probability tail counters at step {step}: "
+                f"tokens={tokens}, count_gt_0_5={gt_0_5}, count_gt_1_0={gt_1_0}"
+            )
+        if not (0 <= p95_abs <= p99_abs <= max_abs) or mean_abs < 0:
+            raise ValueError(
+                f"Inconsistent log-probability tail magnitudes at step {step}: "
+                f"mean={mean_abs}, p95={p95_abs}, p99={p99_abs}, max={max_abs}"
+            )
+        per_step[str(step)] = {
+            "tokens": int(tokens),
+            "mean_abs": mean_abs,
+            "p95_abs": p95_abs,
+            "p99_abs": p99_abs,
+            "max_abs": max_abs,
+            "count_gt_0_5": int(gt_0_5),
+            "count_gt_1_0": int(gt_1_0),
+        }
+
+    summary = {
+        "per_step": per_step,
+        "total_tokens": sum(int(value) for value in tails["valid_tokens"]),
+        "count_gt_0_5": sum(int(value) for value in tails["count_gt_0_5"]),
+        "count_gt_1_0": sum(int(value) for value in tails["count_gt_1_0"]),
+    }
+    return r3_validator.validate_logprob_tails(summary)
+
+
 def validate_metrics(
     metrics: dict[str, Any], expected_steps: int, speculative_tokens: int = 0
 ) -> dict[str, Any]:
@@ -473,6 +531,9 @@ def validate_metrics(
         summary["speculative_decoding"] = _validate_speculative_metrics(
             metrics, expected_steps, speculative_tokens
         )
+    summary["per_token_logprob_tails"] = _validate_logprob_tail_metrics(
+        metrics, expected_steps
+    )
     return summary
 
 
@@ -481,7 +542,6 @@ def main() -> int:
     parser.add_argument("metrics", type=Path)
     parser.add_argument("--expected-steps", type=int, required=True)
     parser.add_argument("--speculative-tokens", type=int, default=0)
-    parser.add_argument("--train-data-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -489,14 +549,6 @@ def main() -> int:
     summary = validate_metrics(
         metrics, args.expected_steps, speculative_tokens=args.speculative_tokens
     )
-    original_expected_steps = r3_validator.EXPECTED_STEPS
-    try:
-        r3_validator.EXPECTED_STEPS = args.expected_steps
-        summary["per_token_logprob_tails"] = r3_validator.validate_logprob_tails(
-            r3_validator.summarize_logprob_tails(args.train_data_dir)
-        )
-    finally:
-        r3_validator.EXPECTED_STEPS = original_expected_steps
     args.output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0

@@ -643,6 +643,10 @@ def test_advantage_stage_composes_all_filters_before_computing_advantages(
     assert metrics[0]["num_masked_seqs_by_logprob_error"] == 1
     assert metrics[0]["max_seq_mult_prob_error"] == pytest.approx(math.e)
     assert metrics[0]["max_seq_mult_prob_error_after_mask"] == pytest.approx(1.0)
+    tails = ctrl._step_log_dict["logprob_errors"]
+    assert len(tails) == 1
+    assert tails[0].numel() == 12
+    assert not tails[0].bool().any()
     assert "advantages" in (result_meta.fields or [])
 
 
@@ -784,6 +788,10 @@ def test_advantage_stage_reports_seq_logprob_metrics_without_masking() -> None:
     assert ctrl._step_log_dict["num_mask_sample_filtered"] == [0]
     assert metrics[0]["max_seq_mult_prob_error"] == pytest.approx(math.e)
     assert metrics[0]["max_seq_mult_prob_error_after_mask"] == pytest.approx(math.e)
+    tails = ctrl._step_log_dict["logprob_errors"]
+    assert len(tails) == 1
+    assert tails[0].numel() == 8
+    assert tails[0].count_nonzero() == 4
 
 
 def test_advantage_stage_skips_estimator_when_seq_mask_removes_whole_chunk(

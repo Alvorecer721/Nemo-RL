@@ -162,7 +162,7 @@ GLM_PHASE=metrics_validation
   infra/slurm/cscs/autoresearch/validate_glm51_sc_scale.py \
   "$METRICS_JSON" --expected-steps "$EXPECTED_STEPS" \
   --speculative-tokens "$EXPECTED_SPEC_TOKENS" \
-  --train-data-dir "$RUN_DIR/tb" --output "$SUMMARY_JSON" \
+  --output "$SUMMARY_JSON" \
   >"$RUN_DIR/metrics_validation.log" 2>&1
 
 GLM_PHASE=terminal_artifact

@@ -279,6 +279,13 @@ def _metrics(steps: int = 10) -> dict[str, dict[str, float]]:
         "train/vllm/spec_num_accepted_tokens": series(240.0),
         "train/vllm/spec_acceptance_length": series(3.4),
         "train/vllm/spec_acceptance_rate": series(0.8),
+        "train/logprob_tails/valid_tokens": series(100_000.0),
+        "train/logprob_tails/mean_abs": series(0.01),
+        "train/logprob_tails/p95_abs": series(0.02),
+        "train/logprob_tails/p99_abs": series(0.03),
+        "train/logprob_tails/max_abs": series(0.4),
+        "train/logprob_tails/count_gt_0_5": series(1.0),
+        "train/logprob_tails/count_gt_1_0": series(0.0),
     }
 
 
@@ -288,6 +295,10 @@ def test_validate_metrics_accepts_ten_green_steps() -> None:
     assert summary["steps"] == 10
     assert summary["learning_signal_steps"] == 10
     assert summary["timing"]["total_step_time"]["steady_state_mean"] == 100.0
+    assert summary["per_token_logprob_tails"]["total_tokens"] == 1_000_000
+    assert summary["per_token_logprob_tails"]["fraction_gt_0_5"] == pytest.approx(
+        1.0e-5
+    )
 
 
 def test_validate_metrics_accepts_eight_of_ten_learning_signal_steps() -> None:
@@ -323,6 +334,14 @@ def test_validate_metrics_rejects_inconsistent_speculative_counters() -> None:
 
     with pytest.raises(ValueError, match="Inconsistent speculative acceptance rate"):
         validate_metrics(metrics, expected_steps=10, speculative_tokens=3)
+
+
+def test_validate_metrics_rejects_bad_logprob_tail_counters() -> None:
+    metrics = _metrics()
+    metrics["train/logprob_tails/count_gt_1_0"]["4"] = 1.0
+
+    with pytest.raises(ValueError, match=r"abs\(delta log p\) > 1.0"):
+        validate_metrics(metrics, expected_steps=10)
 
 
 def test_validate_metrics_rejects_seven_of_ten_learning_signal_steps() -> None:
