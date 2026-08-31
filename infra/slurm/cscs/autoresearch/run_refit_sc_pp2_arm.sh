@@ -27,6 +27,11 @@ cd "$REPO_DIR"
 export PYTHONPATH=$REPO_DIR
 export PYTHONUNBUFFERED=1
 export NEMO_RL_PY_EXECUTABLES_SYSTEM=1
+# PY_EXECUTABLES.SYSTEM is the literal command ``python``. Put the certified
+# environment first so Ray resolves that command to the same dependency layer as
+# the driver, rather than the image's dependency-light base interpreter.
+export VIRTUAL_ENV=/opt/nemo_rl_venv
+export PATH=$VIRTUAL_ENV/bin:$PATH
 export HF_HOME=${HF_HOME:-/iopsstor/scratch/cscs/${USER:-$(id -un)}/.cache/huggingface}
 export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
 export HF_DATASETS_OFFLINE=1
@@ -38,6 +43,12 @@ export RAY_DEDUP_LOGS=0
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
 export VLLM_DISABLE_PYNCCL=1
 export WANDB_DISABLED=true
+
+[[ $(command -v python) == /opt/nemo_rl_venv/bin/python ]] || {
+  echo "Certified Python is not first on PATH: $(command -v python)" >&2
+  exit 1
+}
+python -c 'import megatron, vllm; print("certified_actor_imports=OK")'
 
 printf 'arm=%s\nhead=%s\nsteps=%s\nstreams=%s\nimplicit_order=%s\n' \
   "$ARM_NAME" "$EXPECTED_HEAD" "$EXPECTED_STEPS" \

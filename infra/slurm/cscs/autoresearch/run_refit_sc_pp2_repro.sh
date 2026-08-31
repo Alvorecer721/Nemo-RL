@@ -71,10 +71,23 @@ run_arm() {
     "$arm" "$streams" "$implicit_order" "$exit_code" "$status" "$sync_count" \
     >>"$RUN_DIR/results.tsv"
   echo "arm_end name=$arm exit_code=$exit_code status=$status sync_count=$sync_count log=$arm_dir/run.log"
+  LAST_ARM_STATUS=$status
 }
 
 run_arm streams2_implicit0 2 0
+if [[ "$LAST_ARM_STATUS" == error ]]; then
+  echo invalid_baseline >"$RUN_DIR/verdict.txt"
+  echo "REFIT_SC_PP2_MATRIX=invalid_baseline"
+  cat "$RUN_DIR/results.tsv"
+  exit 1
+fi
 run_arm streams1_implicit0 1 0
+if [[ "$LAST_ARM_STATUS" == error ]]; then
+  echo invalid_controls >"$RUN_DIR/verdict.txt"
+  echo "REFIT_SC_PP2_MATRIX=invalid_controls"
+  cat "$RUN_DIR/results.tsv"
+  exit 1
+fi
 run_arm streams2_implicit1 2 1
 
 arm_a=$(awk -F '\t' '$1 == "streams2_implicit0" {print $5}' "$RUN_DIR/results.tsv")
