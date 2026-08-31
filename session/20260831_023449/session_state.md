@@ -22,6 +22,12 @@
 - Preserve all matched topology, sampler, data, checkpoint, Router Replay, and speculative-decoding settings.
 - First certify locally and in the existing image with a shared source overlay; then submit one 136-node ten-step run and monitor it to terminal artifacts.
 
+## Pre-launch certification
+
+- Static checks: Ruff check and format, `git diff --check`, Python compilation, and shell syntax are green.
+- Compute-image probe `3238849`: `COMPLETED`, source overlay and dependency fingerprint green, 15/15 focused tests passed, and the resolved MTP3 profile certified fused logprobs, chunk 256, and parameter-gather overlap disabled.
+- Ray worker propagation: `RayWorkerBuilder` copies the driver's environment and explicitly retains `PYTHONPATH` in both isolated initializers and worker runtime environments.
+
 ## Loaded skills
 
 - `nemo-rl-auto-research`: committed hypothesis, one feature bundle, terminal validation, and experiment ledger.
