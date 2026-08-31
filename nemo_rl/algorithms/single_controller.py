@@ -1643,6 +1643,24 @@ class SingleControllerActor:
             )
         return target
 
+    async def _snapshot_generation_step_metrics(self) -> None:
+        """Start the vLLM metric window for one trainer step.
+
+        SingleController generation runs continuously, so this snapshots fleet-wide
+        speculative-decoding activity over the trainer step's wall-clock window. It
+        does not attribute counters exclusively to the rollout groups consumed by the
+        step. The worker query uses ``ray.get`` internally and therefore runs off the
+        controller's asyncio event loop.
+        """
+        if isinstance(self._gen, VllmGeneration):
+            await asyncio.to_thread(self._gen.snapshot_step_metrics)
+
+    async def _get_generation_step_metrics(self) -> dict[str, float]:
+        """Close the vLLM metric window, returning no metrics for other backends."""
+        if isinstance(self._gen, VllmGeneration):
+            return await asyncio.to_thread(self._gen.get_step_metrics)
+        return {}
+
     async def _train_pump(self) -> None:
         """Per-prompt-group streaming train loop.
 
@@ -1686,6 +1704,7 @@ class SingleControllerActor:
 
         while self._train_steps < self._algo_cfg.max_num_steps:
             version_during_step = self._trainer_version
+            await self._snapshot_generation_step_metrics()
             groups_dispatched = 0
             evicted_stale_prompt_groups = 0
             min_sample_version = None
@@ -2061,6 +2080,11 @@ class SingleControllerActor:
                         }
                     )
 
+                # Generation is continuous in SingleController. This delta is the
+                # fleet-wide speculative activity since this trainer step began,
+                # including generation concurrent with training and weight sync.
+                step_metrics.update(await self._get_generation_step_metrics())
+
                 # Checkpointing (mirrors async_grpo_train's save block).
                 # What the step actually trained on, which is num_prompts_per_step only
                 # when nothing was dropped. Counted from the dispatch tally rather than
@@ -2122,8 +2146,8 @@ class SingleControllerActor:
                 percent = (v / total_time * 100) if total_time > 0 else 0.0
                 print(f"  • {k}: {v:.2f}s ({percent:.1f}%)")
 
-            # TODO: per-step train_data jsonl dump, vllm metrics logger,
-            #   histogram log, rollout_metrics, pretty-print "Training Results"
+            # TODO: per-step train_data jsonl dump, histogram log,
+            #   rollout_metrics, pretty-print "Training Results"
             #   block, print_performance_metrics.
             print(f"step_metrics={step_metrics}", flush=True)
             self._logger.log_metrics(

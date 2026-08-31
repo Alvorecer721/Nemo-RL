@@ -2,10 +2,17 @@ defaults: ./grpo-glm5.1-136n4g-megatron-tp2pp18ep16-ready-first.yaml
 
 # Matched challenger to the certified 72-train + 64-rollout-node GLM-5.1
 # recipe. GLM-5.1 BF16 needs TP32 to leave HBM for runtime state on GH200, and
-# NCCL reshard does not support rollout PP, so retain TP32/PP1/EP32 and change
-# only decoding. The checkpoint has one native MTP layer; reuse it for three
-# draft steps, matching Swiss AI's production SGLang serving configuration.
+# NCCL reshard does not support rollout PP, so retain TP32/PP1/EP32. The
+# checkpoint has one native MTP layer; reuse it for three draft steps, matching
+# Swiss AI's production SGLang serving configuration. Chunked fused logprobs
+# reduce the final training pipeline stage's peak activation memory; Megatron
+# requires parameter-gather overlap to be disabled on that path.
 policy:
+  megatron_cfg:
+    use_fused_linear_logprobs: true
+    fused_linear_logprobs_chunk_size: 256
+    distributed_data_parallel_config:
+      overlap_param_gather: false
   generation:
     vllm_kwargs:
       speculative_config:

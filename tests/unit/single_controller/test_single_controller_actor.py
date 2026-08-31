@@ -1399,6 +1399,53 @@ def test_train_pump_logs_nonzero_stale_group_metrics(monkeypatch) -> None:
     assert train_metrics["aborted_stale_inflight_groups"] == 1
 
 
+def test_train_pump_logs_vllm_speculative_metrics(monkeypatch) -> None:
+    """SC reports the vLLM fleet delta over the trainer step wall-clock window."""
+
+    class FakeVllmGeneration:
+        requires_kv_scale_sync = False
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def snapshot_step_metrics(self) -> None:
+            self.calls.append("snapshot")
+
+        def get_step_metrics(self) -> dict[str, float]:
+            self.calls.append("get")
+            return {
+                "vllm/spec_num_drafts": 100.0,
+                "vllm/spec_num_draft_tokens": 300.0,
+                "vllm/spec_num_accepted_tokens": 240.0,
+                "vllm/spec_acceptance_length": 3.4,
+                "vllm/spec_acceptance_rate": 0.8,
+            }
+
+    meta = KVBatchMeta(
+        partition_id="rollout_data",
+        task_name="train",
+        sample_ids=["sample-0", "sample-1"],
+        fields=[],
+        sequence_lengths=[1, 1],
+        tags=[{"weight_version": 0}, {"weight_version": 0}],
+    )
+    ctrl = _train_pump_controller(sampler=_OneThenEmptySampler(meta))
+    generation = FakeVllmGeneration()
+    ctrl._gen = generation
+    ctrl._sync_weights = AsyncMock(return_value=0)
+    ctrl._logger = MagicMock()
+    monkeypatch.setattr(single_controller, "VllmGeneration", FakeVllmGeneration)
+    monkeypatch.setattr(single_controller.ray, "cluster_resources", lambda: {})
+
+    asyncio.run(asyncio.wait_for(ctrl._train_pump(), timeout=1.0))
+
+    assert generation.calls == ["snapshot", "get"]
+    train_metrics = ctrl._logger.log_metrics.call_args_list[0].args[0]
+    assert train_metrics["vllm/spec_num_drafts"] == 100.0
+    assert train_metrics["vllm/spec_num_accepted_tokens"] == 240.0
+    assert train_metrics["vllm/spec_acceptance_rate"] == 0.8
+
+
 def test_train_pump_keeps_train_buffers_once_the_step_is_open(monkeypatch) -> None:
     """The logprob detour between chunks must not offload the trainer's grad
     buffers, because mcore's offload frees the gradients the earlier chunks of
