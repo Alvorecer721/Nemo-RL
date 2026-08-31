@@ -26,12 +26,11 @@ cd "$REPO_DIR"
 # source/configuration, so Ray actors use that image's Python and import this checkout.
 export PYTHONPATH=$REPO_DIR
 export PYTHONUNBUFFERED=1
-export NEMO_RL_PY_EXECUTABLES_SYSTEM=1
-# PY_EXECUTABLES.SYSTEM is the literal command ``python``. Put the certified
-# environment first so Ray resolves that command to the same dependency layer as
-# the driver, rather than the image's dependency-light base interpreter.
-export VIRTUAL_ENV=/opt/nemo_rl_venv
-export PATH=$VIRTUAL_ENV/bin:$PATH
+# The certified image bakes backend-specific Ray environments at this path. Normal
+# actor selection reuses the vLLM and MCore environments independently, while its
+# lockfile fingerprint check refuses a stale dependency layer.
+export NEMO_RL_VENV_DIR=/opt/ray_venvs
+unset NEMO_RL_PY_EXECUTABLES_SYSTEM
 export HF_HOME=${HF_HOME:-/iopsstor/scratch/cscs/${USER:-$(id -un)}/.cache/huggingface}
 export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
 export HF_DATASETS_OFFLINE=1
@@ -44,11 +43,12 @@ export VLLM_ALLREDUCE_USE_SYMM_MEM=0
 export VLLM_DISABLE_PYNCCL=1
 export WANDB_DISABLED=true
 
-[[ $(command -v python) == /opt/nemo_rl_venv/bin/python ]] || {
-  echo "Certified Python is not first on PATH: $(command -v python)" >&2
-  exit 1
-}
-python -c 'import megatron, vllm; print("certified_actor_imports=OK")'
+VLLM_ACTOR_PY=$NEMO_RL_VENV_DIR/nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker/bin/python
+MCORE_ACTOR_PY=$NEMO_RL_VENV_DIR/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python
+[[ -x "$VLLM_ACTOR_PY" ]] || { echo "Missing certified vLLM actor Python" >&2; exit 1; }
+[[ -x "$MCORE_ACTOR_PY" ]] || { echo "Missing certified MCore actor Python" >&2; exit 1; }
+"$VLLM_ACTOR_PY" -c 'import vllm; print(f"certified_vllm={vllm.__version__}")'
+"$MCORE_ACTOR_PY" -c 'import megatron; print("certified_megatron=OK")'
 
 printf 'arm=%s\nhead=%s\nsteps=%s\nstreams=%s\nimplicit_order=%s\n' \
   "$ARM_NAME" "$EXPECTED_HEAD" "$EXPECTED_STEPS" \
