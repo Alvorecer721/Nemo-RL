@@ -10,7 +10,13 @@ CONTAINER_ENV=${CONTAINER_ENV:?}
 RUN_ROOT=${REFIT_SC_RUN_ROOT:?}
 RUN_DIR=$RUN_ROOT/${SLURM_JOB_ID:?}
 ARM_TIMEOUT_S=${REFIT_SC_ARM_TIMEOUT_S:-900}
-CONTAINER_REPO_DIR=/opt/nemo-rl
+RUNTIME_REPO_DIR=/opt/nemo-rl
+SOURCE_MOUNTS=$REPO_DIR/nemo_rl:$RUNTIME_REPO_DIR/nemo_rl
+SOURCE_MOUNTS+=,$REPO_DIR/nemo_rl_apertus:$RUNTIME_REPO_DIR/nemo_rl_apertus
+SOURCE_MOUNTS+=,$REPO_DIR/examples:$RUNTIME_REPO_DIR/examples
+SOURCE_MOUNTS+=,$REPO_DIR/infra:$RUNTIME_REPO_DIR/infra
+SOURCE_MOUNTS+=,$REPO_DIR/tests:$RUNTIME_REPO_DIR/tests
+SOURCE_MOUNTS+=,$REPO_DIR/tools:$RUNTIME_REPO_DIR/tools
 
 [[ -r "$CONTAINER_ENV" ]] || { echo "Missing container EDF: $CONTAINER_ENV" >&2; exit 1; }
 [[ $(git -C "$REPO_DIR" rev-parse HEAD) == "$EXPECTED_HEAD" ]] || {
@@ -47,12 +53,12 @@ run_arm() {
   srun \
     --cpu-bind=none \
     --environment="$CONTAINER_ENV" \
-    --container-mounts="$REPO_DIR:$CONTAINER_REPO_DIR" \
+    --container-mounts="$SOURCE_MOUNTS" \
     --ntasks=1 \
     --gpus-per-task=3 \
     --cpus-per-task="$SLURM_CPUS_PER_TASK" \
     /usr/bin/env \
-      REFIT_SC_REPO_DIR="$CONTAINER_REPO_DIR" \
+      REFIT_SC_SOURCE_REPO_DIR="$REPO_DIR" \
       REFIT_SC_EXPECTED_HEAD="$EXPECTED_HEAD" \
       REFIT_SC_ARM_DIR="$arm_dir" \
       REFIT_SC_ARM_NAME="$arm" \
@@ -60,7 +66,7 @@ run_arm() {
       REFIT_SC_ARM_TIMEOUT_S="$ARM_TIMEOUT_S" \
       NRL_REFIT_NUM_STREAMS="$streams" \
       NCCL_LAUNCH_ORDER_IMPLICIT="$implicit_order" \
-      /bin/bash "$CONTAINER_REPO_DIR/infra/slurm/cscs/autoresearch/run_refit_sc_pp2_arm.sh" \
+      /bin/bash "$RUNTIME_REPO_DIR/infra/slurm/cscs/autoresearch/run_refit_sc_pp2_arm.sh" \
       >"$harness_log" 2>&1
   exit_code=$?
   set -e

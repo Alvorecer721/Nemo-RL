@@ -4,7 +4,8 @@
 
 set -euo pipefail
 
-REPO_DIR=${REFIT_SC_REPO_DIR:?}
+SOURCE_REPO_DIR=${REFIT_SC_SOURCE_REPO_DIR:?}
+RUNTIME_REPO_DIR=/opt/nemo-rl
 EXPECTED_HEAD=${REFIT_SC_EXPECTED_HEAD:?}
 ARM_DIR=${REFIT_SC_ARM_DIR:?}
 ARM_NAME=${REFIT_SC_ARM_NAME:?}
@@ -12,19 +13,19 @@ EXPECTED_STEPS=${REFIT_SC_STEPS:-12}
 ARM_TIMEOUT_S=${REFIT_SC_ARM_TIMEOUT_S:-900}
 RUN_LOG=$ARM_DIR/run.log
 
-[[ $(git -C "$REPO_DIR" rev-parse HEAD) == "$EXPECTED_HEAD" ]] || {
+[[ $(git -C "$SOURCE_REPO_DIR" rev-parse HEAD) == "$EXPECTED_HEAD" ]] || {
   echo "Source HEAD changed after submission" >&2
   exit 1
 }
-SOURCE_STATUS=$(git -C "$REPO_DIR" status --porcelain --untracked-files=no --ignore-submodules=all)
+SOURCE_STATUS=$(git -C "$SOURCE_REPO_DIR" status --porcelain --untracked-files=no --ignore-submodules=all)
 [[ -z "$SOURCE_STATUS" ]] || { echo "Tracked source is dirty: $SOURCE_STATUS" >&2; exit 1; }
 
 mkdir "$ARM_DIR"
-cd "$REPO_DIR"
+cd "$RUNTIME_REPO_DIR"
 
 # Reuse the certified dependency image as-is. The experiment changes only Python
 # source/configuration, so Ray actors use that image's Python and import this checkout.
-export PYTHONPATH=$REPO_DIR
+export PYTHONPATH=$RUNTIME_REPO_DIR
 export PYTHONUNBUFFERED=1
 # The certified image bakes backend-specific Ray environments at this path. Normal
 # actor selection reuses the vLLM and MCore environments independently, while its
@@ -48,7 +49,7 @@ MCORE_ACTOR_PY=$NEMO_RL_VENV_DIR/nemo_rl.models.policy.workers.megatron_policy_w
 [[ -x "$VLLM_ACTOR_PY" ]] || { echo "Missing certified vLLM actor Python" >&2; exit 1; }
 [[ -x "$MCORE_ACTOR_PY" ]] || { echo "Missing certified MCore actor Python" >&2; exit 1; }
 "$VLLM_ACTOR_PY" -c 'import vllm; print(f"certified_vllm={vllm.__version__}")'
-"$MCORE_ACTOR_PY" -c 'import megatron; print("certified_megatron=OK")'
+"$MCORE_ACTOR_PY" -c 'import megatron.bridge; print("certified_megatron_bridge=OK")'
 /opt/nemo_rl_venv/bin/python - <<'PY'
 from pathlib import Path
 
@@ -77,7 +78,7 @@ printf 'arm=%s\nhead=%s\nsteps=%s\nstreams=%s\nimplicit_order=%s\n' \
 set +e
 timeout --signal=TERM --kill-after=30s "${ARM_TIMEOUT_S}s" \
   /opt/nemo_rl_venv/bin/python -m examples.run_grpo_single_controller \
-    --config "$REPO_DIR/examples/configs/grpo_math_1B_megatron_single_controller.yaml" \
+    --config "$RUNTIME_REPO_DIR/examples/configs/grpo_math_1B_megatron_single_controller.yaml" \
     policy.model_name=Qwen/Qwen3-0.6B \
     grpo.num_prompts_per_step=2 \
     grpo.num_generations_per_prompt=4 \
