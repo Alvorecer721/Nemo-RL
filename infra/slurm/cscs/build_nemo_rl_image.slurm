@@ -20,6 +20,11 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=288
+# The release stage materializes all frozen Ray worker environments. Podman's
+# commit path temporarily holds the working tree, blob, and unpacked layer in
+# allocation-local tmpfs, which exceeds Clariden's 450 GB default allocation.
+# A normal node provides 870,000 MB, so reserve enough headroom explicitly.
+#SBATCH --mem=800G
 #SBATCH --partition=normal
 #SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --export=NONE
