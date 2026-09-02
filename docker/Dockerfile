@@ -483,14 +483,11 @@ EOF
 # Potentially not necessary if the repo is passed in as a complete repository (w/ full git history),
 # so do a quick check before trying to unshallow.
 RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
-# Commit the frozen Ray environments in bounded groups. A single layer for all
-# workers temporarily requires Podman to hold the working tree, compressed
-# blob, and unpacked result at once, which exceeds Clariden's node-local tmpfs.
-# The larger training and utility environments are committed one actor at a
-# time: even the five-environment DTensor group exceeds the temporary space
-# available while Podman packs and then unpacks a cache layer. Positive filters
-# match actor FQNs and retain every non-system environment in the current actor
-# registry.
+# Commit the frozen Ray environments in bounded groups. One layer for every
+# worker exceeds Clariden's node-local graph, while one layer per actor creates
+# too many cumulative snapshots. Groups of at most four fit both constraints.
+# Positive filters match actor FQNs and retain every non-system environment in
+# the current actor registry.
 RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
     UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs vllm
@@ -515,28 +512,20 @@ if [[ -z "${SKIP_TRTLLM_BUILD:-}" ]]; then
 fi
 EOF
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_policy_worker.DTensorPolicyWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_policy_worker_v2.DTensorPolicyWorkerV2
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    dtensor_policy_worker.DTensorPolicyWorker \
+    dtensor_policy_worker_v2.DTensorPolicyWorkerV2 \
     dtensor_value_worker_v2.DTensorValueWorkerV2
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_quant_policy_worker.DTensorQuantPolicyWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    megatron_policy_worker.MegatronPolicyWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    megatron_value_worker.MegatronValueWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    dtensor_quant_policy_worker.DTensorQuantPolicyWorker \
+    dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2 \
     megatron_quant_policy_worker.MegatronQuantPolicyWorker
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    async_utils.AsyncTrajectoryCollector
+    megatron_policy_worker.MegatronPolicyWorker \
+    megatron_value_worker.MegatronValueWorker
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    async_utils.ReplayBuffer
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    sync_rollout_actor.SyncRolloutActor
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    async_utils.AsyncTrajectoryCollector \
+    async_utils.ReplayBuffer \
+    sync_rollout_actor.SyncRolloutActor \
     nemo_gym.NemoGym
 
 # Prefetch NeMo Gym internal venvs (gym servers like code_gen, math_with_judge, etc.)
