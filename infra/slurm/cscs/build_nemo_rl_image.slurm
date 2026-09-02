@@ -337,7 +337,8 @@ requirement = next(
     and "extra == '\''vllm'\''" in requirement.get("marker", "")
 )
 match = re.search(r"/v([^/]+)/vllm-([^-]+)-", requirement["url"])
-assert match and match.group(1) == match.group(2), requirement
+if match is None or match.group(1) != match.group(2):
+    raise RuntimeError(f"Malformed vLLM wheel URL: {requirement}")
 print(match.group(2))
 ')
     echo "Hermetic pyproject MD5: $HERMETIC_PYPROJECT_MD5"
