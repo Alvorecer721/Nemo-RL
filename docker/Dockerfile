@@ -185,6 +185,10 @@ ARG TRTLLM_BUILD_JOBS=24
 
 ENV UV_PROJECT_ENVIRONMENT=/opt/nemo_rl_venv
 ENV UV_LINK_MODE=copy
+# Registry downloads are retried by uv, but Git dependencies are fetched by
+# Git itself. Keep one bounded outer retry for transient GitHub failures.
+ENV UV_HTTP_RETRIES=10
+ENV UV_HTTP_TIMEOUT=60
 
 # Ensure DeepEP is built for H100 and B200 (also mcore inference unified memory API now invokes a torch API that requires these to be set)
 ENV TORCH_CUDA_ARCH_LIST="9.0 10.0"
@@ -252,7 +256,17 @@ fi
 # Install the common environment first. Later backend-specific syncs use
 # disposable environments so their conflicting package sets warm the uv cache
 # without bloating image layers.
-UV_LINK_MODE=hardlink uv sync --frozen --no-install-project
+for attempt in 1 2 3; do
+    if UV_LINK_MODE=hardlink uv sync --frozen --no-install-project; then
+        break
+    fi
+    if ((attempt == 3)); then
+        echo "uv sync failed after ${attempt} attempts" >&2
+        exit 1
+    fi
+    echo "uv sync attempt ${attempt} failed; retrying" >&2
+    sleep $((attempt * 5))
+done
 EOF
 
 # Commit backend cache additions independently. This bounds the mutable overlay
@@ -410,12 +424,6 @@ EOF
 WORKDIR /opt/nemo-rl
 
 FROM hermetic AS release
-
-# Release-stage venv materialization should normally be cache-only, but direct
-# wheel sources can still be fetched if a prior warm was interrupted. Tolerate
-# transient registry/GitHub HTTP failures without publishing a partial image.
-ENV UV_HTTP_RETRIES=10
-ENV UV_HTTP_TIMEOUT=60
 
 # Re-declare build args for this stage
 ARG SKIP_VLLM_BUILD
