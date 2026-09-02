@@ -2956,9 +2956,7 @@ def grpo_train(
     generation_discards_weights_on_finish = (
         colocated_inference
         and master_config.policy["generation"]["backend"] == "vllm"
-        and master_config.policy["generation"].get("vllm_cfg", {}).get(
-            "sleep_level", 1
-        )
+        and master_config.policy["generation"].get("vllm_cfg", {}).get("sleep_level", 1)
         >= 2
     )
     refit_buffer_size_gb = master_config.policy.get("refit_buffer_size_gb")
