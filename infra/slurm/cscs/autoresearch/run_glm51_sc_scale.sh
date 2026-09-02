@@ -25,7 +25,8 @@ SOURCE_STATUS=$(git -C "$REPO_DIR" status \
   --porcelain --untracked-files=no --ignore-submodules=all -- \
   .gitmodules \
   docker/nemo_rl_vllm0251.toml \
-  examples/configs/recipes/llm/autoresearch \
+  examples/configs \
+  examples/prompts \
   examples/run_grpo_single_controller.py \
   infra/slurm/cscs/autoresearch/run_glm51_sc_scale.sh \
   infra/slurm/cscs/autoresearch/validate_glm51_r3_10step.py \
@@ -101,91 +102,24 @@ unset NEMO_RL_PY_EXECUTABLES_SYSTEM
 
 GLM_PHASE=config_preflight
 /opt/nemo_rl_venv/bin/python - <<'PY'
-import json
 import os
 from pathlib import Path
 
-from nemo_rl.algorithms.single_controller_utils.config import MasterConfig
-from nemo_rl.utils.config import load_config, register_omegaconf_resolvers
-from omegaconf import OmegaConf
-
-register_omegaconf_resolvers()
-recipe = Path(os.environ["GLM_RECIPE"])
-cfg = MasterConfig(**OmegaConf.to_container(load_config(recipe), resolve=True))
-megatron = cfg.policy["megatron_cfg"]
-generation = cfg.policy["generation"]
-vllm = generation["vllm_cfg"]
-expected_sampler = os.environ["GLM_EXPECTED_SAMPLER"]
-expected_total_nodes = int(os.environ["GLM_TOTAL_NODES"])
-expected_generation_nodes = int(os.environ["GLM_GENERATION_NODES"])
-expected_steps = int(os.environ["GLM_EXPECTED_STEPS"])
-expected_spec_tokens = int(os.environ["GLM_EXPECTED_SPEC_TOKENS"])
-expected_spec_method = os.environ["GLM_EXPECTED_SPEC_METHOD"]
-
-assert (cfg.cluster["num_nodes"], cfg.cluster["gpus_per_node"]) == (
-    expected_total_nodes,
-    4,
+from infra.slurm.cscs.autoresearch.validate_glm51_sc_scale import (
+    load_scale_config,
+    validate_scale_config,
 )
-assert generation["colocated"]["resources"]["num_nodes"] == expected_generation_nodes
-assert (
-    megatron["tensor_model_parallel_size"],
-    megatron["pipeline_model_parallel_size"],
-    megatron["expert_tensor_parallel_size"],
-    megatron["expert_model_parallel_size"],
-) == (2, 18, 1, 16)
-assert megatron["sequence_parallel"] is True
-assert (vllm["tensor_parallel_size"], vllm["expert_parallel_size"]) == (32, 32)
-assert expected_generation_nodes * 4 % vllm["tensor_parallel_size"] == 0
-expected_vllm_dp = expected_generation_nodes * 4 // vllm["tensor_parallel_size"]
-assert expected_total_nodes - expected_generation_nodes == 72
-assert generation["refit_transport"] == "nccl_reshard"
-assert cfg.policy["router_replay"]["enabled"] is True
-assert cfg.policy["max_total_sequence_length"] == 4096
-assert generation["max_new_tokens"] == 3584
-assert vllm["max_model_len"] == 4096
-assert vllm["gpu_memory_utilization"] == 0.60
-assert cfg.grpo.max_num_steps == expected_steps
-assert cfg.grpo.async_grpo is None
-assert cfg.grpo.use_dynamic_sampling is False
-assert cfg.loss_fn.use_importance_sampling_correction is True
-assert cfg.loss_fn.force_on_policy_ratio is False
-assert cfg.data_plane["enabled"] is True
-assert cfg.data_plane["impl"] == "transfer_queue"
-assert cfg.data_plane["backend"] == "simple"
-assert cfg.async_rl.sampler.name == expected_sampler
-assert cfg.async_rl.sampler.max_staleness_versions == 1
-assert cfg.async_rl.min_groups_for_streaming_train == 16
-assert cfg.async_rl.max_inflight_prompts == 32
-assert cfg.async_rl.max_buffered_rollouts == 128
-assert cfg.checkpointing["enabled"] is False
-speculative = generation.get("vllm_kwargs", {}).get("speculative_config")
-if expected_spec_tokens:
-    assert speculative is not None
-    assert speculative["method"] == expected_spec_method
-    assert speculative["num_speculative_tokens"] == expected_spec_tokens
-    # The vLLM 0.25.1 DeepSeekMTP class has no get_top_tokens() method and
-    # therefore rejects use_local_argmax_reduction during worker startup.
-    assert speculative.get("use_local_argmax_reduction", False) is False
 
-    model_dir = Path(cfg.policy["model_name"])
-    model_cfg = json.loads((model_dir / "config.json").read_text())
-    assert model_cfg["model_type"] == "glm_moe_dsa"
-    assert model_cfg["num_nextn_predict_layers"] >= 1
-    mtp_start = model_cfg["num_hidden_layers"]
-    weight_map = json.loads(
-        (model_dir / "model.safetensors.index.json").read_text()
-    )["weight_map"]
-    assert any(name.startswith(f"model.layers.{mtp_start}.") for name in weight_map)
-else:
-    assert speculative is None
-    assert expected_spec_method == "none"
-print(
-    "glm51_sc_scale_config=OK tp=2 pp=18 etp=1 ep=16 "
-    "dense_dp=8 expert_dp=1 total_seq=4096 max_new=3584 "
-    f"vllm_tp=32 vllm_dp={expected_vllm_dp} "
-    f"transport=transfer-queue sampler={expected_sampler} steps={expected_steps} "
-    f"spec_method={expected_spec_method} spec_tokens={expected_spec_tokens}"
+profile = validate_scale_config(
+    load_scale_config(Path(os.environ["GLM_RECIPE"])),
+    expected_total_nodes=int(os.environ["GLM_TOTAL_NODES"]),
+    expected_generation_nodes=int(os.environ["GLM_GENERATION_NODES"]),
+    expected_steps=int(os.environ["GLM_EXPECTED_STEPS"]),
+    expected_sampler=os.environ["GLM_EXPECTED_SAMPLER"],
+    expected_speculative_tokens=int(os.environ["GLM_EXPECTED_SPEC_TOKENS"]),
+    expected_speculative_method=os.environ["GLM_EXPECTED_SPEC_METHOD"],
 )
+print(profile.describe())
 PY
 
 RUN_LOG=$RUN_DIR/run.log

@@ -9,10 +9,278 @@ import argparse
 import json
 import math
 import statistics
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from omegaconf import OmegaConf
+
 from infra.slurm.cscs.autoresearch import validate_glm51_r3_10step as r3_validator
+from nemo_rl.algorithms.single_controller_utils.config import (
+    MasterConfig,
+    validate_single_controller_config,
+)
+from nemo_rl.utils.config import load_config, register_omegaconf_resolvers
+
+
+@dataclass(frozen=True)
+class GLM51ScaleProfile:
+    """Resolved values emitted after the scale configuration is certified."""
+
+    total_nodes: int
+    gpus_per_node: int
+    generation_nodes: int
+    tensor_parallel_size: int
+    pipeline_parallel_size: int
+    expert_tensor_parallel_size: int
+    expert_parallel_size: int
+    vllm_tensor_parallel_size: int
+    vllm_expert_parallel_size: int
+    max_total_sequence_length: int
+    max_new_tokens: int
+    sampler: str
+    steps: int
+    speculative_method: str
+    speculative_tokens: int
+
+    def describe(self) -> str:
+        """Return the stable configuration marker consumed by operators."""
+        training_ranks = (self.total_nodes - self.generation_nodes) * self.gpus_per_node
+        dense_dp = training_ranks // (
+            self.tensor_parallel_size * self.pipeline_parallel_size
+        )
+        expert_dp = training_ranks // (
+            self.expert_tensor_parallel_size
+            * self.expert_parallel_size
+            * self.pipeline_parallel_size
+        )
+        vllm_dp = (
+            self.generation_nodes * self.gpus_per_node
+        ) // self.vllm_tensor_parallel_size
+        return (
+            "glm51_sc_scale_config=OK "
+            f"tp={self.tensor_parallel_size} "
+            f"pp={self.pipeline_parallel_size} "
+            f"etp={self.expert_tensor_parallel_size} "
+            f"ep={self.expert_parallel_size} "
+            f"dense_dp={dense_dp} expert_dp={expert_dp} "
+            f"total_seq={self.max_total_sequence_length} "
+            f"max_new={self.max_new_tokens} "
+            f"vllm_tp={self.vllm_tensor_parallel_size} vllm_dp={vllm_dp} "
+            f"transport=transfer-queue sampler={self.sampler} steps={self.steps} "
+            f"spec_method={self.speculative_method} "
+            f"spec_tokens={self.speculative_tokens}"
+        )
+
+
+def _require_equal(field: str, actual: Any, expected: Any) -> None:
+    """Fail with an actionable field-level error when the profile drifts."""
+    if actual != expected:
+        raise ValueError(
+            f"GLM-5.1 scale profile requires {field}={expected!r}; resolved {actual!r}"
+        )
+
+
+def _require(condition: bool, message: str) -> None:
+    """Fail closed on a non-equality certification invariant."""
+    if not condition:
+        raise ValueError(f"GLM-5.1 scale profile requires {message}")
+
+
+def load_scale_config(recipe: Path) -> MasterConfig:
+    """Load and resolve a scale recipe through the SingleController schema."""
+    register_omegaconf_resolvers()
+    resolved = OmegaConf.to_container(load_config(recipe), resolve=True)
+    if not isinstance(resolved, dict):
+        raise TypeError(
+            f"Expected a mapping at the root of {recipe}; got {type(resolved)}"
+        )
+    return MasterConfig.model_validate(resolved)
+
+
+def validate_scale_config(
+    config: MasterConfig,
+    *,
+    expected_total_nodes: int,
+    expected_generation_nodes: int,
+    expected_steps: int,
+    expected_sampler: str,
+    expected_speculative_tokens: int,
+    expected_speculative_method: str,
+) -> GLM51ScaleProfile:
+    """Validate the exact runtime envelope certified by the scale gate."""
+    megatron = config.policy["megatron_cfg"]
+    generation = config.policy["generation"]
+    vllm = generation["vllm_cfg"]
+    profile = GLM51ScaleProfile(
+        total_nodes=config.cluster["num_nodes"],
+        gpus_per_node=config.cluster["gpus_per_node"],
+        generation_nodes=generation["colocated"]["resources"]["num_nodes"],
+        tensor_parallel_size=megatron["tensor_model_parallel_size"],
+        pipeline_parallel_size=megatron["pipeline_model_parallel_size"],
+        expert_tensor_parallel_size=megatron["expert_tensor_parallel_size"],
+        expert_parallel_size=megatron["expert_model_parallel_size"],
+        vllm_tensor_parallel_size=vllm["tensor_parallel_size"],
+        vllm_expert_parallel_size=vllm["expert_parallel_size"],
+        max_total_sequence_length=config.policy["max_total_sequence_length"],
+        max_new_tokens=generation["max_new_tokens"],
+        sampler=config.async_rl.sampler.name,
+        steps=config.grpo.max_num_steps,
+        speculative_method=expected_speculative_method,
+        speculative_tokens=expected_speculative_tokens,
+    )
+
+    # These are certification invariants, not fallback defaults. Changing one
+    # requires a new matched scale gate and must fail closed before allocation use.
+    checks = (
+        ("cluster.num_nodes", profile.total_nodes, expected_total_nodes),
+        ("cluster.gpus_per_node", profile.gpus_per_node, 4),
+        (
+            "policy.generation.colocated.resources.num_nodes",
+            profile.generation_nodes,
+            expected_generation_nodes,
+        ),
+        (
+            "policy.megatron_cfg.tensor_model_parallel_size",
+            profile.tensor_parallel_size,
+            2,
+        ),
+        (
+            "policy.megatron_cfg.pipeline_model_parallel_size",
+            profile.pipeline_parallel_size,
+            18,
+        ),
+        (
+            "policy.megatron_cfg.expert_tensor_parallel_size",
+            profile.expert_tensor_parallel_size,
+            1,
+        ),
+        (
+            "policy.megatron_cfg.expert_model_parallel_size",
+            profile.expert_parallel_size,
+            16,
+        ),
+        ("policy.megatron_cfg.sequence_parallel", megatron["sequence_parallel"], True),
+        (
+            "policy.generation.vllm_cfg.tensor_parallel_size",
+            profile.vllm_tensor_parallel_size,
+            32,
+        ),
+        (
+            "policy.generation.vllm_cfg.expert_parallel_size",
+            profile.vllm_expert_parallel_size,
+            32,
+        ),
+        ("training_nodes", profile.total_nodes - profile.generation_nodes, 72),
+        (
+            "policy.generation.refit_transport",
+            generation["refit_transport"],
+            "nccl_reshard",
+        ),
+        (
+            "policy.router_replay.enabled",
+            config.policy["router_replay"]["enabled"],
+            True,
+        ),
+        ("policy.max_total_sequence_length", profile.max_total_sequence_length, 4096),
+        ("policy.generation.max_new_tokens", profile.max_new_tokens, 3584),
+        ("policy.generation.vllm_cfg.max_model_len", vllm["max_model_len"], 4096),
+        (
+            "policy.generation.vllm_cfg.gpu_memory_utilization",
+            vllm["gpu_memory_utilization"],
+            0.60,
+        ),
+        ("grpo.max_num_steps", profile.steps, expected_steps),
+        ("grpo.async_grpo", config.grpo.async_grpo, None),
+        ("grpo.use_dynamic_sampling", config.grpo.use_dynamic_sampling, False),
+        (
+            "loss_fn.use_importance_sampling_correction",
+            config.loss_fn.use_importance_sampling_correction,
+            True,
+        ),
+        ("loss_fn.force_on_policy_ratio", config.loss_fn.force_on_policy_ratio, False),
+        ("data_plane.enabled", config.data_plane["enabled"], True),
+        ("data_plane.impl", config.data_plane["impl"], "transfer_queue"),
+        ("data_plane.backend", config.data_plane["backend"], "simple"),
+        ("async_rl.sampler.name", profile.sampler, expected_sampler),
+        (
+            "async_rl.sampler.max_staleness_versions",
+            config.async_rl.sampler.max_staleness_versions,
+            1,
+        ),
+        (
+            "async_rl.min_groups_for_streaming_train",
+            config.async_rl.min_groups_for_streaming_train,
+            16,
+        ),
+        ("async_rl.max_inflight_prompts", config.async_rl.max_inflight_prompts, 32),
+        ("async_rl.max_buffered_rollouts", config.async_rl.max_buffered_rollouts, 128),
+        ("checkpointing.enabled", config.checkpointing["enabled"], False),
+    )
+    for field, actual, expected in checks:
+        _require_equal(field, actual, expected)
+
+    generation_ranks = profile.generation_nodes * profile.gpus_per_node
+    _require(
+        generation_ranks % profile.vllm_tensor_parallel_size == 0,
+        "generation GPU count to be divisible by the vLLM tensor parallel size; "
+        f"resolved {generation_ranks} GPUs and TP={profile.vllm_tensor_parallel_size}",
+    )
+
+    speculative = generation.get("vllm_kwargs", {}).get("speculative_config")
+    if expected_speculative_tokens:
+        _require(speculative is not None, "speculative_config to be present")
+        _require_equal(
+            "policy.megatron_cfg.mtp_num_layers",
+            megatron.get("mtp_num_layers"),
+            0,
+        )
+        _require_equal(
+            "policy.generation.vllm_kwargs.speculative_config.method",
+            speculative.get("method"),
+            expected_speculative_method,
+        )
+        _require_equal(
+            "policy.generation.vllm_kwargs.speculative_config.num_speculative_tokens",
+            speculative["num_speculative_tokens"],
+            expected_speculative_tokens,
+        )
+        # vLLM 0.25.1 DeepSeekMTP has no get_top_tokens() and rejects this
+        # optimization during worker startup.
+        _require_equal(
+            "policy.generation.vllm_kwargs.speculative_config.use_local_argmax_reduction",
+            speculative.get("use_local_argmax_reduction", False),
+            False,
+        )
+
+        model_dir = Path(config.policy["model_name"])
+        model_config = json.loads((model_dir / "config.json").read_text())
+        _require_equal(
+            "model.config.model_type", model_config["model_type"], "glm_moe_dsa"
+        )
+        _require(
+            model_config["num_nextn_predict_layers"] >= 1,
+            "model.config.num_nextn_predict_layers >= 1; "
+            f"resolved {model_config['num_nextn_predict_layers']!r}",
+        )
+        mtp_start = model_config["num_hidden_layers"]
+        weight_map = json.loads(
+            (model_dir / "model.safetensors.index.json").read_text()
+        )["weight_map"]
+        _require(
+            any(name.startswith(f"model.layers.{mtp_start}.") for name in weight_map),
+            f"MTP weights under model.layers.{mtp_start}.*",
+        )
+    else:
+        _require_equal(
+            "policy.generation.vllm_kwargs.speculative_config", speculative, None
+        )
+        _require_equal(
+            "expected_speculative_method", expected_speculative_method, "none"
+        )
+
+    validate_single_controller_config(config)
+    return profile
 
 
 def _series(metrics: dict[str, Any], name: str, expected_steps: int) -> list[float]:
