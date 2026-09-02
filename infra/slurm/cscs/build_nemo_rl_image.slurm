@@ -443,10 +443,13 @@ from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tool_parsers import utils as tool_parser_utils
 
-assert vllm.__version__ == "0.25.1", vllm.__version__
-assert OnlineRenderer is not None
-assert ServingTokenization is not None
-assert tool_parser_utils.NamespaceTool is not None
+if vllm.__version__ != "0.25.1":
+    raise RuntimeError(f"Expected vLLM 0.25.1, found {vllm.__version__}")
+if any(
+    symbol is None
+    for symbol in (OnlineRenderer, ServingTokenization, tool_parser_utils.NamespaceTool)
+):
+    raise RuntimeError("Required vLLM 0.25 APIs are unavailable")
 print("vLLM:", vllm.__version__)
 print("OpenAI:", openai.__version__)
 print("xgrammar:", version("xgrammar"))
