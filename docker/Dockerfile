@@ -404,10 +404,16 @@ ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
 # Custom setup layer (override with: --build-context custom-setup=<dir> --build-arg CUSTOM_SETUP_FNAME=<script>)
 # To skip: --build-arg CUSTOM_SETUP_FNAME=
 ARG CUSTOM_SETUP_FNAME=install_apptainer.sh
-RUN --mount=from=custom-setup,src=/,dst=/tmp/custom-setup --mount=type=secret,id=APPTAINER_GITHUB_TOKEN,env=GITHUB_TOKEN <<"EOF" bash -exu
+RUN --mount=from=custom-setup,src=/,dst=/tmp/custom-setup --mount=type=secret,id=APPTAINER_GITHUB_TOKEN <<"EOF" bash -exu
 if [[ -z "${CUSTOM_SETUP_FNAME}" ]]; then
     echo "CUSTOM_SETUP_FNAME is empty, skipping custom setup"
     exit 0
+fi
+if [[ -r /run/secrets/APPTAINER_GITHUB_TOKEN ]]; then
+    set +x
+    GITHUB_TOKEN=$(cat /run/secrets/APPTAINER_GITHUB_TOKEN)
+    export GITHUB_TOKEN
+    set -x
 fi
 cp /tmp/custom-setup/${CUSTOM_SETUP_FNAME} /opt/${CUSTOM_SETUP_FNAME}
 bash -x /opt/${CUSTOM_SETUP_FNAME}
