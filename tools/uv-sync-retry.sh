@@ -3,6 +3,12 @@
 # transient transport failures are not covered by UV_HTTP_RETRIES.
 set -u
 
+if [[ -r /run/secrets/git_credentials ]]; then
+    export GIT_CONFIG_COUNT=1
+    export GIT_CONFIG_KEY_0=credential.helper
+    export GIT_CONFIG_VALUE_0="store --file=/run/secrets/git_credentials"
+fi
+
 for attempt in 1 2 3; do
     if uv sync "$@"; then
         exit 0

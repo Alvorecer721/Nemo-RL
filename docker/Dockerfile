@@ -222,6 +222,7 @@ COPY --from=nemo-rl pyproject.toml uv.lock ./
 COPY --from=nemo-rl nemo_rl/__init__.py nemo_rl/package_info.py ./nemo_rl/
 COPY --from=nemo-rl tools/build-custom-vllm.sh ./tools/build-custom-vllm.sh
 COPY --from=nemo-rl tools/build-custom-flashinfer.sh ./tools/build-custom-flashinfer.sh
+COPY --from=nemo-rl tools/uv-sync-retry.sh ./tools/uv-sync-retry.sh
 COPY --from=nemo-rl --link research/ ./research/
 COPY --from=nemo-rl --link \
     --exclude=TensorRT-LLM-workspace \
@@ -229,6 +230,7 @@ COPY --from=nemo-rl --link \
     3rdparty/ ./3rdparty/
 
 RUN --mount=type=ssh \
+    --mount=type=secret,id=git_credentials \
     --mount=type=bind,from=uv-cache-seed,source=.,target=/tmp/uv-cache-seed <<"EOF" bash -exu
 CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}" | md5sum | cut -c1-12)
 SEED_KEY=$(cat /tmp/uv-cache-seed/.cache-key 2>/dev/null || echo "")
@@ -256,27 +258,13 @@ fi
 # Install the common environment first. Later backend-specific syncs use
 # disposable environments so their conflicting package sets warm the uv cache
 # without bloating image layers.
-for attempt in 1 2 3; do
-    if UV_LINK_MODE=hardlink uv sync --frozen --no-install-project; then
-        break
-    fi
-    if ((attempt == 3)); then
-        echo "uv sync failed after ${attempt} attempts" >&2
-        exit 1
-    fi
-    echo "uv sync attempt ${attempt} failed; retrying" >&2
-    sleep $((attempt * 5))
-done
+UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --no-install-project
 EOF
-
-# Keep network retries shared across the independently committed backend cache
-# layers below. The common environment above remains its own reusable layer.
-COPY --from=nemo-rl tools/uv-sync-retry.sh ./tools/uv-sync-retry.sh
 
 # Commit backend cache additions independently. This bounds the mutable overlay
 # Podman must snapshot at once and makes expensive native builds reusable after
 # an interrupted build.
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
     source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
     uv venv --seed /tmp/nemo-rl-warm-vllm
@@ -287,7 +275,7 @@ if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
     rm -rf /tmp/nemo-rl-warm-vllm
 fi
 EOF
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
     uv venv --seed /tmp/nemo-rl-warm-sglang
     UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
@@ -297,7 +285,7 @@ if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
     rm -rf /tmp/nemo-rl-warm-sglang
 fi
 EOF
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 uv venv --seed /tmp/nemo-rl-warm-mcore
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
     bash tools/uv-sync-retry.sh --frozen --no-install-project
@@ -305,7 +293,7 @@ UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
     bash tools/uv-sync-retry.sh --frozen --extra mcore --no-install-project
 rm -rf /tmp/nemo-rl-warm-mcore
 EOF
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 uv venv --seed /tmp/nemo-rl-warm-automodel
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
     bash tools/uv-sync-retry.sh --frozen --no-install-project
@@ -313,7 +301,7 @@ UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
     bash tools/uv-sync-retry.sh --frozen --extra automodel --no-install-project
 rm -rf /tmp/nemo-rl-warm-automodel
 EOF
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 uv venv --seed /tmp/nemo-rl-warm-modelopt
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
     bash tools/uv-sync-retry.sh --frozen --no-install-project
@@ -323,7 +311,7 @@ rm -rf /tmp/nemo-rl-warm-modelopt
 EOF
 
 # Assemble the image's actual project environment from the now-warm cache.
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
 bash tools/uv-sync-retry.sh --link-mode symlink --frozen --all-groups --no-install-project
 

@@ -367,7 +367,16 @@ else
     echo "Release assembly will require a second build with the printed cache pin"
 fi
 
+BUILD_SECRET_ARGS=()
+ACCOUNT_HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
+GIT_CREDENTIALS_FILE=${GIT_CREDENTIALS_FILE:-$ACCOUNT_HOME/.git-credentials}
+if [[ -r "$GIT_CREDENTIALS_FILE" ]]; then
+    echo "Using Git credentials as an ephemeral build secret"
+    BUILD_SECRET_ARGS+=(--secret "id=git_credentials,src=$GIT_CREDENTIALS_FILE")
+fi
+
 podman build \
+    "${BUILD_SECRET_ARGS[@]}" \
     --layers \
     --tls-verify=false \
     --cache-from="${LOCAL_REGISTRY}/cache" \
