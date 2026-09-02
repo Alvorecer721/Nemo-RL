@@ -269,6 +269,10 @@ for attempt in 1 2 3; do
 done
 EOF
 
+# Keep network retries shared across the independently committed backend cache
+# layers below. The common environment above remains its own reusable layer.
+COPY --from=nemo-rl tools/uv-sync-retry.sh ./tools/uv-sync-retry.sh
+
 # Commit backend cache additions independently. This bounds the mutable overlay
 # Podman must snapshot at once and makes expensive native builds reusable after
 # an interrupted build.
@@ -277,9 +281,9 @@ if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
     source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
     uv venv --seed /tmp/nemo-rl-warm-vllm
     UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
-        uv sync --frozen --no-install-project
+        bash tools/uv-sync-retry.sh --frozen --no-install-project
     UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
-        uv sync --frozen --extra vllm --no-install-project
+        bash tools/uv-sync-retry.sh --frozen --extra vllm --no-install-project
     rm -rf /tmp/nemo-rl-warm-vllm
 fi
 EOF
@@ -287,41 +291,41 @@ RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
     uv venv --seed /tmp/nemo-rl-warm-sglang
     UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
-        uv sync --frozen --no-install-project
+        bash tools/uv-sync-retry.sh --frozen --no-install-project
     UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
-        uv sync --frozen --extra sglang --no-install-project
+        bash tools/uv-sync-retry.sh --frozen --extra sglang --no-install-project
     rm -rf /tmp/nemo-rl-warm-sglang
 fi
 EOF
 RUN <<"EOF" bash -exu
 uv venv --seed /tmp/nemo-rl-warm-mcore
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
-    uv sync --frozen --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --no-install-project
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
-    uv sync --frozen --extra mcore --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --extra mcore --no-install-project
 rm -rf /tmp/nemo-rl-warm-mcore
 EOF
 RUN <<"EOF" bash -exu
 uv venv --seed /tmp/nemo-rl-warm-automodel
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
-    uv sync --frozen --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --no-install-project
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
-    uv sync --frozen --extra automodel --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --extra automodel --no-install-project
 rm -rf /tmp/nemo-rl-warm-automodel
 EOF
 RUN <<"EOF" bash -exu
 uv venv --seed /tmp/nemo-rl-warm-modelopt
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
-    uv sync --frozen --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --no-install-project
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
-    uv sync --frozen --extra modelopt --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --extra modelopt --no-install-project
 rm -rf /tmp/nemo-rl-warm-modelopt
 EOF
 
 # Assemble the image's actual project environment from the now-warm cache.
 RUN <<"EOF" bash -exu
 source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
-uv sync --link-mode symlink --frozen --all-groups --no-install-project
+bash tools/uv-sync-retry.sh --link-mode symlink --frozen --all-groups --no-install-project
 
 # Remove the aiohttp in this uv cache dir to fully address CVE GHSA-mqqc-3gqh-h2x8
 # The ray install will include the older aiohttp version in its cache
