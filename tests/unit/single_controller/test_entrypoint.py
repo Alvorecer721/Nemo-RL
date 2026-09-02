@@ -55,6 +55,7 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
     configured_generation = {"backend": "vllm", "_mtp_weights_from_refit": True}
     configure_generation = MagicMock(return_value=configured_generation)
+    validate_config = MagicMock()
     actor = SimpleNamespace(run=SimpleNamespace(remote=MagicMock(return_value="run")))
     actor_args = SimpleNamespace(
         env_handles={},
@@ -98,6 +99,11 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
     monkeypatch.setattr(
         run_grpo_single_controller,
+        "validate_single_controller_config",
+        validate_config,
+    )
+    monkeypatch.setattr(
+        run_grpo_single_controller,
         "setup_single_controller",
         lambda *_args: (actor_args, SetupTimingMetrics()),
     )
@@ -114,6 +120,7 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         actor_args=actor_args,
         config=config,
         configure_generation=configure_generation,
+        validate_config=validate_config,
         configured_generation=configured_generation,
         generation_config=generation_config,
         ray_get=ray_get,
@@ -171,6 +178,7 @@ def test_main_configures_generation_for_trained_mtp(
 ) -> None:
     run_grpo_single_controller.main()
 
+    main_context.validate_config.assert_called_once_with(main_context.config)
     main_context.configure_generation.assert_called_once_with(
         main_context.generation_config,
         "tokenizer",
