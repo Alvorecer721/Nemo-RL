@@ -43,6 +43,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 from nemo_rl.data.interfaces import LLMMessageLogType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+from nemo_rl.experience.metric_utils import is_histogram_metric
+from nemo_rl.telemetry.metrics import tee_rl_metrics_to_otel
 
 # Flag to track if rich logging has been configured
 _rich_logging_configured = False
@@ -193,7 +195,8 @@ class TensorboardLogger(LoggerInterface):
 
     def log_histogram(self, histogram: list[Any], step: int, name: str) -> None:
         """Log histogram metrics to Tensorboard."""
-        return
+        if len(histogram) > 0:
+            self.writer.add_histogram(name, np.asarray(histogram), step)
 
     def log_hyperparams(self, params: Mapping[str, Any]) -> None:
         """Log hyperparameters to Tensorboard.
@@ -966,8 +969,6 @@ class MLflowLogger(LoggerInterface):
 class Logger(LoggerInterface):
     """Main logger class that delegates to multiple backend loggers."""
 
-    _denylist: list[str] = []
-
     def __init__(self, cfg: LoggerConfig):
         """Create and configure enabled logging backends and optionally start GPU monitoring.
 
@@ -982,7 +983,6 @@ class Logger(LoggerInterface):
         self.loggers: list[LoggerInterface] = []
         self.wandb_logger = None
         self.swanlab_logger = None
-
         self._denylist = cfg.get("metric_denylist") or []
         self._unmatched_patterns = set(self._denylist)
         self._denylist_warned = False
@@ -1041,21 +1041,20 @@ class Logger(LoggerInterface):
             print("No loggers initialized")
 
     def _is_denied(self, name: str) -> bool:
-        """Whether a fully-qualified metric name matches the configured denylist."""
-        for pat in self._denylist:
-            if fnmatch.fnmatch(name, pat):
-                self._unmatched_patterns.discard(pat)
+        for pattern in self._denylist:
+            if fnmatch.fnmatch(name, pattern):
+                self._unmatched_patterns.discard(pattern)
                 return True
         return False
 
     def _warn_unmatched_denylist(self) -> None:
-        """Warn once about denylist patterns that matched no metric this run (likely stale)."""
         if self._denylist_warned or not self._denylist:
             return
         self._denylist_warned = True
         if self._unmatched_patterns:
             logging.getLogger(__name__).warning(
-                f"metric_denylist patterns matched no logged metric (stale or wrong surface?): {sorted(self._unmatched_patterns)}"
+                "metric_denylist patterns matched no logged metric: %s",
+                sorted(self._unmatched_patterns),
             )
 
     def log_metrics(
@@ -1074,17 +1073,52 @@ class Logger(LoggerInterface):
             prefix: Optional prefix for metric names
             step_metric: Optional name of a field in metrics to use as step instead
                          of the provided step value (currently only needed for wandb)
+
+        Note:
+            Metrics identified by :func:`is_histogram_metric` are routed through
+            :meth:`log_histogram` instead of each backend's ``log_metrics``.
+            ``histogram/*`` keys retain their established
+            ``generation_metrics/`` namespace; other distributions inherit
+            ``prefix``.
         """
         if self._denylist:
             metrics = {
-                k: v
-                for k, v in metrics.items()
+                name: value
+                for name, value in metrics.items()
                 if not self._is_denied(
-                    k if k == step_metric else (f"{prefix}/{k}" if prefix else k)
+                    name
+                    if name == step_metric
+                    else f"{prefix}/{name}"
+                    if prefix
+                    else name
                 )
             }
+        histogram_metrics = {
+            name: value for name, value in metrics.items() if is_histogram_metric(name)
+        }
+        metrics_to_log = {
+            name: value
+            for name, value in metrics.items()
+            if name not in histogram_metrics
+        }
+
+        for name, values in histogram_metrics.items():
+            # Preserve the established namespace for per-turn generation
+            # histograms; other distributions inherit the caller's prefix.
+            if name.startswith("histogram/"):
+                histogram_name = (
+                    f"generation_metrics/{name}"
+                    if prefix in ("", None, "train")
+                    else f"generation_metrics/{prefix}/{name}"
+                )
+            else:
+                histogram_name = f"{prefix}/{name}" if prefix else name
+            self.log_histogram(values, step, histogram_name)
+
         for logger in self.loggers:
-            logger.log_metrics(metrics, step, prefix, step_metric, step_finished)
+            logger.log_metrics(metrics_to_log, step, prefix, step_metric, step_finished)
+
+        tee_rl_metrics_to_otel(metrics, prefix)
         if prefix == "validation":
             self._warn_unmatched_denylist()
 

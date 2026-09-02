@@ -247,18 +247,7 @@ def _patch_vllm_tool_parser_namespace_tool(logger) -> None:
 
 
 def _patch_vllm_invalid_mnnvl_workspace(logger) -> None:
-    """Reject FlashInfer MNNVL workspaces without multicast support.
-
-    vLLM 0.25.1 can construct an MNNVL workspace on a topology where NVSwitch
-    multicast is unavailable. The object is returned with a null ``mc_ptr``
-    and is then selected for the compiled all-reduce/RMSNorm fusion. Its first
-    profile run corrupts the following GEMM and fails with a cuBLAS error.
-
-    This is an exact backport of vLLM #49043, merged after v0.25.1:
-    https://github.com/vllm-project/vllm/commit/81962bb6995eaebd1e49998c2a91c9e01e24da27
-    On a single node, returning ``None`` lets vLLM's existing caller fall back
-    to the TRT-LLM FlashInfer workspace instead.
-    """
+    """Reject FlashInfer MNNVL workspaces without multicast support."""
     try:
         file_to_patch = _get_vllm_file(
             "distributed/device_communicators/flashinfer_all_reduce.py"
@@ -266,8 +255,7 @@ def _patch_vllm_invalid_mnnvl_workspace(logger) -> None:
     except RuntimeError:
         logger.warning(
             "Could not locate flashinfer_all_reduce.py; invalid MNNVL workspace "
-            "patch NOT applied. Compiled TP engines may fail on topologies "
-            "without NVSwitch multicast."
+            "patch was not applied."
         )
         return
 
@@ -309,16 +297,13 @@ def _patch_vllm_invalid_mnnvl_workspace(logger) -> None:
         if marker in content:
             logger.info("vLLM invalid MNNVL workspace patch already applied.")
             return
-
         if old_snippet not in content:
             logger.warning(
                 "Could not apply invalid MNNVL workspace patch: expected "
-                "snippet not found in %s. The vLLM version may have changed. "
-                "Compiled TP engines may fail without NVSwitch multicast.",
+                "snippet not found in %s.",
                 file_to_patch,
             )
             return
-
         write_back(content.replace(old_snippet, new_snippet, 1))
 
     logger.info("Successfully patched vLLM invalid MNNVL workspace handling.")
@@ -645,15 +630,7 @@ def _patch_vllm_radio_layerscale_loader(logger) -> None:
 
 
 def _patch_vllm_xielu_static_constants(logger) -> None:
-    """Keep xIELU architecture constants out of vLLM's weight state dict.
-
-    vLLM's dummy loader randomizes every tensor returned by ``state_dict``.
-    ``beta`` and ``eps`` are fixed xIELU architecture constants, not trained
-    state, so making them persistent buffers lets dummy initialization corrupt
-    them and forces refit producers to invent synthetic weight keys.  The
-    latter is topology-dependent under pipeline parallelism.  Non-persistent
-    buffers remain device-aware while staying owned by the xIELU operator.
-    """
+    """Keep xIELU architecture constants out of vLLM's weight state dict."""
     try:
         file_to_patch = _get_vllm_file("model_executor/layers/activation.py")
     except RuntimeError as exc:
@@ -694,13 +671,7 @@ def _patch_vllm_xielu_static_constants(logger) -> None:
 
 
 def _patch_vllm_apertus_static_xielu_loader(logger) -> None:
-    """Validate legacy Apertus xIELU constants without loading them.
-
-    Existing Apertus checkpoints contain beta/eps buffers.  Accept those keys
-    for compatibility, but require them to match the engine-owned constants.
-    Copying them would reintroduce two sources of truth because the optional
-    fused xIELU path snapshots the same values as Python scalars at init.
-    """
+    """Validate legacy Apertus xIELU constants without loading them."""
     try:
         file_to_patch = _get_vllm_file("model_executor/models/apertus.py")
     except RuntimeError as exc:
@@ -759,15 +730,70 @@ def _patch_vllm_apertus_static_xielu_loader(logger) -> None:
     logger.info("Successfully patched vLLM Apertus static xIELU loading.")
 
 
+def _patch_vllm_glm_decoder_sequence_parallel_moe(logger) -> None:
+    """Restore the vLLM 0.24 decoder boundary for GLM DSA models.
+
+    vLLM 0.25.1 keeps hidden states sequence-parallel across attention and MoE
+    decoder layers when TP, DP, and EP are all enabled. GLM-5.1/5.2 decode
+    diverges on that new path: the first generated token is correct, while
+    subsequent decode-token logprobs collapse. Keep vLLM's existing MoE-local
+    sequence parallelism, but disable the new decoder-level optimization for
+    ``glm_moe_dsa`` so the MoE gathers its output as it did in vLLM 0.24.
+
+    The upstream bug and proposed fix are tracked at
+    https://github.com/vllm-project/vllm/issues/50154 and
+    https://github.com/vllm-project/vllm/pull/50155. Remove this patch after
+    upgrading to a vLLM release containing the fix and validating iterative
+    GLM-5.1/5.2 decode with TP, DP, and EP all enabled.
+    """
+    try:
+        file_to_patch = _get_vllm_file("model_executor/models/deepseek_v2.py")
+    except RuntimeError:
+        logger.warning(
+            "Could not locate deepseek_v2.py for the GLM decoder SP-MoE patch."
+        )
+        return
+
+    old_snippet = """        self.use_sequence_parallel_moe = (
+            parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size == 1
+            and is_moe_layer
+        )
+"""
+    new_snippet = """        self.use_sequence_parallel_moe = (
+            parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size == 1
+            and is_moe_layer
+            # vLLM 0.25.1's decoder-level SP-MoE path corrupts iterative
+            # decoding for GLM-5.1/5.2. Retain the vLLM 0.24 MoE-local path.
+            and getattr(config, "model_type", None) != "glm_moe_dsa"
+        )
+"""
+
+    with _locked_file_patch(file_to_patch) as (content, write_back):
+        if new_snippet in content:
+            logger.info("vLLM GLM decoder SP-MoE patch already applied.")
+            return
+        if old_snippet not in content:
+            logger.warning(
+                "Could not apply vLLM GLM decoder SP-MoE patch: expected "
+                "vLLM 0.25.1 source shape was not found in %s.",
+                file_to_patch,
+            )
+            return
+        write_back(content.replace(old_snippet, new_snippet, 1))
+
+    logger.info("Successfully disabled decoder-level SP-MoE for GLM DSA models.")
+
+
 def ensure_vllm_source_compat() -> None:
     """Apply interpreter-independent vLLM source-compat patches.
 
     Safe to call from any process that imports vLLM directly (e.g. the
     tools/model_diagnostics scripts, which construct ``vllm.LLM`` without
     going through a NeMo-RL generation worker). Must be called BEFORE the
-    first ``import vllm`` submodule that pulls in ``vllm.tool_parsers`` or
-    ``vllm.distributed.device_communicators.flashinfer_all_reduce``. Worker
-    processes get these patches via ``_apply_vllm_patches`` at init.
+    first ``import vllm`` submodule that pulls in ``vllm.tool_parsers``.
+    Worker processes get this via ``_apply_vllm_patches`` at init.
     """
     from vllm.logger import init_logger
 
@@ -776,6 +802,7 @@ def ensure_vllm_source_compat() -> None:
     _patch_vllm_xielu_static_constants(patch_logger)
     _patch_vllm_apertus_static_xielu_loader(patch_logger)
     _patch_vllm_radio_layerscale_loader(patch_logger)
+    _patch_vllm_glm_decoder_sequence_parallel_moe(patch_logger)
     _patch_vllm_invalid_mnnvl_workspace(patch_logger)
 
 
@@ -834,3 +861,4 @@ def _apply_vllm_patches(
     _patch_vllm_xielu_static_constants(patch_logger)
     _patch_vllm_apertus_static_xielu_loader(patch_logger)
     _patch_vllm_radio_layerscale_loader(patch_logger)
+    _patch_vllm_glm_decoder_sequence_parallel_moe(patch_logger)
