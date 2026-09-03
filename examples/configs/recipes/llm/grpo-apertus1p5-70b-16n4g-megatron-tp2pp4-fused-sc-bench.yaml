@@ -1,0 +1,12 @@
+defaults: grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench.yaml
+
+# Chunked fused LM-head + logprob computation. Apertus has a 266k vocabulary,
+# so the unfused path materialises a 1024 x 266752 fp32 logits tensor per
+# microbatch on the last pipeline stage. Megatron requires parameter-gather
+# overlap to be off on this path.
+policy:
+  megatron_cfg:
+    use_fused_linear_logprobs: true
+    fused_linear_logprobs_chunk_size: 256
+    distributed_data_parallel_config:
+      overlap_param_gather: false
