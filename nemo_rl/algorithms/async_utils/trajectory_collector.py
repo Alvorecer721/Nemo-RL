@@ -1040,7 +1040,7 @@ class AsyncTrajectoryCollector:
         every time once one is.
         """
         with self._failure_lock:
-            error_message = self._fatal_error_message
+            error_message = self._fatal_error_message or self.collection_error
         if error_message is not None:
             raise RuntimeError(error_message)
 
