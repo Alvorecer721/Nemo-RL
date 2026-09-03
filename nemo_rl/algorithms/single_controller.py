@@ -3249,6 +3249,7 @@ class SingleControllerActor:
         num_mask_sample_filtered = int(mask_sample.sum().item())
         self._step_log_dict["num_mask_sample_filtered"].append(num_mask_sample_filtered)
         final_sample_mask = sample_mask * (~mask_sample).to(sample_mask.dtype)
+        env_sample_mask = final_sample_mask
         if self._algo_cfg.overlong_filtering:
             final_sample_mask = final_sample_mask * (~truncated).to(sample_mask.dtype)
 
@@ -3298,8 +3299,10 @@ class SingleControllerActor:
             # tail gate. The legacy loop writes every training row as JSONL;
             # SingleController can avoid that large dump by pooling these small
             # per-chunk tensors before the step is logged.
+            # Overlong and sequence-error rows stay in: those tails are exactly
+            # what the gate inspects. Only environment-masked samples drop out.
             valid_token_mask = (
-                token_mask[:, 1:] * final_sample_mask.unsqueeze(-1)
+                token_mask[:, 1:] * env_sample_mask.unsqueeze(-1)
             ).bool()
             logprob_errors = torch.abs(
                 masking_data["generation_logprobs"][:, 1:]
