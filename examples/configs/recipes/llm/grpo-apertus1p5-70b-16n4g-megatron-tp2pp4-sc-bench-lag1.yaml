@@ -1,0 +1,16 @@
+defaults: grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench.yaml
+
+# One-step-off-policy variant: the in-order sampler lets generation run exactly
+# one batch ahead of the trainer, so every sample is at most one update old.
+# Sizing follows the single-controller guide: prompts x (lookahead + 1) in
+# flight and buffered.
+async_rl:
+  sampler:
+    name: in_order
+    max_lookahead_versions: 1
+  min_groups_for_streaming_train: ${grpo.num_prompts_per_step}
+  max_inflight_prompts: ${mul:${grpo.num_prompts_per_step}, 2}
+  max_buffered_rollouts: ${mul:${grpo.num_prompts_per_step}, 2}
+logger:
+  wandb:
+    name: nemo-rl-70b-tp2pp4-${oc.env:AP_ANSWER_MARKER,boxed}-lag1-seed${oc.env:AP_SEED,42}
