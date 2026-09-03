@@ -974,10 +974,12 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
 
 def validate_single_controller_config(master_config: MasterConfig) -> None:
     """Validate cross-section SingleController constraints before setup."""
-    if master_config.grpo is not None and master_config.grpo.async_grpo is not None:
+    legacy_async = master_config.grpo.async_grpo if master_config.grpo else None
+    if legacy_async is not None and legacy_async.enabled:
         raise ValueError(
-            "SingleController requires grpo.async_grpo: null; it reads async_rl.* "
-            "instead of the legacy async block."
+            "grpo.async_grpo.enabled=true selects the legacy async loop; "
+            "SingleController reads async_rl.* instead. Disable grpo.async_grpo "
+            "or launch examples/run_grpo.py."
         )
     _validate_algo_settings(master_config)
 

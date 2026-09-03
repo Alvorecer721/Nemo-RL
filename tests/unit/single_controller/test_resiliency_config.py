@@ -779,9 +779,17 @@ class TestUnsupportedAlgorithmKnobsFailLoudly:
         with pytest.raises(NotImplementedError, match="never be evaluated"):
             validate_single_controller_config(cfg)
 
-    def test_legacy_async_block_is_rejected(self) -> None:
+    def test_enabled_legacy_async_block_is_rejected(self) -> None:
+        cfg = _master_config()
+        cfg.grpo.async_grpo = GRPOConfig().async_grpo.model_copy(
+            update={"enabled": True}
+        )
+
+        with pytest.raises(ValueError, match="legacy async loop"):
+            validate_single_controller_config(cfg)
+
+    def test_disabled_legacy_async_block_is_inert(self) -> None:
         cfg = _master_config()
         cfg.grpo.async_grpo = GRPOConfig().async_grpo
 
-        with pytest.raises(ValueError, match="grpo.async_grpo: null"):
-            validate_single_controller_config(cfg)
+        validate_single_controller_config(cfg)
