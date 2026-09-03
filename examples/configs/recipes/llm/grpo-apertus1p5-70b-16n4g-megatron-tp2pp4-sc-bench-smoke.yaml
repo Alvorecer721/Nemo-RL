@@ -1,0 +1,4 @@
+defaults: grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench.yaml
+
+grpo:
+  max_num_steps: 2

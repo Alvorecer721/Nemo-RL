@@ -1,0 +1,8 @@
+defaults: grpo-apertus1p5-70b-16n4g-megatron-tp4pp2-sc-bench.yaml
+
+# Same benchmark with the replica cut as TP2 x PP4 instead of TP4 x PP2: half
+# the tensor-parallel traffic per layer at the cost of a deeper pipeline.
+policy:
+  megatron_cfg:
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 4
