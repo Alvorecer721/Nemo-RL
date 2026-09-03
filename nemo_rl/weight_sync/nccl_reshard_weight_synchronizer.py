@@ -36,6 +36,7 @@ run on separate GPU clusters, so the phase transitions (offload / restore) are
 owned by the orchestrator, not here.
 """
 
+import logging
 from collections.abc import Sequence
 from contextlib import nullcontext
 from typing import Any, Optional
@@ -48,6 +49,8 @@ from nemo_rl.weight_sync.membership import RefitMembership, plan_refit_membershi
 from nemo_rl.weight_sync.nccl_reshard_utils import (
     make_nccl_reshard_refit_info_wire_safe,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _settle_before_propagating(futures, budget_s, what: str) -> None:
@@ -181,6 +184,13 @@ class NcclReshardWeightSynchronizer(WeightSynchronizer):
             try:
                 ray.get(futures_train)
             except BaseException:
+                # The bounded unwind below can outlive the controller's own refit
+                # deadline. Record the attributable worker failure now, before that
+                # outer timeout can replace it with a generic hang diagnosis.
+                log.exception(
+                    "refit: first train-side worker failure; waiting for the fleet "
+                    "to unwind before propagating"
+                )
                 # Every rank must be out of the old refit before the caller can rebuild
                 # over the survivors; see _settle_before_propagating. BOTH sides: the
                 # rebuild dispatches init_collective to the generation ranks too, and

@@ -629,6 +629,40 @@ class TestCollectiveWeightSynchronizer:
 
 class TestNcclReshardWeightSynchronizer:
     @patch("nemo_rl.weight_sync.nccl_reshard_weight_synchronizer.ray")
+    def test_sync_weights_logs_train_failure_before_settling(self, mock_ray, caplog):
+        train_futures = [MagicMock()]
+        inference_futures = [MagicMock()]
+        failure = RuntimeError("CUDA out of memory while stacking experts")
+        policy = _mock_policy()
+        policy.nccl_reshard_refit.return_value = train_futures
+        gen = _mock_generation()
+        gen.nccl_reshard_refit.return_value = inference_futures
+        sync = NcclReshardWeightSynchronizer(
+            policy,
+            gen,
+            _mock_cluster(),
+            _mock_cluster(),
+            refit_timeout_s=1.0,
+        )
+        mock_ray.get.side_effect = failure
+
+        def settle_after_log(*args, **kwargs):
+            assert "first train-side worker failure" in caplog.text
+            assert "CUDA out of memory while stacking experts" in caplog.text
+            return [], []
+
+        mock_ray.wait.side_effect = settle_after_log
+
+        with caplog.at_level(
+            "ERROR", logger="nemo_rl.weight_sync.nccl_reshard_weight_synchronizer"
+        ):
+            with pytest.raises(RuntimeError) as exc_info:
+                sync.sync_weights()
+
+        assert exc_info.value is failure
+        assert mock_ray.wait.call_count == 2
+
+    @patch("nemo_rl.weight_sync.nccl_reshard_weight_synchronizer.ray")
     def test_init_communicator_ships_wire_safe_refit_info(self, mock_ray):
         # The train-side refit info carries MeshInfo rank tensors; the copy
         # handed to the generation side must be the wire-safe (plain-dict)
