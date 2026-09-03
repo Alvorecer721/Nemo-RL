@@ -166,7 +166,11 @@ async_rl:
     enabled: false
 logger:
   log_dir: ${oc.env:AP_RUN_DIR}/tb
-  wandb_enabled: false
+  wandb_enabled: true
+  wandb:
+    project: apertus-benchmarks
+    entity: ml-team-cscs
+    name: nemo-rl-70b-tp2pp4-${oc.env:AP_ANSWER_MARKER,boxed}-seed${oc.env:AP_SEED,42}
   tensorboard_enabled: true
   monitor_gpus: true
   gpu_monitoring:
