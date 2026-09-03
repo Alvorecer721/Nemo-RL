@@ -136,15 +136,14 @@ data_plane:
 async_rl:
   sampler:
     name: windowed
-    max_staleness_versions: 16
+    # Apertus training never consumes rollouts more than two policy updates old.
+    max_staleness_versions: 2
   weight_sync_period: 1
   recompute_kv_cache_after_weight_updates: false
   min_groups_for_streaming_train: 48
   max_inflight_prompts: 96
-  # Two steps of groups. A deep buffer lets rollouts age past the staleness
-  # window while they wait, and every evicted group burns a prompt from the
-  # single epoch: run 3283091 evicted 3072 groups, trained at lag 16, and
-  # exhausted the dataloader one step early with no final checkpoint.
+  # Two steps of groups preserve rollout/training overlap without permitting
+  # a deeper stale-data queue.
   max_buffered_rollouts: 96
   diagnostics: false
   rollout_failure:
