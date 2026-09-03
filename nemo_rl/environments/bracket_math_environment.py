@@ -23,7 +23,7 @@ scalar reward.
 from __future__ import annotations
 
 import itertools
-from typing import Any, Union
+from typing import Any, Literal, NotRequired, TypedDict, Union
 
 import ray
 import torch
@@ -33,16 +33,27 @@ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES
 from nemo_rl.environments.bracket_math_reward import score_bracket_math
 from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
-from nemo_rl.environments.math_environment import (
-    MathEnvConfig,
-    MathEnvironmentMetadata,
-)
+from nemo_rl.environments.math_environment import MathEnvironmentMetadata
 from nemo_rl.environments.metrics import calculate_pass_rate_per_prompt
 from nemo_rl.environments.utils import chunk_list_to_workers
 
 
+RewardMode = Literal["composite", "outcome"]
+
+
+class BracketMathEnvConfig(TypedDict):
+    num_workers: int
+    # "composite" is the benchmark training reward (outcome + format bonus -
+    # length penalty); "outcome" is the plain 0/1 correctness used for evaluation.
+    reward: RewardMode
+    stop_strings: NotRequired[list[str] | None]
+
+
 @ray.remote  # pragma: no cover
 class BracketMathVerifyWorker:
+    def __init__(self, reward_mode: RewardMode) -> None:
+        self.reward_mode = reward_mode
+
     def verify(
         self,
         pred_responses: list[str],
@@ -54,7 +65,10 @@ class BracketMathVerifyWorker:
             score_bracket_math(response, ground_truth)
             for response, ground_truth in zip(pred_responses, ground_truths)
         ]
-        rewards = [score.reward for score in scores]
+        if self.reward_mode == "outcome":
+            rewards = [score.outcome for score in scores]
+        else:
+            rewards = [score.reward for score in scores]
         if return_extracted_answer:
             return rewards, [score.extracted_answer for score in scores]
         return rewards
@@ -64,14 +78,19 @@ class BracketMathVerifyWorker:
     max_restarts=-1, max_task_retries=-1, max_concurrency=1000
 )  # pragma: no cover
 class BracketMathEnvironment(EnvironmentInterface[MathEnvironmentMetadata]):
-    def __init__(self, cfg: MathEnvConfig):
+    def __init__(self, cfg: BracketMathEnvConfig):
         self.cfg = cfg
         self.num_workers = cfg["num_workers"]
+        self.reward_mode: RewardMode = cfg["reward"]
+        if self.reward_mode not in ("composite", "outcome"):
+            raise ValueError(
+                f"env.bracket_math.reward must be 'composite' or 'outcome', got {self.reward_mode!r}"
+            )
         self._worker_counter = itertools.count()
         self.workers = [
             BracketMathVerifyWorker.options(  # type: ignore # (decorated with @ray.remote)
                 runtime_env={"py_executable": PY_EXECUTABLES.SYSTEM}
-            ).remote()
+            ).remote(self.reward_mode)
             for _ in range(self.num_workers)
         ]
 

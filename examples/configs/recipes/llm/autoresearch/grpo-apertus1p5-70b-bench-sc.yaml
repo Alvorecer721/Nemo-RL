@@ -109,6 +109,7 @@ data:
 env:
   bracket_math:
     num_workers: 16
+    reward: composite
 data_plane:
   enabled: true
   impl: transfer_queue
