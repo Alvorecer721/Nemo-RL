@@ -316,6 +316,7 @@ def _metrics(steps: int = 10) -> dict[str, dict[str, float]]:
         "train/logprob_tails/max_abs": series(0.4),
         "train/logprob_tails/count_gt_0_5": series(1.0),
         "train/logprob_tails/count_gt_1_0": series(0.0),
+        "train/logprob_tails/count_nonfinite": series(0.0),
     }
 
 
@@ -375,6 +376,37 @@ def test_validate_metrics_rejects_bad_logprob_tail_counters() -> None:
 
     with pytest.raises(ValueError, match=r">1.0 tail exceeded"):
         validate_metrics(metrics, expected_steps=10)
+
+
+def test_validate_metrics_requires_nonfinite_counter() -> None:
+    metrics = _metrics()
+    del metrics["train/logprob_tails/count_nonfinite"]
+
+    with pytest.raises(ValueError, match="count_nonfinite"):
+        validate_metrics(metrics, expected_steps=10)
+
+
+def test_validate_metrics_allows_legacy_missing_nonfinite_counter() -> None:
+    metrics = _metrics()
+    del metrics["train/logprob_tails/count_nonfinite"]
+
+    validate_metrics(
+        metrics,
+        expected_steps=10,
+        allow_legacy_missing_nonfinite=True,
+    )
+
+
+def test_validate_metrics_rejects_nonzero_nonfinite_counter() -> None:
+    metrics = _metrics()
+    metrics["train/logprob_tails/count_nonfinite"]["4"] = 1.0
+
+    with pytest.raises(ValueError, match="Non-finite log-probability deltas"):
+        validate_metrics(
+            metrics,
+            expected_steps=10,
+            allow_legacy_missing_nonfinite=True,
+        )
 
 
 def test_validate_metrics_rejects_bad_max_sequence_probability_error() -> None:

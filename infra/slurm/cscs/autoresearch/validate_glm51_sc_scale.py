@@ -390,7 +390,10 @@ def _validate_speculative_metrics(
 
 
 def _validate_logprob_tail_metrics(
-    metrics: dict[str, Any], expected_steps: int
+    metrics: dict[str, Any],
+    expected_steps: int,
+    *,
+    allow_legacy_missing_nonfinite: bool = False,
 ) -> dict[str, Any]:
     """Validate SingleController's compact per-token Router Replay evidence."""
     names = (
@@ -439,7 +442,7 @@ def _validate_logprob_tail_metrics(
         }
 
     nonfinite_name = "train/logprob_tails/count_nonfinite"
-    if isinstance(metrics.get(nonfinite_name), dict):
+    if nonfinite_name in metrics or not allow_legacy_missing_nonfinite:
         nonfinite = _series(metrics, nonfinite_name, expected_steps)
         if any(value != 0 for value in nonfinite):
             raise ValueError(
@@ -456,7 +459,11 @@ def _validate_logprob_tail_metrics(
 
 
 def validate_metrics(
-    metrics: dict[str, Any], expected_steps: int, speculative_tokens: int = 0
+    metrics: dict[str, Any],
+    expected_steps: int,
+    speculative_tokens: int = 0,
+    *,
+    allow_legacy_missing_nonfinite: bool = False,
 ) -> dict[str, Any]:
     if expected_steps < 1:
         raise ValueError("expected_steps must be positive")
@@ -557,7 +564,9 @@ def validate_metrics(
             metrics, expected_steps, speculative_tokens
         )
     summary["per_token_logprob_tails"] = _validate_logprob_tail_metrics(
-        metrics, expected_steps
+        metrics,
+        expected_steps,
+        allow_legacy_missing_nonfinite=allow_legacy_missing_nonfinite,
     )
     return summary
 
@@ -567,12 +576,20 @@ def main() -> int:
     parser.add_argument("metrics", type=Path)
     parser.add_argument("--expected-steps", type=int, required=True)
     parser.add_argument("--speculative-tokens", type=int, default=0)
+    parser.add_argument(
+        "--allow-legacy-missing-nonfinite",
+        action="store_true",
+        help="Allow the missing count_nonfinite metric only when revalidating job 3240688.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
     metrics = json.loads(args.metrics.read_text())
     summary = validate_metrics(
-        metrics, args.expected_steps, speculative_tokens=args.speculative_tokens
+        metrics,
+        args.expected_steps,
+        speculative_tokens=args.speculative_tokens,
+        allow_legacy_missing_nonfinite=args.allow_legacy_missing_nonfinite,
     )
     args.output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(json.dumps(summary, indent=2, sort_keys=True))
