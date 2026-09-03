@@ -55,8 +55,8 @@ policy:
     name: ${oc.env:AP_TOKENIZER}
     chat_template_kwargs: null
   train_global_batch_size: 768
-  train_micro_batch_size: 4
-  logprob_batch_size: 4
+  train_micro_batch_size: 2
+  logprob_batch_size: 2
   max_total_sequence_length: 1024
   max_grad_norm: 1.0
   sequence_packing:
@@ -68,6 +68,8 @@ policy:
     sequence_parallel: true
     activation_checkpointing: true
     recompute_granularity: selective
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
     bias_activation_fusion: false
     use_fused_linear_logprobs: false
     optimizer:

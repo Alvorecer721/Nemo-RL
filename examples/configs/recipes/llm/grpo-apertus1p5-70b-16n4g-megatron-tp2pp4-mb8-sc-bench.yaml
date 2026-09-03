@@ -1,7 +1,8 @@
 defaults: grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench.yaml
 
-# Eight sequences per trainer microbatch; the base runs four (35.8 s per
-# steady step against 44.8 s at one, job 3282866).
+# Eight sequences per trainer microbatch. Four gave 35.8 s per steady step
+# (job 3282866) but OOMed at step 4 of the bench (3283041); eight OOMed in
+# the first step (3282964). The base runs two.
 policy:
   train_micro_batch_size: 8
   logprob_batch_size: 8
