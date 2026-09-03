@@ -10,7 +10,6 @@ SOURCE_HEAD=$(git -C "$REPO_DIR" rev-parse HEAD)
 export GLM_RECIPE=${GLM_RECIPE:-$REPO_DIR/examples/configs/recipes/llm/autoresearch/grpo-glm5.1-136n4g-megatron-tp2pp18ep16-ready-first-stream8-fused-mtp3.yaml}
 export GLM_RUN_ROOT=${GLM_RUN_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_glm51_ready_first_64inf_stream8_fused_mtp3/$SOURCE_HEAD}
 export SBATCH_LOG_ROOT=${SBATCH_LOG_ROOT:-$REPO_DIR/.tmp/slurm-logs/glm51-ready-first-64inf-stream8-fused-mtp3/$SOURCE_HEAD}
-export NRL_REFIT_NUM_STREAMS=8
 export GLM_EXPECTED_SPEC_TOKENS=3
 export GLM_EXPECTED_SPEC_METHOD=deepseek_mtp
 export GLM_EXPECTED_MIN_GROUPS_FOR_STREAMING_TRAIN=8
