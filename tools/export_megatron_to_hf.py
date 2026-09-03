@@ -54,22 +54,37 @@ def main() -> None:
         default=None,
         help="tokenizer dir to copy into the output (default: from --hf-base)",
     )
+    p.add_argument(
+        "--tp",
+        type=int,
+        default=1,
+        help="tensor parallelism for loading; launch with torchrun --nproc-per-node=<tp> for models that do not fit one GPU",
+    )
     args = p.parse_args()
 
+    import os
+
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size != args.tp:
+        raise SystemExit(f"--tp {args.tp} needs WORLD_SIZE {args.tp}, got {world_size}")
+
     out = Path(args.out)
-    if out.exists() and any(out.iterdir()):
-        raise SystemExit(f"refusing to overwrite non-empty {out}")
-    out.mkdir(parents=True, exist_ok=True)
+    if rank == 0:
+        if out.exists() and any(out.iterdir()):
+            raise SystemExit(f"refusing to overwrite non-empty {out}")
+        out.mkdir(parents=True, exist_ok=True)
 
     import torch
 
     # load_megatron_model requires initialized distributed + parallel state
     # even single-process (TP1/PP1); torch-dist re-shards any source geometry.
-    torch.distributed.init_process_group("nccl", world_size=1, rank=0)
+    torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
+    torch.distributed.init_process_group("nccl", world_size=world_size, rank=rank)
     from megatron.core import parallel_state
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
-    parallel_state.initialize_model_parallel(1, 1)
+    parallel_state.initialize_model_parallel(args.tp, 1)
     model_parallel_cuda_manual_seed(42)
 
     from megatron.bridge import AutoBridge
@@ -87,10 +102,14 @@ def main() -> None:
     from safetensors import safe_open
     from safetensors.torch import save_file
 
-    state = {
-        name: t.detach().to("cpu", torch.bfloat16).contiguous()
-        for name, t in bridge.export_hf_weights(models, show_progress=True)
-    }
+    # Every rank takes part in the gather; only rank 0 keeps and writes the result.
+    state = {}
+    for name, t in bridge.export_hf_weights(models, cpu=True, show_progress=rank == 0):
+        if rank == 0:
+            state[name] = t.detach().to("cpu", torch.bfloat16).contiguous()
+    if rank != 0:
+        torch.distributed.barrier()
+        return
     base = Path(args.hf_base)
     with open(base / "model.safetensors.index.json") as f:
         index = json.load(f)["weight_map"]
@@ -105,6 +124,15 @@ def main() -> None:
         f"exported {len(state) - len(missing)} params + {len(missing)} buffers from base"
     )
     save_file(state, str(out / "model.safetensors"), metadata={"format": "pt"})
+    with open(out / "model.safetensors.index.json", "w") as f:
+        json.dump(
+            {
+                "metadata": {"total_size": sum(t.numel() * t.element_size() for t in state.values())},
+                "weight_map": {name: "model.safetensors" for name in state},
+            },
+            f,
+            indent=2,
+        )
 
     tok_src = Path(args.tokenizer) if args.tokenizer else base
     for name in (
@@ -121,6 +149,7 @@ def main() -> None:
         if src.exists():
             shutil.copy2(src, out / name)
     print(f"exported -> {out}")
+    torch.distributed.barrier()
 
 
 if __name__ == "__main__":
