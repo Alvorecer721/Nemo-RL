@@ -421,7 +421,7 @@ EOF
 
 WORKDIR /opt/nemo-rl
 
-FROM hermetic AS release
+FROM hermetic AS release-core
 
 # Re-declare build args for this stage
 ARG SKIP_VLLM_BUILD
@@ -522,6 +522,19 @@ RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
     megatron_policy_worker.MegatronPolicyWorker \
     megatron_value_worker.MegatronValueWorker
+
+# CSCS finalizes this stage from a fresh allocation-local Podman graph. Keeping
+# the control/Gym environments in one last delta avoids retaining every build
+# cache candidate while that delta is packed and unpacked.
+FROM release-core AS release
+
+ARG NEMO_GYM_PREFETCH_CONFIGS=
+ARG NEMO_GYM_CUDA=cu130
+ARG NEMO_GYM_VLLM_VERSION=0.24.0
+ARG NEMO_RL_BUILD_FINGERPRINT_B64
+ARG RC_DATE=00.00
+ARG TARGETARCH
+
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
     async_utils.AsyncTrajectoryCollector \
     async_utils.ReplayBuffer \
@@ -533,8 +546,6 @@ RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs
 # source COPY above so examples/nemo_gym/prefetch_venvs.py is present.
 # Gym pins vllm==0.24.0; override it to vLLM's default prebuilt CUDA wheel so Gym's venvs share
 # RL's torch/nvidia stack. UV_TORCH_BACKEND keeps torch on the same CUDA backend.
-ARG NEMO_GYM_CUDA=cu130
-ARG NEMO_GYM_VLLM_VERSION=0.24.0
 RUN <<"EOF" bash -exu
 if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
     case "${TARGETARCH:-amd64}" in arm64) WHEEL_ARCH=aarch64 ;; *) WHEEL_ARCH=x86_64 ;; esac

@@ -20,11 +20,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=288
-# The release stage materializes all frozen Ray worker environments. Podman's
-# commit path temporarily holds the working tree, blob, and unpacked layer in
-# allocation-local tmpfs, which exceeds Clariden's 450 GB default allocation.
-# A normal node provides 870,000 MB, so reserve enough headroom explicitly.
-#SBATCH --mem=800G
 #SBATCH --partition=normal
 #SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --export=NONE
@@ -139,7 +134,7 @@ generate_hermetic_cache_fingerprint() {
 # hermetic cache key above.
 BUILD_FINGERPRINT_B64=$("$HOST_PYTHON" tools/generate_fingerprint.py | base64 -w0)
 CURRENT_FINGERPRINT_SHA256=$(generate_hermetic_cache_fingerprint | sha256sum | cut -d' ' -f1)
-BUILD_TARGET=release
+BUILD_TARGET=release-core
 if [[ "$HERMETIC_CACHE_TAG" == "rebuild" ]]; then
     BUILD_TARGET=hermetic
 fi
@@ -250,47 +245,51 @@ git submodule foreach --quiet --recursive '
         | tar --extract --file=- --directory="$destination"
 '
 
-# The registry process is local to this allocation; its layer data persists in
-# CACHE_DIR and is reused through Podman's --cache-from/--cache-to support.
-# Fresh Clariden nodes have intermittently stalled while pulling this tiny
-# bootstrap image from Docker Hub. Load the pinned local OCI copy when present;
-# retain a visible network fallback instead of the helper's redirected pull.
-if podman image exists docker.io/library/registry:3; then
-    echo "registry:3 is already present in Podman storage"
-elif [[ -r "$REGISTRY_IMAGE_ARCHIVE" ]]; then
-    echo "a6943a0bbcc0395ed76d5bd46000b20ca1a858d7d2ffb5318e218c6f32480d62  $REGISTRY_IMAGE_ARCHIVE" | sha256sum -c -
-    podman load --input "$REGISTRY_IMAGE_ARCHIVE"
-else
-    podman pull docker.io/registry:3
-fi
-# Rootless port publishing depends on a user session bus, which plain sbatch
-# jobs do not have. Bind registry directly on the host network instead.
-podman container rm --force local_registry >/dev/null 2>&1 || true
-mkdir -p "$CACHE_DIR/data"
-podman run --detach \
-    --network host \
-    --name local_registry \
-    --volume "$CACHE_DIR/data:/var/lib/registry" \
-    --env REGISTRY_HTTP_ADDR=127.0.0.1:5000 \
-    docker.io/library/registry:3 >/dev/null
 LOCAL_REGISTRY=127.0.0.1:5000
-cleanup() {
+load_registry_image() {
+    # Fresh Clariden nodes have intermittently stalled while pulling this tiny
+    # bootstrap image from Docker Hub. Prefer the pinned local OCI copy.
+    if podman image exists docker.io/library/registry:3; then
+        echo "registry:3 is already present in Podman storage"
+    elif [[ -r "$REGISTRY_IMAGE_ARCHIVE" ]]; then
+        echo "a6943a0bbcc0395ed76d5bd46000b20ca1a858d7d2ffb5318e218c6f32480d62  $REGISTRY_IMAGE_ARCHIVE" | sha256sum -c -
+        podman load --input "$REGISTRY_IMAGE_ARCHIVE"
+    else
+        podman pull docker.io/registry:3
+    fi
+}
+stop_local_registry() {
     podman container rm --force local_registry >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
-registry_ready=0
-for _ in {1..30}; do
-    if curl --fail --silent "http://127.0.0.1:5000/v2/" >/dev/null 2>&1; then
-        registry_ready=1
-        break
-    fi
-    sleep 1
-done
-[[ "$registry_ready" == 1 ]] || {
-    echo "Local registry did not become ready on port 5000" >&2
-    podman logs local_registry >&2 || true
-    exit 1
+start_local_registry() {
+    # Rootless port publishing depends on a user session bus, which plain
+    # sbatch jobs do not have. Bind registry directly on the host network.
+    stop_local_registry
+    mkdir -p "$CACHE_DIR/data"
+    podman run --detach \
+        --network host \
+        --name local_registry \
+        --volume "$CACHE_DIR/data:/var/lib/registry" \
+        --env REGISTRY_HTTP_ADDR=127.0.0.1:5000 \
+        docker.io/library/registry:3 >/dev/null
+
+    local registry_ready=0
+    for _ in {1..30}; do
+        if curl --fail --silent "http://${LOCAL_REGISTRY}/v2/" >/dev/null 2>&1; then
+            registry_ready=1
+            break
+        fi
+        sleep 1
+    done
+    [[ "$registry_ready" == 1 ]] || {
+        echo "Local registry did not become ready on port 5000" >&2
+        podman logs local_registry >&2 || true
+        return 1
+    }
 }
+load_registry_image
+start_local_registry
+trap stop_local_registry EXIT
 
 # Resume source-only releases directly from the persisted final hermetic image.
 # `--cache-from` alone cannot do this reliably with Podman: its complete named
@@ -362,10 +361,10 @@ print(match.group(2))
         exit 1
     }
 
-    BUILD_DOCKERFILE="$PODMAN_STORAGE_BASE/Dockerfile.release"
-    sed "s|^FROM hermetic AS release$|FROM ${HERMETIC_IMAGE} AS release|" \
+    BUILD_DOCKERFILE="$PODMAN_STORAGE_BASE/Dockerfile.release-core"
+    sed "s|^FROM hermetic AS release-core$|FROM ${HERMETIC_IMAGE} AS release-core|" \
         "$SOURCE_CONTEXT/docker/Dockerfile" > "$BUILD_DOCKERFILE"
-    grep -F "FROM ${HERMETIC_IMAGE} AS release" "$BUILD_DOCKERFILE"
+    grep -F "FROM ${HERMETIC_IMAGE} AS release-core" "$BUILD_DOCKERFILE"
     echo "Resuming from hermetic image: $HERMETIC_IMAGE"
 else
     echo "Rebuilding only the hermetic dependency stage from source"
@@ -420,6 +419,52 @@ if [[ "$BUILD_TARGET" == "hermetic" ]]; then
     echo "HERMETIC_LOCK_MD5=$(md5sum uv.lock | cut -d' ' -f1)"
     exit 0
 fi
+
+# Persist the release core, then discard only this allocation's Podman graph.
+# Clariden fixes /tmp at 334 GiB even when a job requests more memory. Keeping
+# the broad build cache and the last control/Gym delta in that graph together
+# exhausts it; rebuilding the final delta from this exact parent does not.
+CORE_REGISTRY_IMAGE="${LOCAL_REGISTRY}/nemo-rl-release-core:${SOURCE_ID}"
+podman push --tls-verify=false "$IMAGE" "$CORE_REGISTRY_IMAGE"
+echo "Persistent release core: $CORE_REGISTRY_IMAGE"
+
+stop_local_registry
+podman system reset --force
+mkdir -p \
+    "$PODMAN_STORAGE_BASE/graphroot" \
+    "$PODMAN_STORAGE_BASE/runroot" \
+    "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+podman system migrate
+load_registry_image
+start_local_registry
+
+curl --fail --silent --show-error --output /dev/null \
+    -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+    "http://${LOCAL_REGISTRY}/v2/nemo-rl-release-core/manifests/${SOURCE_ID}"
+podman pull --tls-verify=false "$CORE_REGISTRY_IMAGE"
+
+FINAL_DOCKERFILE="$PODMAN_STORAGE_BASE/Dockerfile.release-final"
+sed "s|^FROM release-core AS release$|FROM ${CORE_REGISTRY_IMAGE} AS release|" \
+    "$SOURCE_CONTEXT/docker/Dockerfile" > "$FINAL_DOCKERFILE"
+grep -F "FROM ${CORE_REGISTRY_IMAGE} AS release" "$FINAL_DOCKERFILE"
+echo "Finalizing from a fresh graph: $CORE_REGISTRY_IMAGE"
+
+podman build \
+    "${BUILD_SECRET_ARGS[@]}" \
+    --layers \
+    --tls-verify=false \
+    --network=host \
+    --platform=linux/arm64 \
+    --target=release \
+    --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+    --build-arg "SKIP_TRTLLM_BUILD=$SKIP_TRTLLM_BUILD" \
+    --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
+    --build-arg "NEMO_RL_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
+    --build-arg "NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64" \
+    --tag "$IMAGE" \
+    --file "$FINAL_DOCKERFILE" \
+    "$SOURCE_CONTEXT"
 
 # Persist the final manifest/tag as well as its cached layers. Registry blobs
 # are content-addressed, so this reuses the cache payload instead of storing a
