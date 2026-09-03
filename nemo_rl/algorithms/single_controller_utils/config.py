@@ -797,28 +797,38 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
 
     # SC reads none of these on either path, so an enabled one describes shaping
     # this run does not do. Async GRPO rejects three of them the same way.
-    unread_settings = [
-        ("use_dynamic_sampling", algo_cfg.use_dynamic_sampling),
-        ("reward_scaling", algo_cfg.reward_scaling.enabled),
-        ("reward_shaping", algo_cfg.reward_shaping.enabled),
+    unsupported = [
+        name
+        for name, enabled in (
+            ("use_dynamic_sampling", algo_cfg.use_dynamic_sampling),
+            ("reward_scaling", algo_cfg.reward_scaling.enabled),
+            ("reward_shaping", algo_cfg.reward_shaping.enabled),
+        )
+        if enabled
     ]
     if not is_ppo_run(master_config):
         grpo_cfg = master_config.grpo
         assert grpo_cfg is not None
-        unread_settings += [
-            ("deduplicate_multimodal_data", grpo_cfg.deduplicate_multimodal_data),
-            ("calculate_advantages_on_gpu", grpo_cfg.calculate_advantages_on_gpu),
-            ("debug_payload_metrics", grpo_cfg.debug_payload_metrics),
-        ]
-        if (
-            grpo_cfg.stop_at_validation_metric is not None
-            or grpo_cfg.stop_at_validation_threshold is not None
-        ):
-            raise NotImplementedError(
-                "SingleController has no validation loop, so "
-                "grpo.stop_at_validation_metric/threshold would never be evaluated."
+        if grpo_cfg.async_grpo is not None and grpo_cfg.async_grpo.enabled:
+            raise ValueError(
+                "grpo.async_grpo.enabled=true selects the legacy async loop; "
+                "SingleController reads async_rl.* instead. Disable grpo.async_grpo "
+                "or launch examples/run_grpo.py."
             )
-    unsupported = [name for name, enabled in unread_settings if enabled]
+        unsupported += [
+            name
+            for name, enabled in (
+                ("deduplicate_multimodal_data", grpo_cfg.deduplicate_multimodal_data),
+                ("calculate_advantages_on_gpu", grpo_cfg.calculate_advantages_on_gpu),
+                ("debug_payload_metrics", grpo_cfg.debug_payload_metrics),
+                (
+                    "stop_at_validation_metric/threshold",
+                    grpo_cfg.stop_at_validation_metric is not None
+                    or grpo_cfg.stop_at_validation_threshold is not None,
+                ),
+            )
+            if enabled
+        ]
     if unsupported:
         names = ", ".join(unsupported)
         raise NotImplementedError(
@@ -958,11 +968,9 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
 
 def resolve_fused_linear_logprobs(policy_config: PolicyConfig) -> bool:
     """Whether the Megatron policy computes logprobs through the fused path."""
-    if "megatron_cfg" not in policy_config:
-        return False
-    megatron_cfg = policy_config["megatron_cfg"]
+    megatron_cfg = policy_config.get("megatron_cfg", {})
     return bool(
-        megatron_cfg["enabled"] and megatron_cfg.get("use_fused_linear_logprobs")
+        megatron_cfg.get("enabled") and megatron_cfg.get("use_fused_linear_logprobs")
     )
 
 
@@ -994,13 +1002,6 @@ def _validate_fused_logprob_settings(policy_config: PolicyConfig) -> None:
 
 def validate_single_controller_config(master_config: MasterConfig) -> None:
     """Validate cross-section SingleController constraints before setup."""
-    legacy_async = master_config.grpo.async_grpo if master_config.grpo else None
-    if legacy_async is not None and legacy_async.enabled:
-        raise ValueError(
-            "grpo.async_grpo.enabled=true selects the legacy async loop; "
-            "SingleController reads async_rl.* instead. Disable grpo.async_grpo "
-            "or launch examples/run_grpo.py."
-        )
     _validate_algo_settings(master_config)
     _validate_fused_logprob_settings(master_config.policy)
 

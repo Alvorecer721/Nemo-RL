@@ -778,7 +778,9 @@ class TestUnsupportedAlgorithmKnobsFailLoudly:
         cfg.grpo.stop_at_validation_metric = "accuracy"
         cfg.grpo.stop_at_validation_threshold = 0.9
 
-        with pytest.raises(NotImplementedError, match="never be evaluated"):
+        with pytest.raises(
+            NotImplementedError, match="not supported on the SingleController"
+        ):
             validate_single_controller_config(cfg)
 
     def test_enabled_legacy_async_block_is_rejected(self) -> None:
