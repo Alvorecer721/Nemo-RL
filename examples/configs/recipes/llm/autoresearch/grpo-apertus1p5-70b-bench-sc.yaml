@@ -168,4 +168,4 @@ logger:
 cluster:
   gpus_per_node: 4
   num_nodes: 16
-  segment_size: 4
+  segment_size: null
