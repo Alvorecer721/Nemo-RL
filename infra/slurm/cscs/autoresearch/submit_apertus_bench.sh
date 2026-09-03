@@ -12,7 +12,7 @@ case "$AP_VARIANT" in
   70b-bench)
     RECIPE_NAME=grpo-apertus1p5-70b-bench-sc.yaml
     AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
-    AP_EXPECTED_STEPS_DEFAULT=46
+    AP_EXPECTED_STEPS_DEFAULT=92
     AP_TIME_DEFAULT=04:00:00 ;;
   70b-smoke)
     RECIPE_NAME=grpo-apertus1p5-70b-bench-sc-smoke-3n4g.yaml
@@ -42,7 +42,21 @@ SBATCH_BIN=${SBATCH_BIN:-sbatch}
 [[ -r "$AP_RECIPE" ]] || { echo "Missing recipe: $AP_RECIPE" >&2; exit 1; }
 [[ -r "$AP_CKPT/model.safetensors.index.json" ]] || { echo "Missing checkpoint: $AP_CKPT" >&2; exit 1; }
 [[ -r "$AP_TOKENIZER/chat_template.jinja" ]] || { echo "Missing tokenizer: $AP_TOKENIZER" >&2; exit 1; }
-AP_TOTAL_NODES=$(python3 -c "import re,sys; t=open('$AP_RECIPE').read(); m=re.search(r'^cluster:\s*\n(?:.*\n)*?\s+num_nodes:\s*(\d+)', t, re.M); print(m.group(1) if m else '')")
+AP_TOTAL_NODES=$(python3 - "$AP_RECIPE" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+path = Path(sys.argv[1]).resolve()
+while path is not None:
+    cfg = yaml.safe_load(path.read_text()) or {}
+    num_nodes = (cfg.get("cluster") or {}).get("num_nodes")
+    if num_nodes is not None:
+        print(num_nodes)
+        break
+    parent = cfg.get("defaults")
+    path = (path.parent / parent).resolve() if parent else None
+PY
+)
 [[ -n "$AP_TOTAL_NODES" ]] || { echo "Recipe $AP_RECIPE must set cluster.num_nodes" >&2; exit 1; }
 SOURCE_STATUS=$(git -C "$REPO_DIR" status --porcelain --untracked-files=no --ignore-submodules=all)
 [[ -z "$SOURCE_STATUS" ]] || { echo "Tracked source is dirty: $SOURCE_STATUS" >&2; exit 1; }
