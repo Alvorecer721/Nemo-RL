@@ -64,7 +64,7 @@ srun --cpu-bind=none --environment=$CONTAINER_ENV --ntasks=1 --gpus-per-task=4 -
     rm -rf $EXPORT_DIR
     export UV=/root/.local/bin/uv; [ -x \$UV ] || UV=/usr/local/bin/uv
     export UV_PROJECT_ENVIRONMENT=$REPO_DIR/venvs/export-mcore UV_NO_PROGRESS=1
-    \$UV run --locked --extra mcore --directory $REPO_DIR torchrun --nproc-per-node=4 tools/export_megatron_to_hf.py --hf-base $AP_HF_BASE --megatron-ckpt $STEP_DIR/policy/weights --out $EXPORT_DIR --tokenizer $AP_TOKENIZER --tp 4 2>&1 | tee $AP_BENCH_RUN_DIR/export.log
+    \$UV run --locked --extra mcore --directory $REPO_DIR torchrun --nproc-per-node=4 tools/export_megatron_to_hf.py --hf-base $AP_HF_BASE --megatron-ckpt $STEP_DIR/policy/weights --out $EXPORT_DIR --tokenizer $AP_TOKENIZER --tp 4 > $AP_BENCH_RUN_DIR/export.log 2>&1
   fi
   export AP_CKPT=$EXPORT_DIR AP_TOKENIZER=$AP_TOKENIZER AP_EVAL_DATA=$AP_EVAL_DATA AP_ANSWER_MARKER=$AP_ANSWER_MARKER
   export AP_RUN_DIR=$AP_BENCH_RUN_DIR/eval-$AP_EVAL_TAG-$AP_ANSWER_MARKER-\$SLURM_JOB_ID
