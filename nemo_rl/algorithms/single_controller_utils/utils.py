@@ -175,11 +175,23 @@ def _reduce_token_logprob_error_tails(
     records: list[torch.Tensor],
 ) -> dict[str, float]:
     """Reduce exact valid-token log-probability tail evidence for one step."""
-    errors = torch.cat([record.flatten().double() for record in records])
+    deltas = torch.cat([record.flatten().double() for record in records])
+    finite = torch.isfinite(deltas)
+    errors = deltas[finite]
+    # Non-finite deltas are evidence of a broken step, not a reason to abort the
+    # run at logging time; the post-run gate rejects any nonzero count.
+    count_nonfinite = float((~finite).sum())
     if errors.numel() == 0:
-        raise ValueError("Log-probability tail evidence contains no valid tokens")
-    if not torch.isfinite(errors).all():
-        raise ValueError("Log-probability tail evidence contains non-finite values")
+        return {
+            "logprob_tails/valid_tokens": 0.0,
+            "logprob_tails/mean_abs": 0.0,
+            "logprob_tails/p95_abs": 0.0,
+            "logprob_tails/p99_abs": 0.0,
+            "logprob_tails/max_abs": 0.0,
+            "logprob_tails/count_gt_0_5": 0.0,
+            "logprob_tails/count_gt_1_0": 0.0,
+            "logprob_tails/count_nonfinite": count_nonfinite,
+        }
 
     quantiles = _linear_quantiles(errors, (0.95, 0.99))
     return {
@@ -190,6 +202,7 @@ def _reduce_token_logprob_error_tails(
         "logprob_tails/max_abs": float(errors.max()),
         "logprob_tails/count_gt_0_5": float((errors > 0.5).sum()),
         "logprob_tails/count_gt_1_0": float((errors > 1.0).sum()),
+        "logprob_tails/count_nonfinite": count_nonfinite,
     }
 
 

@@ -438,6 +438,14 @@ def _validate_logprob_tail_metrics(
             "count_gt_1_0": int(gt_1_0),
         }
 
+    nonfinite_name = "train/logprob_tails/count_nonfinite"
+    if isinstance(metrics.get(nonfinite_name), dict):
+        nonfinite = _series(metrics, nonfinite_name, expected_steps)
+        if any(value != 0 for value in nonfinite):
+            raise ValueError(
+                f"Non-finite log-probability deltas were logged: {nonfinite}"
+            )
+
     summary = {
         "per_step": per_step,
         "total_tokens": sum(int(value) for value in tails["valid_tokens"]),
@@ -476,10 +484,8 @@ def validate_metrics(
             "Router Replay probability parity failed: "
             f"min={min(token_mult):.6g}, median={token_mult_median:.6g}"
         )
-    # A fractional per-token gate must not let one extreme token dominate its
-    # sequence. This metric is the per-sequence mean of exp(abs(delta log p));
-    # keeping its maximum below 1.1 bounds that aggregate probability mismatch
-    # to less than ten percent for every trained sequence.
+    # Bound the per-sequence mean of exp(abs(delta log p)) so one extreme token
+    # cannot hide inside an otherwise clean sequence.
     if min(max_seq_mult) < 1 or max(max_seq_mult) >= 1.1:
         raise ValueError(
             "Router Replay sequence probability parity failed: "

@@ -222,16 +222,33 @@ class TestReduceAdvantagePumpMetrics:
         assert out["logprob_tails/max_abs"] == pytest.approx(1.1)
         assert out["logprob_tails/count_gt_0_5"] == 2
         assert out["logprob_tails/count_gt_1_0"] == 1
+        assert out["logprob_tails/count_nonfinite"] == 0
+
+    def test_token_logprob_error_tails_count_nonfinite_deltas(self) -> None:
+        out = reduce_advantage_pump_metrics(
+            rewards=[],
+            masked_advantages=[],
+            sequence_lengths=[],
+            logprob_errors=[torch.tensor([0.1, math.nan, math.inf, 0.3])],
+        )
+
+        assert out["logprob_tails/valid_tokens"] == 2
+        assert out["logprob_tails/count_nonfinite"] == 2
+        assert out["logprob_tails/max_abs"] == pytest.approx(0.3)
 
     @pytest.mark.parametrize("errors", [torch.empty(0), torch.tensor([math.nan])])
-    def test_token_logprob_error_tails_fail_closed(self, errors: torch.Tensor) -> None:
-        with pytest.raises(ValueError, match="tail evidence"):
-            reduce_advantage_pump_metrics(
-                rewards=[],
-                masked_advantages=[],
-                sequence_lengths=[],
-                logprob_errors=[errors],
-            )
+    def test_token_logprob_error_tails_report_empty_evidence(
+        self, errors: torch.Tensor
+    ) -> None:
+        out = reduce_advantage_pump_metrics(
+            rewards=[],
+            masked_advantages=[],
+            sequence_lengths=[],
+            logprob_errors=[errors],
+        )
+
+        assert out["logprob_tails/valid_tokens"] == 0
+        assert out["logprob_tails/count_nonfinite"] == errors.numel()
 
     def test_violation_rates_from_per_sample_counts(self) -> None:
         out = reduce_advantage_pump_metrics(
