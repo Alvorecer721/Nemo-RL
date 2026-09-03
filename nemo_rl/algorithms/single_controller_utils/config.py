@@ -810,6 +810,39 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
             "shaping. Disable them."
         )
 
+    if not is_ppo_run(master_config):
+        grpo_cfg = master_config.grpo
+        assert grpo_cfg is not None
+        ignored = [
+            name
+            for name, enabled in (
+                (
+                    "grpo.deduplicate_multimodal_data",
+                    grpo_cfg.deduplicate_multimodal_data,
+                ),
+                (
+                    "grpo.calculate_advantages_on_gpu",
+                    grpo_cfg.calculate_advantages_on_gpu,
+                ),
+                ("grpo.debug_payload_metrics", grpo_cfg.debug_payload_metrics),
+            )
+            if enabled
+        ]
+        if ignored:
+            raise NotImplementedError(
+                "SingleController does not consume these enabled settings: "
+                + ", ".join(ignored)
+                + ". Disable them or use the legacy/synchronous GRPO path."
+            )
+        if (
+            grpo_cfg.stop_at_validation_metric is not None
+            or grpo_cfg.stop_at_validation_threshold is not None
+        ):
+            raise NotImplementedError(
+                "SingleController has no validation loop, so "
+                "grpo.stop_at_validation_metric/threshold would never be evaluated."
+            )
+
     if master_config.policy["generation"]["colocated"]["enabled"]:
         raise ValueError(
             "The SingleController path requires "
@@ -941,6 +974,11 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
 
 def validate_single_controller_config(master_config: MasterConfig) -> None:
     """Validate cross-section SingleController constraints before setup."""
+    if master_config.grpo is not None and master_config.grpo.async_grpo is not None:
+        raise ValueError(
+            "SingleController requires grpo.async_grpo: null; it reads async_rl.* "
+            "instead of the legacy async block."
+        )
     _validate_algo_settings(master_config)
 
     async_config = master_config.async_rl

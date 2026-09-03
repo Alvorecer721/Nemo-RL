@@ -753,3 +753,35 @@ class TestADropBudgetNeedsASamplerThatStamps:
             rollout_failure={"max_consecutive_dropped_prompts": 2},
         )
         validate_single_controller_config(cfg)
+
+
+class TestUnsupportedAlgorithmKnobsFailLoudly:
+    @pytest.mark.parametrize(
+        "grpo_override",
+        [
+            {"deduplicate_multimodal_data": True},
+            {"calculate_advantages_on_gpu": True},
+            {"debug_payload_metrics": True},
+        ],
+    )
+    def test_ignored_grpo_knob_is_rejected(self, grpo_override: dict) -> None:
+        cfg = _master_config()
+        cfg.grpo = cfg.grpo.model_copy(update=grpo_override)
+
+        with pytest.raises(NotImplementedError, match="does not consume"):
+            validate_single_controller_config(cfg)
+
+    def test_validation_early_stop_is_rejected(self) -> None:
+        cfg = _master_config()
+        cfg.grpo.stop_at_validation_metric = "accuracy"
+        cfg.grpo.stop_at_validation_threshold = 0.9
+
+        with pytest.raises(NotImplementedError, match="never be evaluated"):
+            validate_single_controller_config(cfg)
+
+    def test_legacy_async_block_is_rejected(self) -> None:
+        cfg = _master_config()
+        cfg.grpo.async_grpo = GRPOConfig().async_grpo
+
+        with pytest.raises(ValueError, match="grpo.async_grpo: null"):
+            validate_single_controller_config(cfg)
