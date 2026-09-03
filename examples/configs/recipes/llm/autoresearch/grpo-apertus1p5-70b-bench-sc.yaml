@@ -10,6 +10,8 @@ defaults: ../../../grpo_math_8B_megatron.yaml
 # one. Staleness is therefore counted in updates: 16 versions here equals verl's
 # max_off_policy_threshold of 8 syncs.
 # Model and tokenizer come from the frozen rl-bench folder via the launcher.
+# Only the final step is checkpointed, weights only, so the trained model can
+# be exported to HF and evaluated with the same greedy protocol as the start.
 grpo:
   num_prompts_per_step: 48
   num_generations_per_prompt: 16
@@ -36,9 +38,15 @@ loss_fn:
   token_level_loss: true
   use_importance_sampling_correction: true
 checkpointing:
-  enabled: false
-  checkpoint_dir: ${oc.env:AP_RUN_DIR}/disabled_checkpoints
+  enabled: true
+  checkpoint_dir: ${oc.env:AP_RUN_DIR}/checkpoints
   metric_name: null
+  higher_is_better: true
+  keep_top_k: null
+  save_period: 100000
+  checkpoint_must_save_by: null
+  save_optimizer: false
+  save_data_plane: true
 policy:
   model_name: ${oc.env:AP_CKPT}
   tokenizer:
