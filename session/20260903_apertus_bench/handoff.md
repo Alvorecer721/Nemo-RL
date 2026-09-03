@@ -14,3 +14,4 @@ Branch `autoresearch/2026-09-03-apertus70b-bench` (worktree `nemo-rl-worktrees/a
 - Do not modify the frozen rl-bench folder; add siblings.
 - `bracket_math` is registered in nemo_rl/environments/utils.py (one upstream line); the reward module is pure and unit-tested (16 tests).
 - Parity gaps documented for the doc: old_log_probs source (verl bypass vs NeMo RL IS-correction), engine (SGLang vs vLLM), RoPE factor (8 here vs 32 in verl's release), memory policy (verl: full recompute + CPU offload).
+- 2026-09-03 16:04: config probe 3280261 failed on two setup errors (actor env not in ACTOR_ENVIRONMENT_REGISTRY; recipe defaults path one level short); unit tests 18/18, prompt render and offline GSM8K were green. Fixed in 55148ea798139ab7a52f9ba88344df352a4f2650. Sampler switched to windowed (max_staleness_versions 8) at the user's request.
