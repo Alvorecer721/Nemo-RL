@@ -1,4 +1,4 @@
-defaults: grpo-apertus1p5-70b-bench-sc-smoke-3n4g.yaml
+defaults: grpo-apertus1p5-70b-3n4g-megatron-tp4pp2-sc-bench-smoke.yaml
 
 # Same smoke on the 8B step-4200 SFT at TP2/PP2: exercises the PP>1 Apertus refit
 # path (xIELU manifest) before the 70B is committed to it.

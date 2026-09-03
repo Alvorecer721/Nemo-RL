@@ -10,23 +10,23 @@ CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
 AP_VARIANT=${AP_VARIANT:?set AP_VARIANT to 70b-bench, 70b-smoke or 8b-smoke}
 case "$AP_VARIANT" in
   70b-bench)
-    RECIPE_NAME=grpo-apertus1p5-70b-bench-sc.yaml
+    RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp4pp2-sc-bench.yaml
     AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
     AP_EXPECTED_STEPS_DEFAULT=92
     AP_TIME_DEFAULT=04:00:00 ;;
   70b-smoke)
-    RECIPE_NAME=grpo-apertus1p5-70b-bench-sc-smoke-3n4g.yaml
+    RECIPE_NAME=grpo-apertus1p5-70b-3n4g-megatron-tp4pp2-sc-bench-smoke.yaml
     AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
     AP_EXPECTED_STEPS_DEFAULT=2
     AP_TIME_DEFAULT=01:30:00 ;;
   8b-smoke)
-    RECIPE_NAME=grpo-apertus1p5-8b-bench-sc-smoke-3n4g.yaml
+    RECIPE_NAME=grpo-apertus1p5-8b-3n4g-megatron-tp2pp2-sc-bench-smoke.yaml
     AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200
     AP_EXPECTED_STEPS_DEFAULT=2
     AP_TIME_DEFAULT=01:00:00 ;;
   *) echo "Unknown AP_VARIANT: $AP_VARIANT" >&2; exit 1 ;;
 esac
-AP_RECIPE=${AP_RECIPE:-$REPO_DIR/examples/configs/recipes/llm/autoresearch/$RECIPE_NAME}
+AP_RECIPE=${AP_RECIPE:-$REPO_DIR/examples/configs/recipes/llm/$RECIPE_NAME}
 AP_CKPT=${AP_CKPT:-$AP_CKPT_DEFAULT}
 AP_TOKENIZER=${AP_TOKENIZER:-/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr}
 AP_RUN_ROOT=${AP_RUN_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_apertus_bench/$AP_VARIANT/$EXPECTED_HEAD}

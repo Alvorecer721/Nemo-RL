@@ -1,4 +1,4 @@
-defaults: ../../../grpo_math_8B_megatron.yaml
+defaults: ../grpo_math_8B_megatron.yaml
 
 # Apertus RL framework benchmark, NeMo RL side (SingleController, non-colocated).
 # Mirrors the verl spec: GSM8K, 768-sample optimizer batches, PPO-clip 0.2 with
@@ -54,7 +54,7 @@ policy:
     chat_template_kwargs: null
   train_global_batch_size: 768
   train_micro_batch_size: 1
-  logprob_batch_size: 4
+  logprob_batch_size: 1
   max_total_sequence_length: 1024
   max_grad_norm: 1.0
   sequence_packing:

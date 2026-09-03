@@ -1,4 +1,4 @@
-defaults: grpo-apertus1p5-70b-bench-sc.yaml
+defaults: grpo-apertus1p5-70b-16n4g-megatron-tp4pp2-sc-bench.yaml
 
 # Plumbing smoke for the 70B benchmark recipe: one TP4/PP2 trainer replica on two
 # nodes, one TP4 vLLM engine on the third, two tiny steps.
