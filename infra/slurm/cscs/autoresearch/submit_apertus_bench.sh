@@ -139,7 +139,7 @@ exec "$SBATCH_BIN" \
   --mem=850000M \
   --exclusive \
   --time="$AP_TIME" \
-  --job-name="apertus-bench-$AP_VARIANT" \
+  --job-name="apertus-bench-$AP_VARIANT-seed$AP_SEED" \
   --output="$SBATCH_LOG_ROOT/slurm_%j.out" \
   --error="$SBATCH_LOG_ROOT/slurm_%j.err" \
   --export=ALL \
