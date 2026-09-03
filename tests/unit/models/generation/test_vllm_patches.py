@@ -394,3 +394,44 @@ def test_init_workers_ray_reports_success_and_is_idempotent(monkeypatch, tmp_pat
 
     assert patches._patch_vllm_init_workers_ray("py-exec", None) is True
     assert ray_executor.read_text() == once
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    ("patch_fn_name", "message"),
+    [
+        (_XIELU_PATCH_FN, "Required vLLM xIELU static-constant patch"),
+        (_APERTUS_PATCH_FN, "Required vLLM Apertus static xIELU loader patch"),
+    ],
+)
+def test_apertus_xielu_patch_anchor_miss_is_fatal(
+    patch_fn_name,
+    message,
+    tmp_path,
+    monkeypatch,
+):
+    unrelated_source = tmp_path / "unexpected_vllm_source.py"
+    unrelated_source.write_text("# incompatible vLLM source shape\n")
+    monkeypatch.setattr(
+        patches,
+        "_get_vllm_file",
+        lambda _relative: str(unrelated_source),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        getattr(patches, patch_fn_name)(logging.getLogger(__name__))
+
+
+@pytest.mark.vllm
+def test_invalid_mnnvl_workspace_patch_is_idempotent(
+    patched_flashinfer_ar_source, monkeypatch
+):
+    """Multiple generation workers can patch the shared wheel concurrently."""
+    before = patched_flashinfer_ar_source.read_text()
+    monkeypatch.setattr(
+        patches,
+        "_get_vllm_file",
+        lambda _relative: str(patched_flashinfer_ar_source),
+    )
+    patches._patch_vllm_invalid_mnnvl_workspace(logging.getLogger(__name__))
+    assert patched_flashinfer_ar_source.read_text() == before

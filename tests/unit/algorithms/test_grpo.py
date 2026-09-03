@@ -32,6 +32,7 @@ from nemo_rl.algorithms.advantage_estimator import (
     ReinforcePlusPlusAdvantageEstimator,
 )
 from nemo_rl.algorithms.grpo import (
+    _raise_if_grpo_batch_has_no_valid_tokens,
     AdvEstimatorConfig,
     AsyncGRPOConfig,
     GRPOConfig,
@@ -6024,3 +6025,28 @@ def test_train_fields_for_step(skip_prev_logprobs, expect_prev):
 )
 def test_needs_hf_refit_handshake(backend, nccl_reshard, colocated, expected):
     assert _needs_hf_refit_handshake(backend, nccl_reshard, colocated) is expected
+
+
+def test_raise_if_grpo_batch_has_no_valid_tokens_accepts_valid_batch():
+    train_data = {
+        "sample_mask": torch.tensor([1.0, 0.0]),
+        "token_mask": torch.tensor([[0.0, 1.0], [0.0, 1.0]]),
+    }
+
+    _raise_if_grpo_batch_has_no_valid_tokens(train_data)
+
+
+@pytest.mark.parametrize(
+    ("sample_mask", "token_mask"),
+    [
+        (torch.zeros(2), torch.ones(2, 3)),
+        (torch.ones(2), torch.zeros(2, 3)),
+    ],
+)
+def test_raise_if_grpo_batch_has_no_valid_tokens_rejects_empty_signal(
+    sample_mask, token_mask
+):
+    train_data = {"sample_mask": sample_mask, "token_mask": token_mask}
+
+    with pytest.raises(RuntimeError, match="no valid training tokens"):
+        _raise_if_grpo_batch_has_no_valid_tokens(train_data)
