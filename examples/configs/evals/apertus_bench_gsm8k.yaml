@@ -1,0 +1,46 @@
+defaults: eval.yaml
+
+# Greedy GSM8K-test evaluation for the Apertus RL framework benchmark: same
+# system prompt and bracket-answer scoring as training, plain 0/1 correctness.
+eval:
+  metric: pass@k
+  num_tests_per_prompt: 1
+  k_value: 1
+  seed: 42
+  save_path: ${oc.env:AP_RUN_DIR}/eval
+generation:
+  model_name: ${oc.env:AP_CKPT}
+  max_new_tokens: 512
+  temperature: 0.0
+  top_p: 1.0
+  top_k: -1
+  stop_token_ids:
+  - 2
+  - 68
+  - 72
+  vllm_cfg:
+    env_vars:
+      PYTHONPATH: ''
+    tensor_parallel_size: 4
+    gpu_memory_utilization: 0.85
+    max_model_len: 1024
+    enforce_eager: false
+tokenizer:
+  name: ${oc.env:AP_TOKENIZER}
+  chat_template_kwargs: null
+data:
+  dataset_name: ${oc.env:AP_EVAL_DATA}
+  problem_key: question
+  solution_key: answer
+  file_format: json
+  split: train
+  prompt_file: null
+  system_prompt_file: examples/prompts/apertus_bench_gsm8k_system.txt
+  env_name: bracket_math
+env:
+  bracket_math:
+    num_workers: 8
+    reward: outcome
+cluster:
+  gpus_per_node: 4
+  num_nodes: 1
