@@ -1,15 +1,20 @@
 defaults: ../../../grpo_math_8B_megatron.yaml
 
 # Apertus RL framework benchmark, NeMo RL side (SingleController, non-colocated).
-# Mirrors the verl spec: GSM8K, 96 prompts x 16 samples per step, 768-sample
-# optimizer batches, 46 steps, PPO-clip 0.2 with dual-clip 3.0, no KL, no
-# reference model, AdamW 1e-6 constant, bracket-answer reward, deliberation off.
+# Mirrors the verl spec: GSM8K, 768-sample optimizer batches, PPO-clip 0.2 with
+# dual-clip 3.0, no KL, no reference model, AdamW 1e-6 constant, bracket-answer
+# reward, deliberation off. verl takes 96 prompts x 16 samples and two optimizer
+# steps per RL step; the SC split path requires one optimizer step per RL step,
+# so this recipe runs 48 prompts x 16 samples for 92 steps (same 70,656 samples,
+# same 92 updates of 768) and weights sync every update instead of every second
+# one. Staleness is therefore counted in updates: 16 versions here equals verl's
+# max_off_policy_threshold of 8 syncs.
 # Model and tokenizer come from the frozen rl-bench folder via the launcher.
 grpo:
-  num_prompts_per_step: 96
+  num_prompts_per_step: 48
   num_generations_per_prompt: 16
   max_num_epochs: 1
-  max_num_steps: 46
+  max_num_steps: 92
   normalize_rewards: true
   use_leave_one_out_baseline: false
   overlong_filtering: false
@@ -117,7 +122,7 @@ data_plane:
 async_rl:
   sampler:
     name: windowed
-    max_staleness_versions: 8
+    max_staleness_versions: 16
   recompute_kv_cache_after_weight_updates: false
   min_groups_for_streaming_train: 48
   max_inflight_prompts: 96
