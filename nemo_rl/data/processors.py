@@ -310,6 +310,35 @@ def preference_preprocessor(
 
 
 # Example of a generic math data processor
+def render_single_turn_prompt(
+    tokenizer: TokenizerType,
+    system_prompt: str | None,
+    user_content: str,
+) -> tuple[str, torch.Tensor]:
+    """Render an optional system prompt and one user turn with a single chat-template call.
+
+    Rendering the turns separately lets templates that inject a default system
+    prompt (Apertus, Qwen) emit a second system block and a second BOS inside
+    the user turn.
+    """
+    message_list: list[dict[str, str]] = []
+    if system_prompt:
+        message_list.append({"role": "system", "content": system_prompt})
+    message_list.append({"role": "user", "content": user_content})
+    message: str = tokenizer.apply_chat_template(  # type: ignore
+        message_list,
+        tokenize=False,
+        add_generation_prompt=True,
+        add_special_tokens=False,
+    )
+    token_ids = tokenizer(
+        message,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )["input_ids"][0]
+    return message, token_ids
+
+
 def math_data_processor(
     datum_dict: dict[str, Any],
     task_data_spec: TaskDataSpec,
@@ -322,40 +351,14 @@ def math_data_processor(
     solution = str(datum_dict["expected_answer"])
     extra_env_info = {"ground_truth": solution}
 
-    message_log: LLMMessageLogType = []
-
-    # system prompt
-    if task_data_spec.system_prompt:
-        sys_prompt: dict[str, str | torch.Tensor] = {
-            "role": "system",
-            "content": task_data_spec.system_prompt,
-        }
-        sys = tokenizer.apply_chat_template(
-            [cast(dict[str, str], sys_prompt)],
-            tokenize=False,
-            add_generation_prompt=False,
-            add_special_tokens=False,
-        )
-        sys_prompt["token_ids"] = tokenizer(
-            sys, return_tensors="pt", add_special_tokens=False
-        )["input_ids"][0]
-        message_log.append(sys_prompt)
-
-    # user prompt
     if task_data_spec.prompt:
         problem = task_data_spec.prompt.format(problem)
-    user_message = {"role": "user", "content": problem}
-    message = tokenizer.apply_chat_template(
-        [user_message],
-        tokenize=False,
-        add_generation_prompt=True,
-        add_special_tokens=False,
+    message, token_ids = render_single_turn_prompt(
+        tokenizer, task_data_spec.system_prompt, problem
     )
-    user_message["token_ids"] = tokenizer(
-        message, return_tensors="pt", add_special_tokens=False
-    )["input_ids"][0]
-    user_message["content"] = message
-    message_log.append(user_message)
+    message_log: LLMMessageLogType = [
+        {"role": "user", "content": message, "token_ids": token_ids}
+    ]
 
     length = sum(len(m["token_ids"]) for m in message_log)
 
@@ -392,32 +395,12 @@ def math_hf_data_processor(
     problem = user_message[0]["content"]
     extra_env_info = {"ground_truth": user_message[1]["content"]}
 
-    # merge system prompt and user prompt
-    message_list = []
-    if task_data_spec.system_prompt:
-        message_list.append(
-            {
-                "role": "system",
-                "content": task_data_spec.system_prompt,
-            }
-        )
     formatted_content = (
         task_data_spec.prompt.format(problem) if task_data_spec.prompt else problem
     )
-    message_list.append({"role": "user", "content": formatted_content})
-
-    message: str = tokenizer.apply_chat_template(  # type: ignore
-        message_list,
-        tokenize=False,
-        add_generation_prompt=True,
-        add_special_tokens=False,
+    message, token_ids = render_single_turn_prompt(
+        tokenizer, task_data_spec.system_prompt, formatted_content
     )
-
-    token_ids = tokenizer(
-        message,
-        return_tensors="pt",
-        add_special_tokens=False,
-    )["input_ids"][0]
     message_log: LLMMessageLogType = [
         {"role": "user", "content": message, "token_ids": token_ids}
     ]

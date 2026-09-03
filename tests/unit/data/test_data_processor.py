@@ -490,3 +490,66 @@ class TestKdDataProcessor:
         assert out["message_log"][0]["content"] == long_text
         # length is a fake placeholder for the kd pipeline.
         assert out["length"] == 0
+
+class DefaultSystemPromptTokenizer(DummyTokenizer):
+    """Injects a default system block when none is given, like Apertus and Qwen."""
+
+    bos_token = "<s>"
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        add_special_tokens=False,
+    ):
+        if messages[0]["role"] != "system":
+            messages = [{"role": "system", "content": "default system"}] + list(
+                messages
+            )
+        return self.bos_token + super().apply_chat_template(
+            messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+            add_special_tokens=add_special_tokens,
+        )
+
+
+def test_math_data_processor_renders_system_and_user_in_one_template_call():
+    tokenizer = DefaultSystemPromptTokenizer()
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("Answer in brackets.")
+        system_prompt_file = f.name
+    try:
+        task_spec = TaskDataSpec(
+            task_name="math", prompt_file=None, system_prompt_file=system_prompt_file
+        )
+        result = math_data_processor(
+            datum_dict={"problem": "1+1?", "expected_answer": "2"},
+            task_data_spec=task_spec,
+            tokenizer=tokenizer,
+            max_seq_length=512,
+            idx=0,
+        )
+        hf_result = math_hf_data_processor(
+            datum_dict={
+                "messages": [
+                    {"role": "user", "content": "1+1?"},
+                    {"role": "assistant", "content": "2"},
+                ],
+                "task_name": "math",
+            },
+            task_data_spec=task_spec,
+            tokenizer=tokenizer,
+            max_seq_length=512,
+            idx=0,
+        )
+    finally:
+        os.unlink(system_prompt_file)
+
+    assert len(result["message_log"]) == 1
+    content = result["message_log"][0]["content"]
+    assert content.count("<s>") == 1
+    assert content.count("system:") == 1
+    assert "default system" not in content
+    assert content == hf_result["message_log"][0]["content"]
