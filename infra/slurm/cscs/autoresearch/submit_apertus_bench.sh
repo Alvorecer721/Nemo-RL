@@ -69,8 +69,9 @@ esac
 AP_RECIPE=${AP_RECIPE:-$REPO_DIR/examples/configs/recipes/llm/$RECIPE_NAME}
 AP_CKPT=${AP_CKPT:-$AP_CKPT_DEFAULT}
 AP_ANSWER_MARKER=${AP_ANSWER_MARKER:-boxed}
+AP_SEED=${AP_SEED:-42}
 AP_TOKENIZER=${AP_TOKENIZER:-/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr}
-AP_RUN_ROOT=${AP_RUN_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_apertus_bench/$AP_VARIANT/$EXPECTED_HEAD}
+AP_RUN_ROOT=${AP_RUN_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_apertus_bench/$AP_VARIANT/$EXPECTED_HEAD/seed$AP_SEED}
 SBATCH_LOG_ROOT=${SBATCH_LOG_ROOT:-$REPO_DIR/.tmp/slurm-logs/apertus-bench-$AP_VARIANT/$EXPECTED_HEAD}
 AP_RESERVATION=${AP_RESERVATION-SD-69241-apertus-1-5-0}
 AP_EXPECTED_STEPS=${AP_EXPECTED_STEPS:-$AP_EXPECTED_STEPS_DEFAULT}
@@ -112,7 +113,7 @@ fi
 
 mkdir -p "$SBATCH_LOG_ROOT"
 export COMMAND=infra/slurm/cscs/autoresearch/run_apertus_bench.sh
-export CONTAINER_ENV AP_CKPT AP_TOKENIZER AP_RECIPE AP_EXPECTED_STEPS AP_ANSWER_MARKER
+export CONTAINER_ENV AP_CKPT AP_TOKENIZER AP_RECIPE AP_EXPECTED_STEPS AP_ANSWER_MARKER AP_SEED
 export AP_EXPERIMENT_DIR=$REPO_DIR
 export AP_EXPECTED_SOURCE_HEAD=$EXPECTED_HEAD
 export AP_RUN_DIR=$AP_RUN_ROOT

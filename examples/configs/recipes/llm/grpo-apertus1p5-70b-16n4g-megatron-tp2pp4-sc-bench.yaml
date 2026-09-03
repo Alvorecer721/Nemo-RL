@@ -6,9 +6,11 @@ defaults: ../../grpo_math_8B_megatron.yaml
 # reward, deliberation off. verl takes 96 prompts x 16 samples and two optimizer
 # steps per RL step; the SC split path requires one optimizer step per RL step,
 # so this recipe runs 48 prompts x 16 samples for 92 steps (same 70,656 samples,
-# same 92 updates of 768) and refits every second update, so 96 prompts are
-# generated per weight sync exactly as in verl. Staleness is counted in
-# updates: 16 versions here equals verl's max_off_policy_threshold of 8 syncs.
+# same 92 updates of 768). Weights sync after every update: a 3.6 s reshard
+# refit makes that affordable where verl syncs every second update, and the
+# fresher policy is kept as a deliberate NeMo RL advantage (weight_sync_period 2
+# reproduces verl's cadence exactly). Staleness is counted in updates: 16
+# versions here equals verl's max_off_policy_threshold of 8 syncs.
 # Model and tokenizer come from the frozen rl-bench folder via the launcher.
 # Only the final step is checkpointed, weights only, so the trained model can
 # be exported to HF and evaluated with the same greedy protocol as the start.
@@ -23,7 +25,7 @@ grpo:
   val_period: 0
   val_at_start: false
   val_at_end: false
-  seed: 42
+  seed: ${oc.decode:${oc.env:AP_SEED,42}}
   use_dynamic_sampling: false
   skip_reference_policy_logprobs_calculation: true
   async_grpo: null
@@ -132,7 +134,7 @@ async_rl:
   sampler:
     name: windowed
     max_staleness_versions: 16
-  weight_sync_period: 2
+  weight_sync_period: 1
   recompute_kv_cache_after_weight_updates: false
   min_groups_for_streaming_train: 48
   max_inflight_prompts: 96
