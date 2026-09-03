@@ -141,7 +141,11 @@ async_rl:
   recompute_kv_cache_after_weight_updates: false
   min_groups_for_streaming_train: 48
   max_inflight_prompts: 96
-  max_buffered_rollouts: 1536
+  # Two steps of groups. A deep buffer lets rollouts age past the staleness
+  # window while they wait, and every evicted group burns a prompt from the
+  # single epoch: run 3283091 evicted 3072 groups, trained at lag 16, and
+  # exhausted the dataloader one step early with no final checkpoint.
+  max_buffered_rollouts: 96
   diagnostics: false
   rollout_failure:
     max_infra_attempts_per_prompt: 5
