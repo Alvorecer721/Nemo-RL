@@ -438,6 +438,10 @@ class AsyncTrajectoryCollector:
     ) -> None:
         """Start collecting trajectories from dataloader."""
         self.running = True
+        self.data_exhausted = False
+        with self._failure_lock:
+            self.collection_failed = False
+            self.collection_error = None
         self.dataloader = dataloader
 
         print("Started continuous trajectory collection")
@@ -473,11 +477,17 @@ class AsyncTrajectoryCollector:
         }
 
     def _mark_collection_failed(self, error: Exception) -> None:
-        """Record the first collection-loop failure."""
+        """Record the first collection-loop failure with its traceback."""
+        import traceback
+
+        failure_traceback = traceback.format_exc()
         with self._failure_lock:
             if not self.collection_failed:
                 self.collection_failed = True
-                self.collection_error = f"{type(error).__name__}: {error}"
+                self.collection_error = (
+                    f"{type(error).__name__}: {error}\n"
+                    f"Collection traceback:\n{failure_traceback}"
+                )
 
     def _collection_loop(self):
         """Run the collection loop in background thread.
@@ -519,10 +529,10 @@ class AsyncTrajectoryCollector:
                         self._refit_pause_cleared.wait()
                     print("▶️ Refit completed, resuming collection")
 
-                # Check if generation limits require pausing collection
+                # Clear before checking the predicate so a worker wakeup cannot
+                # land between the check and clear and then be lost.
+                self._generation_limit_cleared.clear()
                 if self._should_pause_for_generation_limits() and self.running:
-                    self._generation_limit_cleared.clear()
-
                     # Only log warning once per weight version
                     if self._last_limit_warning_version != self.current_weight_version:
                         target_weights = self._calculate_target_weights(
@@ -546,6 +556,8 @@ class AsyncTrajectoryCollector:
                     # Double-check we're still running after being woken up
                     if not self.running:
                         break
+                else:
+                    self._generation_limit_cleared.set()
 
                 if not self.running:
                     break
