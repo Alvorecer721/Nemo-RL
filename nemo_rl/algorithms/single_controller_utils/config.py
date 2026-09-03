@@ -797,47 +797,19 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
 
     # SC reads none of these on either path, so an enabled one describes shaping
     # this run does not do. Async GRPO rejects three of them the same way.
-    unsupported = [
-        name
-        for name, enabled in (
-            ("use_dynamic_sampling", algo_cfg.use_dynamic_sampling),
-            ("reward_scaling", algo_cfg.reward_scaling.enabled),
-            ("reward_shaping", algo_cfg.reward_shaping.enabled),
-        )
-        if enabled
+    unread_settings = [
+        ("use_dynamic_sampling", algo_cfg.use_dynamic_sampling),
+        ("reward_scaling", algo_cfg.reward_scaling.enabled),
+        ("reward_shaping", algo_cfg.reward_shaping.enabled),
     ]
-    if unsupported:
-        names = ", ".join(unsupported)
-        raise NotImplementedError(
-            f"{names} not supported on the SingleController path, which "
-            "implements none of them -- the run would silently skip the "
-            "shaping. Disable them."
-        )
-
     if not is_ppo_run(master_config):
         grpo_cfg = master_config.grpo
         assert grpo_cfg is not None
-        ignored = [
-            name
-            for name, enabled in (
-                (
-                    "grpo.deduplicate_multimodal_data",
-                    grpo_cfg.deduplicate_multimodal_data,
-                ),
-                (
-                    "grpo.calculate_advantages_on_gpu",
-                    grpo_cfg.calculate_advantages_on_gpu,
-                ),
-                ("grpo.debug_payload_metrics", grpo_cfg.debug_payload_metrics),
-            )
-            if enabled
+        unread_settings += [
+            ("deduplicate_multimodal_data", grpo_cfg.deduplicate_multimodal_data),
+            ("calculate_advantages_on_gpu", grpo_cfg.calculate_advantages_on_gpu),
+            ("debug_payload_metrics", grpo_cfg.debug_payload_metrics),
         ]
-        if ignored:
-            raise NotImplementedError(
-                "SingleController does not consume these enabled settings: "
-                + ", ".join(ignored)
-                + ". Disable them or use the legacy/synchronous GRPO path."
-            )
         if (
             grpo_cfg.stop_at_validation_metric is not None
             or grpo_cfg.stop_at_validation_threshold is not None
@@ -846,6 +818,14 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
                 "SingleController has no validation loop, so "
                 "grpo.stop_at_validation_metric/threshold would never be evaluated."
             )
+    unsupported = [name for name, enabled in unread_settings if enabled]
+    if unsupported:
+        names = ", ".join(unsupported)
+        raise NotImplementedError(
+            f"{names} not supported on the SingleController path, which "
+            "implements none of them -- the run would silently skip the "
+            "shaping. Disable them."
+        )
 
     if master_config.policy["generation"]["colocated"]["enabled"]:
         raise ValueError(
@@ -976,20 +956,28 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
         )
 
 
+def resolve_fused_linear_logprobs(policy_config: PolicyConfig) -> bool:
+    """Whether the Megatron policy computes logprobs through the fused path."""
+    if "megatron_cfg" not in policy_config:
+        return False
+    megatron_cfg = policy_config["megatron_cfg"]
+    return bool(
+        megatron_cfg["enabled"] and megatron_cfg.get("use_fused_linear_logprobs")
+    )
+
+
 def _validate_fused_logprob_settings(policy_config: PolicyConfig) -> None:
     """Mirror the legacy loop's fused-logprob guards before the loss is built."""
-    megatron_cfg = policy_config.get("megatron_cfg", {})
-    if not (
-        megatron_cfg.get("enabled") and megatron_cfg.get("use_fused_linear_logprobs")
-    ):
+    if not resolve_fused_linear_logprobs(policy_config):
         return
-    if policy_config.get("sequence_packing", {}).get("enabled", False):
+    sequence_packing = policy_config.get("sequence_packing")
+    if sequence_packing is not None and sequence_packing["enabled"]:
         raise ValueError(
             "policy.megatron_cfg.use_fused_linear_logprobs=true is not supported "
             "with sequence packing: the fused forward rolls labels over the packed "
             "sequence. Disable one of them."
         )
-    generation_config = policy_config.get("generation", {})
+    generation_config = policy_config["generation"]
     if need_top_k_or_top_p_filtering(
         TrainingSamplingParams(
             top_k=generation_config.get("top_k"),

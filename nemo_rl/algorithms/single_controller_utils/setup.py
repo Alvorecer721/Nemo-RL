@@ -62,6 +62,7 @@ from nemo_rl.algorithms.metric_utils import (
 )
 from nemo_rl.algorithms.ppo import MasterConfig as PPOMasterConfig
 from nemo_rl.algorithms.single_controller_utils.config import (
+    resolve_fused_linear_logprobs,
     MasterConfig,
     algo_config,
     is_ppo_run,
@@ -1400,10 +1401,7 @@ def setup_single_controller(
     # Setup Algorithm + Rollout Wiring
     # ==========================
     advantage_estimator = _build_advantage_estimator(master_config)
-    megatron_cfg = policy_config.get("megatron_cfg", {})
-    use_fused_linear_logprobs = bool(
-        megatron_cfg.get("enabled") and megatron_cfg.get("use_fused_linear_logprobs")
-    )
+    use_fused_linear_logprobs = resolve_fused_linear_logprobs(policy_config)
     loss_fn: LossFunction = ClippedPGLossFn(
         master_config.loss_fn,
         use_fused_linear_logprobs=use_fused_linear_logprobs,

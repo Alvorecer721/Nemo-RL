@@ -768,7 +768,9 @@ class TestUnsupportedAlgorithmKnobsFailLoudly:
         cfg = _master_config()
         cfg.grpo = cfg.grpo.model_copy(update=grpo_override)
 
-        with pytest.raises(NotImplementedError, match="does not consume"):
+        with pytest.raises(
+            NotImplementedError, match="not supported on the SingleController"
+        ):
             validate_single_controller_config(cfg)
 
     def test_validation_early_stop_is_rejected(self) -> None:
