@@ -7,7 +7,7 @@ set -euo pipefail
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 EXPECTED_HEAD=$(git -C "$REPO_DIR" rev-parse HEAD)
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
-AP_VARIANT=${AP_VARIANT:?set AP_VARIANT to 70b-bench[-tp4pp2|-tp1pp8|-fused|-mb8|-sync|-lag1], 70b-smoke[-tp4pp2|-tp1pp8|-fused|-mb8] or 8b-smoke}
+AP_VARIANT=${AP_VARIANT:?set AP_VARIANT to 70b-bench[-tp4pp2|-tp1pp8|-fused|-mb8|-tis2|-sync|-lag1], 70b-smoke[-tp4pp2|-tp1pp8|-fused|-mb8] or 8b-smoke}
 case "$AP_VARIANT" in
   70b-bench)
     RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench.yaml
@@ -36,6 +36,11 @@ case "$AP_VARIANT" in
     AP_TIME_DEFAULT=01:30:00 ;;
   70b-bench-mb8)
     RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-mb8-sc-bench.yaml
+    AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
+    AP_EXPECTED_STEPS_DEFAULT=92
+    AP_TIME_DEFAULT=04:00:00 ;;
+  70b-bench-tis2)
+    RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-tis2-sc-bench.yaml
     AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
     AP_EXPECTED_STEPS_DEFAULT=92
     AP_TIME_DEFAULT=04:00:00 ;;
@@ -137,6 +142,8 @@ unset SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_environment
 unset SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_container_writable
 unset SLURM_SPANK__SLURM_SPANK_OPTION_pyxis_container_mounts
 
+# Keep the seed inside Slurm's truncated job-name field: ray.sub requests a
+# singleton dependency, so losing the suffix would serialize independent runs.
 cd "$REPO_DIR"
 exec "$SBATCH_BIN" \
   --account=infra01 \
@@ -149,7 +156,7 @@ exec "$SBATCH_BIN" \
   --mem=850000M \
   --exclusive \
   --time="$AP_TIME" \
-  --job-name="apertus-bench-$AP_VARIANT-seed$AP_SEED" \
+  --job-name="ap-$AP_VARIANT-s$AP_SEED" \
   --output="$SBATCH_LOG_ROOT/slurm_%j.out" \
   --error="$SBATCH_LOG_ROOT/slurm_%j.err" \
   --export=ALL \
