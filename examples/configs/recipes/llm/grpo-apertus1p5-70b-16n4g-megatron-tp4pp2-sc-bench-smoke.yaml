@@ -1,0 +1,8 @@
+defaults: grpo-apertus1p5-70b-16n4g-megatron-tp4pp2-sc-bench.yaml
+
+# Two full steps of the benchmark recipe on its own 16-node topology. Fewer
+# trainer nodes cannot hold the 70B: with a single data-parallel replica the
+# distributed optimizer has nothing to shard and one GPU would carry the fp32
+# master weights and both Adam moments.
+grpo:
+  max_num_steps: 2

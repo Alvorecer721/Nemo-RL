@@ -15,7 +15,7 @@ case "$AP_VARIANT" in
     AP_EXPECTED_STEPS_DEFAULT=92
     AP_TIME_DEFAULT=04:00:00 ;;
   70b-smoke)
-    RECIPE_NAME=grpo-apertus1p5-70b-3n4g-megatron-tp4pp2-sc-bench-smoke.yaml
+    RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp4pp2-sc-bench-smoke.yaml
     AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
     AP_EXPECTED_STEPS_DEFAULT=2
     AP_TIME_DEFAULT=01:30:00 ;;
