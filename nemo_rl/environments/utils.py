@@ -53,6 +53,9 @@ ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
     "single_turn_verifier": {
         "actor_class_fqn": "nemo_rl.environments.single_turn_verifier_environment.SingleTurnVerifierEnvironment",
     },
+    "bracket_math": {
+        "actor_class_fqn": "nemo_rl.environments.bracket_math_environment.BracketMathEnvironment",
+    },
     "nemo_gym": {
         "actor_class_fqn": "nemo_rl.environments.nemo_gym.NemoGym",
     },
