@@ -227,7 +227,13 @@ def test_validate_scale_config_applies_single_controller_contract(
         ValueError,
         match="num_prompts_per_step \\(15\\) must be >= .* \\(16\\)",
     ):
-        _validate_config(config, speculative_tokens=0, speculative_method="none")
+        _validate_config(
+            config,
+            speculative_tokens=0,
+            speculative_method="none",
+            fused_linear_logprobs=False,
+            min_groups_for_streaming_train=16,
+        )
 
 
 def test_validate_scale_config_rejects_training_mtp_with_speculation(
@@ -243,7 +249,11 @@ def test_validate_scale_config_rejects_training_mtp_with_speculation(
         match="requires policy.megatron_cfg.mtp_num_layers=0; resolved 1",
     ):
         _validate_config(
-            config, speculative_tokens=3, speculative_method="deepseek_mtp"
+            config,
+            speculative_tokens=3,
+            speculative_method="deepseek_mtp",
+            fused_linear_logprobs=True,
+            min_groups_for_streaming_train=16,
         )
 
 
