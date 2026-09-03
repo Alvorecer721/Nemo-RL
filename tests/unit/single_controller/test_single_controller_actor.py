@@ -592,6 +592,8 @@ def test_advantage_stage_composes_all_filters_before_computing_advantages(
     ctrl._master_config = SimpleNamespace(
         grpo=SimpleNamespace(
             seq_logprob_error_threshold=2.0,
+            advantage_clip_low=None,
+            advantage_clip_high=None,
             overlong_filtering=True,
             invalid_tool_call_advantage=-5.0,
             malformed_thinking_advantage=None,
@@ -750,6 +752,8 @@ def test_advantage_stage_writes_each_sample_filter_without_seq_threshold(
     ctrl._message_level_advantage_penalties_enabled = False
     ctrl._algo_cfg = SimpleNamespace(
         seq_logprob_error_threshold=None,
+        advantage_clip_low=None,
+        advantage_clip_high=None,
         overlong_filtering=overlong_filtering,
     )
     ctrl._step_log_dict = {
@@ -811,7 +815,12 @@ def test_advantage_stage_reports_seq_logprob_metrics_without_masking() -> None:
     ctrl._teacher_logprobs_required = False
     ctrl._is_ppo = False
     ctrl._master_config = SimpleNamespace(
-        grpo=SimpleNamespace(seq_logprob_error_threshold=None, overlong_filtering=False)
+        grpo=SimpleNamespace(
+            seq_logprob_error_threshold=None,
+            advantage_clip_low=None,
+            advantage_clip_high=None,
+            overlong_filtering=False,
+        )
     )
     ctrl._algo_cfg = ctrl._master_config.grpo
     ctrl._message_level_advantage_penalties_enabled = False
@@ -883,7 +892,12 @@ def test_advantage_stage_skips_estimator_when_seq_mask_removes_whole_chunk(
     ctrl._teacher_logprobs_required = False
     ctrl._is_ppo = False
     ctrl._master_config = SimpleNamespace(
-        grpo=SimpleNamespace(seq_logprob_error_threshold=2.0, overlong_filtering=False)
+        grpo=SimpleNamespace(
+            seq_logprob_error_threshold=2.0,
+            advantage_clip_low=None,
+            advantage_clip_high=None,
+            overlong_filtering=False,
+        )
     )
     ctrl._algo_cfg = ctrl._master_config.grpo
     ctrl._message_level_advantage_penalties_enabled = False
@@ -943,7 +957,12 @@ def test_advantage_stage_skips_preexisting_empty_mask_without_seq_threshold() ->
     ctrl._teacher_logprobs_required = False
     ctrl._is_ppo = False
     ctrl._master_config = SimpleNamespace(
-        grpo=SimpleNamespace(seq_logprob_error_threshold=None, overlong_filtering=False)
+        grpo=SimpleNamespace(
+            seq_logprob_error_threshold=None,
+            advantage_clip_low=None,
+            advantage_clip_high=None,
+            overlong_filtering=False,
+        )
     )
     ctrl._algo_cfg = ctrl._master_config.grpo
     ctrl._message_level_advantage_penalties_enabled = False
@@ -1023,7 +1042,12 @@ def test_opd_advantage_stage_reads_teacher_and_student_logprobs() -> None:
     ctrl._is_ppo = False
     ctrl._dp_client = FakeDataPlane()
     ctrl._master_config = SimpleNamespace(
-        grpo=SimpleNamespace(seq_logprob_error_threshold=None, overlong_filtering=False)
+        grpo=SimpleNamespace(
+            seq_logprob_error_threshold=None,
+            advantage_clip_low=None,
+            advantage_clip_high=None,
+            overlong_filtering=False,
+        )
     )
     ctrl._algo_cfg = ctrl._master_config.grpo
     ctrl._message_level_advantage_penalties_enabled = False
@@ -1913,6 +1937,8 @@ def _ppo_train_pump_controller(
         max_num_steps=1,
         policy_training_start_step=policy_training_start_step,
         seq_logprob_error_threshold=None,
+        advantage_clip_low=None,
+        advantage_clip_high=None,
     )
     ctrl._algo_cfg = ctrl._master_config.ppo
     ctrl._message_level_advantage_penalties_enabled = False
@@ -2217,7 +2243,12 @@ def test_advantage_stage_writes_gae_returns_alongside_advantages() -> None:
     ctrl._teacher_logprobs_required = False
     ctrl._is_ppo = True
     ctrl._master_config = SimpleNamespace(
-        ppo=SimpleNamespace(seq_logprob_error_threshold=None, overlong_filtering=False)
+        ppo=SimpleNamespace(
+            seq_logprob_error_threshold=None,
+            advantage_clip_low=None,
+            advantage_clip_high=None,
+            overlong_filtering=False,
+        )
     )
     ctrl._algo_cfg = ctrl._master_config.ppo
     ctrl._message_level_advantage_penalties_enabled = False
