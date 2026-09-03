@@ -475,6 +475,10 @@ class AsyncRLConfig(BaseModel, extra="allow"):
     max_buffered_rollouts: int = 64
     # Enable per-rollout diagnostic prints (prompt content / completion previews).
     diagnostics: bool = False
+    # Refit the generation fleet every N optimizer steps. Between refits the
+    # rollouts keep the older weights, so N updates share one generation batch
+    # the way verl's parameter_sync_step does.
+    weight_sync_period: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
     def _reject_renamed_blocks(self) -> "AsyncRLConfig":

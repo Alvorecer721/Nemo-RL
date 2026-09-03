@@ -2099,13 +2099,19 @@ class SingleControllerActor:
                         else None
                     )
                     # Critic warmup doesn't need refit, and the version still advances.
+                    # A skipped periodic refit leaves the fleet on its old weights, so
+                    # the served version only moves when weights actually move.
                     aborted_stale_inflight_groups = 0
-                    if is_policy_training_step:
+                    refit_due = (
+                        self._trainer_version % self._async_cfg.weight_sync_period == 0
+                    )
+                    if is_policy_training_step and refit_due:
                         aborted_stale_inflight_groups = await self._sync_weights(
                             calibration_data=calibration_data
                         )
                     self._retune_lookahead_versions()
-                    self._rollout_manager.set_weight_version(self._trainer_version)
+                    if not is_policy_training_step or refit_due:
+                        self._rollout_manager.set_weight_version(self._trainer_version)
                     step_metrics.update(
                         {
                             "evicted_stale_prompt_groups": evicted_stale_prompt_groups,

@@ -150,6 +150,7 @@ The shipped exemplars cover three of the five modes:
 Field definitions:
 
 - `max_buffered_rollouts` — hard cap on unconsumed rollout groups buffered in the data plane. Validated at setup against the gated sampler's required capacity; a value too small deadlocks the rollout pump, so setup raises instead of silently blocking. Sized from the widest window the run ever uses, so `warmup_lookahead_versions` rather than `max_lookahead_versions` when it is set.
+- `weight_sync_period` — refit the generation fleet every N optimizer steps (default 1). Rollouts generated between refits keep the older weights, so N consecutive updates share one generation batch, matching verl's `parameter_sync_step`; the sampler's staleness bound is still counted in optimizer steps.
 - `min_groups_for_streaming_train` — minimum ready groups the trainer waits for before dispatching a batch. Set to `num_prompts_per_step` for sync/legacy semantics; lower for streaming. (PPO) Must equal `num_prompts_per_step` — the critic has no split train API, so each critic epoch calls the full-step `train_from_meta` once per chunk. Splitting an RL step across chunks would multiply both models' configured optimizer updates by the number of chunks.
 - `sampler.warmup_lookahead_versions` (PPO) — lookahead used while `ppo.policy_training_start_step` critic warmup is in progress, shrinking back to `max_lookahead_versions` afterwards. The SC equivalent of `ppo.async_ppo.warmup_generation_lead_steps`.
 
