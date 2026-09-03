@@ -157,52 +157,30 @@ def reduce_advantage_pump_metrics(
     return out
 
 
-def _linear_quantiles(values: torch.Tensor, qs: tuple[float, ...]) -> list[float]:
-    """Linear-interpolation quantiles without ``torch.quantile``'s 2**24 input cap."""
-    ordered = values.flatten().sort().values
-    last = ordered.numel() - 1
-    out = []
-    for q in qs:
-        position = q * last
-        low = int(position)
-        high = min(low + 1, last)
-        weight = position - low
-        out.append(float(ordered[low] * (1 - weight) + ordered[high] * weight))
-    return out
-
-
 def _reduce_token_logprob_error_tails(
     records: list[torch.Tensor],
 ) -> dict[str, float]:
     """Reduce exact valid-token log-probability tail evidence for one step."""
-    deltas = torch.cat([record.flatten().double() for record in records])
-    finite = torch.isfinite(deltas)
-    errors = deltas[finite]
+    errors = torch.cat([record.flatten().double() for record in records])
+    finite = torch.isfinite(errors)
     # Non-finite deltas are evidence of a broken step, not a reason to abort the
     # run at logging time; the post-run gate rejects any nonzero count.
-    count_nonfinite = float((~finite).sum())
-    if errors.numel() == 0:
-        return {
-            "logprob_tails/valid_tokens": 0.0,
-            "logprob_tails/mean_abs": 0.0,
-            "logprob_tails/p95_abs": 0.0,
-            "logprob_tails/p99_abs": 0.0,
-            "logprob_tails/max_abs": 0.0,
-            "logprob_tails/count_gt_0_5": 0.0,
-            "logprob_tails/count_gt_1_0": 0.0,
-            "logprob_tails/count_nonfinite": count_nonfinite,
-        }
-
-    quantiles = _linear_quantiles(errors, (0.95, 0.99))
+    count_nonfinite = errors.numel() - int(finite.sum())
+    if count_nonfinite:
+        errors = errors[finite]
+    has_errors = errors.numel() > 0
+    p95_abs, p99_abs = (
+        np.quantile(errors.numpy(), (0.95, 0.99)) if has_errors else (0.0, 0.0)
+    )
     return {
         "logprob_tails/valid_tokens": float(errors.numel()),
-        "logprob_tails/mean_abs": float(errors.mean()),
-        "logprob_tails/p95_abs": float(quantiles[0]),
-        "logprob_tails/p99_abs": float(quantiles[1]),
-        "logprob_tails/max_abs": float(errors.max()),
+        "logprob_tails/mean_abs": float(errors.mean()) if has_errors else 0.0,
+        "logprob_tails/p95_abs": float(p95_abs),
+        "logprob_tails/p99_abs": float(p99_abs),
+        "logprob_tails/max_abs": float(errors.max()) if has_errors else 0.0,
         "logprob_tails/count_gt_0_5": float((errors > 0.5).sum()),
         "logprob_tails/count_gt_1_0": float((errors > 1.0).sum()),
-        "logprob_tails/count_nonfinite": count_nonfinite,
+        "logprob_tails/count_nonfinite": float(count_nonfinite),
     }
 
 
