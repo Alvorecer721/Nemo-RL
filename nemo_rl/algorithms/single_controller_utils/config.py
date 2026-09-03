@@ -35,6 +35,10 @@ from nemo_rl.algorithms.async_utils.staleness_sampler import (
     SamplerConfig,
     required_buffer_capacity_for_config,
 )
+from nemo_rl.algorithms.logits_sampling_utils import (
+    TrainingSamplingParams,
+    need_top_k_or_top_p_filtering,
+)
 from nemo_rl.algorithms.grpo import (
     _REWARD_PENALTY_FLAGS,
     GRPOConfig,
@@ -972,6 +976,34 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
         )
 
 
+def _validate_fused_logprob_settings(policy_config: PolicyConfig) -> None:
+    """Mirror the legacy loop's fused-logprob guards before the loss is built."""
+    megatron_cfg = policy_config.get("megatron_cfg", {})
+    if not (
+        megatron_cfg.get("enabled") and megatron_cfg.get("use_fused_linear_logprobs")
+    ):
+        return
+    if policy_config.get("sequence_packing", {}).get("enabled", False):
+        raise ValueError(
+            "policy.megatron_cfg.use_fused_linear_logprobs=true is not supported "
+            "with sequence packing: the fused forward rolls labels over the packed "
+            "sequence. Disable one of them."
+        )
+    generation_config = policy_config.get("generation", {})
+    if need_top_k_or_top_p_filtering(
+        TrainingSamplingParams(
+            top_k=generation_config.get("top_k"),
+            top_p=generation_config.get("top_p", 1.0),
+        )
+    ):
+        raise ValueError(
+            "policy.megatron_cfg.use_fused_linear_logprobs=true computes logprobs "
+            "from unfiltered logits, so top-k/top-p training-time filtering cannot "
+            "apply. Set policy.generation.top_k=null and top_p=1.0, or disable the "
+            "fused path."
+        )
+
+
 def validate_single_controller_config(master_config: MasterConfig) -> None:
     """Validate cross-section SingleController constraints before setup."""
     legacy_async = master_config.grpo.async_grpo if master_config.grpo else None
@@ -982,6 +1014,7 @@ def validate_single_controller_config(master_config: MasterConfig) -> None:
             "or launch examples/run_grpo.py."
         )
     _validate_algo_settings(master_config)
+    _validate_fused_logprob_settings(master_config.policy)
 
     async_config = master_config.async_rl
     algo_cfg = algo_config(master_config)

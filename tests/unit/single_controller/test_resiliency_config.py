@@ -788,6 +788,44 @@ class TestUnsupportedAlgorithmKnobsFailLoudly:
         with pytest.raises(ValueError, match="legacy async loop"):
             validate_single_controller_config(cfg)
 
+    def _fused_policy(self, **overrides) -> dict:
+        policy = {
+            "train_global_batch_size": 32,
+            "megatron_cfg": {"enabled": True, "use_fused_linear_logprobs": True},
+            "sequence_packing": {"enabled": False},
+            "generation": {
+                "colocated": {"enabled": False},
+                "top_k": None,
+                "top_p": 1.0,
+            },
+        }
+        for key, value in overrides.items():
+            policy[key].update(value)
+        return policy
+
+    def test_fused_logprobs_accept_a_clean_policy(self) -> None:
+        cfg = _master_config()
+        cfg.policy = self._fused_policy()
+
+        validate_single_controller_config(cfg)
+
+    def test_fused_logprobs_reject_sequence_packing(self) -> None:
+        cfg = _master_config()
+        cfg.policy = self._fused_policy(sequence_packing={"enabled": True})
+
+        with pytest.raises(ValueError, match="sequence packing"):
+            validate_single_controller_config(cfg)
+
+    @pytest.mark.parametrize("generation", [{"top_k": 50}, {"top_p": 0.9}])
+    def test_fused_logprobs_reject_training_time_filtering(
+        self, generation: dict
+    ) -> None:
+        cfg = _master_config()
+        cfg.policy = self._fused_policy(generation=generation)
+
+        with pytest.raises(ValueError, match="top-k/top-p"):
+            validate_single_controller_config(cfg)
+
     def test_disabled_legacy_async_block_is_inert(self) -> None:
         cfg = _master_config()
         cfg.grpo.async_grpo = GRPOConfig().async_grpo
