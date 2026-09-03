@@ -45,7 +45,7 @@ checkpointing:
   metric_name: null
   higher_is_better: true
   keep_top_k: null
-  save_period: 100000
+  save_period: ${oc.decode:${oc.env:AP_SAVE_PERIOD,100000}}
   checkpoint_must_save_by: null
   save_optimizer: false
   save_data_plane: true

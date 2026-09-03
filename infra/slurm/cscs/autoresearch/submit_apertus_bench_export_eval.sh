@@ -22,14 +22,15 @@ AP_TIME=${AP_TIME:-02:00:00}
 SBATCH_LOG_ROOT=${SBATCH_LOG_ROOT:-$REPO_DIR/.tmp/slurm-logs/apertus-bench-export-eval/$EXPECTED_HEAD}
 SBATCH_BIN=${SBATCH_BIN:-sbatch}
 
-STEP_DIR=$(ls -d "$AP_BENCH_RUN_DIR"/checkpoints/step_* 2>/dev/null | sort -V | tail -1)
+AP_STEP=${AP_STEP:-}
+STEP_DIR=$(ls -d "$AP_BENCH_RUN_DIR"/checkpoints/step_${AP_STEP:-*} 2>/dev/null | sort -V | tail -1)
 [[ -n "$STEP_DIR" && -d "$STEP_DIR/policy/weights" ]] || { echo "No policy checkpoint under $AP_BENCH_RUN_DIR/checkpoints" >&2; exit 1; }
 [[ -r "$CONTAINER_ENV" ]] || { echo "Missing container EDF: $CONTAINER_ENV" >&2; exit 1; }
 [[ -r "$AP_HF_BASE/model.safetensors.index.json" ]] || { echo "Missing HF base: $AP_HF_BASE" >&2; exit 1; }
 SOURCE_STATUS=$(git -C "$REPO_DIR" status --porcelain --untracked-files=no --ignore-submodules=all)
 [[ -z "$SOURCE_STATUS" ]] || { echo "Tracked source is dirty: $SOURCE_STATUS" >&2; exit 1; }
 
-EXPORT_DIR=$AP_BENCH_RUN_DIR/hf_export
+EXPORT_DIR=$AP_BENCH_RUN_DIR/hf_export${AP_STEP:+_step$AP_STEP}
 SBATCH_RESERVATION_ARGS=()
 [[ -n "$AP_RESERVATION" ]] && SBATCH_RESERVATION_ARGS+=(--reservation="$AP_RESERVATION")
 mkdir -p "$SBATCH_LOG_ROOT"
