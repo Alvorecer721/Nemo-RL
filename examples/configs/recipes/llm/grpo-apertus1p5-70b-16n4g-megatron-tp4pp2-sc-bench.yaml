@@ -1,4 +1,4 @@
-defaults: ../grpo_math_8B_megatron.yaml
+defaults: ../../grpo_math_8B_megatron.yaml
 
 # Apertus RL framework benchmark, NeMo RL side (SingleController, non-colocated).
 # Mirrors the verl spec: GSM8K, 768-sample optimizer batches, PPO-clip 0.2 with
