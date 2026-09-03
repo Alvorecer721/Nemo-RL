@@ -14,6 +14,7 @@ AP_CKPT=${AP_CKPT:?path to the HF checkpoint to evaluate}
 AP_TOKENIZER=${AP_TOKENIZER:-/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr}
 AP_EVAL_DATA=${AP_EVAL_DATA:-/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/data/gsm8k_test.jsonl}
 AP_EVAL_CONFIG=${AP_EVAL_CONFIG:-$REPO_DIR/examples/configs/evals/apertus_bench_gsm8k.yaml}
+AP_ANSWER_MARKER=${AP_ANSWER_MARKER:-bracket}
 AP_EVAL_TAG=${AP_EVAL_TAG:?short tag for this evaluation, e.g. start or step46}
 AP_RUN_ROOT=${AP_RUN_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_apertus_bench/eval/$EXPECTED_HEAD}
 SBATCH_LOG_ROOT=${SBATCH_LOG_ROOT:-$REPO_DIR/.tmp/slurm-logs/apertus-bench-eval/$EXPECTED_HEAD}
@@ -61,8 +62,8 @@ srun --cpu-bind=none --environment=$CONTAINER_ENV --ntasks=1 --gpus-per-task=4 -
   test \"\$(git rev-parse HEAD)\" = \"$EXPECTED_HEAD\"
   export PYTHONPATH=$REPO_DIR PYTHONUNBUFFERED=1
   export HF_HOME=/iopsstor/scratch/cscs/xyixuan/.cache/huggingface HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1
-  export AP_CKPT=$AP_CKPT AP_TOKENIZER=$AP_TOKENIZER AP_EVAL_DATA=$AP_EVAL_DATA
-  export AP_RUN_DIR=$AP_RUN_ROOT/$AP_EVAL_TAG-\$SLURM_JOB_ID
+  export AP_CKPT=$AP_CKPT AP_TOKENIZER=$AP_TOKENIZER AP_EVAL_DATA=$AP_EVAL_DATA AP_ANSWER_MARKER=$AP_ANSWER_MARKER
+  export AP_RUN_DIR=$AP_RUN_ROOT/$AP_EVAL_TAG-$AP_ANSWER_MARKER-\$SLURM_JOB_ID
   export WANDB_DISABLED=true VLLM_ALLREDUCE_USE_SYMM_MEM=0 VLLM_DISABLE_PYNCCL=1
   mkdir -p \"\$AP_RUN_DIR\"
   /opt/nemo_rl_venv/bin/python -m examples.run_eval --config $AP_EVAL_CONFIG 2>&1 | tee \"\$AP_RUN_DIR/eval.log\"

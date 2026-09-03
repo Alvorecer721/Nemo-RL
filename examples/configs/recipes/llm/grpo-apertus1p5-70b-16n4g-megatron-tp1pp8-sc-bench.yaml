@@ -1,0 +1,10 @@
+defaults: grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench.yaml
+
+# Same benchmark with the replica cut as TP1 x PP8. Sequence parallelism only
+# exists with TP > 1. Stages are uniform ten layers; the 2.2B embedding and LM
+# head sit on the first and last stage.
+policy:
+  megatron_cfg:
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 8
+    sequence_parallel: false

@@ -11,10 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Single-turn environment scoring ``[[[answer]]]`` responses with the benchmark reward.
+"""Single-turn environment scoring marked final answers with the benchmark reward.
 
 Same batching, worker fan-out and metadata contract as ``MathEnvironment``; the
-reward is :func:`nemo_rl.environments.bracket_math_reward.score_bracket_math`.
+reward is :func:`nemo_rl.environments.bracket_math_reward.score_marked_answer`,
+reading the last ``[[[answer]]]`` or ``\\boxed{answer}`` span depending on
+``answer_marker``.
 The reward is composite (outcome + format bonus - length penalty), so the
 accuracy metric is computed from the outcome component rather than from the
 scalar reward.
@@ -31,7 +33,7 @@ import torch
 from nemo_rl.data.interfaces import LLMMessageLogType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES
-from nemo_rl.environments.bracket_math_reward import score_bracket_math
+from nemo_rl.environments.bracket_math_reward import AnswerMarker, score_marked_answer
 from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
 from nemo_rl.environments.math_environment import MathEnvironmentMetadata
 from nemo_rl.environments.metrics import calculate_pass_rate_per_prompt
@@ -46,13 +48,15 @@ class BracketMathEnvConfig(TypedDict):
     # "composite" is the benchmark training reward (outcome + format bonus -
     # length penalty); "outcome" is the plain 0/1 correctness used for evaluation.
     reward: RewardMode
+    answer_marker: AnswerMarker
     stop_strings: NotRequired[list[str] | None]
 
 
 @ray.remote  # pragma: no cover
 class BracketMathVerifyWorker:
-    def __init__(self, reward_mode: RewardMode) -> None:
+    def __init__(self, reward_mode: RewardMode, answer_marker: AnswerMarker) -> None:
         self.reward_mode = reward_mode
+        self.answer_marker = answer_marker
 
     def verify(
         self,
@@ -62,7 +66,7 @@ class BracketMathVerifyWorker:
         **kwargs: Any,
     ) -> Union[list[float], tuple[list[float], list[str | None]]]:
         scores = [
-            score_bracket_math(response, ground_truth)
+            score_marked_answer(response, ground_truth, self.answer_marker)
             for response, ground_truth in zip(pred_responses, ground_truths)
         ]
         if self.reward_mode == "outcome":
@@ -86,11 +90,16 @@ class BracketMathEnvironment(EnvironmentInterface[MathEnvironmentMetadata]):
             raise ValueError(
                 f"env.bracket_math.reward must be 'composite' or 'outcome', got {self.reward_mode!r}"
             )
+        self.answer_marker: AnswerMarker = cfg["answer_marker"]
+        if self.answer_marker not in ("bracket", "boxed"):
+            raise ValueError(
+                f"env.bracket_math.answer_marker must be 'bracket' or 'boxed', got {self.answer_marker!r}"
+            )
         self._worker_counter = itertools.count()
         self.workers = [
             BracketMathVerifyWorker.options(  # type: ignore # (decorated with @ray.remote)
                 runtime_env={"py_executable": PY_EXECUTABLES.SYSTEM}
-            ).remote(self.reward_mode)
+            ).remote(self.reward_mode, self.answer_marker)
             for _ in range(self.num_workers)
         ]
 

@@ -7,25 +7,35 @@ set -euo pipefail
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 EXPECTED_HEAD=$(git -C "$REPO_DIR" rev-parse HEAD)
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
-AP_VARIANT=${AP_VARIANT:?set AP_VARIANT to 70b-bench, 70b-bench-tp2pp4, 70b-smoke, 70b-smoke-tp2pp4 or 8b-smoke}
+AP_VARIANT=${AP_VARIANT:?set AP_VARIANT to 70b-bench[-tp4pp2|-tp1pp8], 70b-smoke[-tp4pp2|-tp1pp8] or 8b-smoke}
 case "$AP_VARIANT" in
   70b-bench)
-    RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp4pp2-sc-bench.yaml
-    AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
-    AP_EXPECTED_STEPS_DEFAULT=92
-    AP_TIME_DEFAULT=04:00:00 ;;
-  70b-bench-tp2pp4)
     RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench.yaml
     AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
     AP_EXPECTED_STEPS_DEFAULT=92
     AP_TIME_DEFAULT=04:00:00 ;;
-  70b-smoke-tp2pp4)
+  70b-bench-tp4pp2)
+    RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp4pp2-sc-bench.yaml
+    AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
+    AP_EXPECTED_STEPS_DEFAULT=92
+    AP_TIME_DEFAULT=04:00:00 ;;
+  70b-bench-tp1pp8)
+    RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp1pp8-sc-bench.yaml
+    AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
+    AP_EXPECTED_STEPS_DEFAULT=92
+    AP_TIME_DEFAULT=04:00:00 ;;
+  70b-smoke)
     RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench-smoke.yaml
     AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
     AP_EXPECTED_STEPS_DEFAULT=2
     AP_TIME_DEFAULT=01:30:00 ;;
-  70b-smoke)
+  70b-smoke-tp4pp2)
     RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp4pp2-sc-bench-smoke.yaml
+    AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
+    AP_EXPECTED_STEPS_DEFAULT=2
+    AP_TIME_DEFAULT=01:30:00 ;;
+  70b-smoke-tp1pp8)
+    RECIPE_NAME=grpo-apertus1p5-70b-16n4g-megatron-tp1pp8-sc-bench-smoke.yaml
     AP_CKPT_DEFAULT=/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr
     AP_EXPECTED_STEPS_DEFAULT=2
     AP_TIME_DEFAULT=01:30:00 ;;
@@ -38,6 +48,7 @@ case "$AP_VARIANT" in
 esac
 AP_RECIPE=${AP_RECIPE:-$REPO_DIR/examples/configs/recipes/llm/$RECIPE_NAME}
 AP_CKPT=${AP_CKPT:-$AP_CKPT_DEFAULT}
+AP_ANSWER_MARKER=${AP_ANSWER_MARKER:-bracket}
 AP_TOKENIZER=${AP_TOKENIZER:-/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr}
 AP_RUN_ROOT=${AP_RUN_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_apertus_bench/$AP_VARIANT/$EXPECTED_HEAD}
 SBATCH_LOG_ROOT=${SBATCH_LOG_ROOT:-$REPO_DIR/.tmp/slurm-logs/apertus-bench-$AP_VARIANT/$EXPECTED_HEAD}
@@ -81,7 +92,7 @@ fi
 
 mkdir -p "$SBATCH_LOG_ROOT"
 export COMMAND=infra/slurm/cscs/autoresearch/run_apertus_bench.sh
-export CONTAINER_ENV AP_CKPT AP_TOKENIZER AP_RECIPE AP_EXPECTED_STEPS
+export CONTAINER_ENV AP_CKPT AP_TOKENIZER AP_RECIPE AP_EXPECTED_STEPS AP_ANSWER_MARKER
 export AP_EXPERIMENT_DIR=$REPO_DIR
 export AP_EXPECTED_SOURCE_HEAD=$EXPECTED_HEAD
 export AP_RUN_DIR=$AP_RUN_ROOT
