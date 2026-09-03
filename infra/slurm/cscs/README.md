@@ -93,27 +93,26 @@ image built from this checkout. It runs the baked `/opt/nemo-rl` tree and
 frozen environments under `/opt/ray_venvs`; it does not require checkout-local
 `.venv` or `venvs` directories.
 
-The current SquashFS is the clean, standalone release build from
-`8f22e59195f547c5715ed250cd49d4776cda5d43`. Public `main` additionally contains
-four dependency-neutral lint corrections in `d2e1e082f`; no image rebuild is
-required for that delta. The artifact includes the Apertus PP-safe refit fix,
-rank-manifest validation, single-step Ray startup for CSCS Slingshot, and the
-frozen vLLM, SGLang, DTensor, Megatron, quantized-policy, and trajectory-worker
-environments.
+The current SquashFS is the clean upstream-sync release from
+`3868458efa37288069ff3f1a2f0b892464c517e0`. The artifact includes the Apertus
+refit fixes and the upstream vLLM, SGLang, DTensor, Megatron, quantized-policy,
+trajectory, replay, and NeMo Gym worker environments.
 
-The EDF ships with the checkout and points at the shared certified copy below
-(no build needed, readable by all of `infra01`). To run your own build instead,
-replace only its `image` value with the builder's reported `BUILD COMPLETE`
-path — and leave the checked-in default on the shared copy.
+The EDF ships with the checkout and points at the certified production copy
+below. The file is owner-only (`0600`); other users must build their own image.
+To run a different build, replace only its `image` value with the builder's
+reported `BUILD COMPLETE` path.
 
 | Field | Value |
 | --- | --- |
-| Shared SquashFS | `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus-vllm-0.25.1-8f22e59195f5-2a9bd7b13c00.aarch64.sqsh` |
-| Builder original | `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-8f22e59195f5-2a9bd7b13c00.sqsh` |
-| Source revision | `8f22e59195f547c5715ed250cd49d4776cda5d43` |
-| Build job | `3156560` (`COMPLETED 0:0`) |
-| Size | 50,049,777,664 bytes (about 46.6 GiB) |
-| SHA-256 | `4aaf2b1bba8613a1e515281d84ab9e330c41d2774ccd3992b5f0c0f81e9dd002` |
+| Production SquashFS | `/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus-vllm-0.25.1-3868458efa37-cbbee0e35734.aarch64.sqsh` |
+| Builder original | `/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.25.1-3868458efa37-cbbee0e35734.sqsh` |
+| Source revision | `3868458efa37288069ff3f1a2f0b892464c517e0` |
+| Build job | `3270751` (`COMPLETED 0:0`) |
+| Production smoke | `3270919` (`COMPLETED 0:0`) |
+| Size | 45,631,471,616 bytes (about 42.5 GiB) |
+| SHA-256 | `69a47737a02af431ad9a6edb0a23376cb011dc7bd0cfc9adc472088c67fb5835` |
+| Hermetic dependency fingerprint | `3e3d9dc43114407930cbf7d1626397ab979c5eebfec2b1b0ade2ae8530d81288` |
 | Persistent OCI data | `/iopsstor/scratch/cscs/xyixuan/podman-cache/nemo-rl` |
 
 The image ID suffix is `<12-char-git-revision>-<12-char-build-input-hash>`.
@@ -174,25 +173,27 @@ final OCI manifest, exports SquashFS, verifies its superblock, and checks the
 vLLM renderer/tokenizer/tool-parser import boundary.
 
 For a source-only release, the launcher verifies the current dependency
-fingerprint and resumes from the content-addressed final hermetic cache image.
-This is intentional: Podman models a named source context as a parent image,
-so any source edit otherwise invalidates the earlier dependency COPY layers.
+fingerprint and resumes from the content-addressed hermetic image. It first
+builds and persists `release-core`, which contains the generation and training
+workers. It then clears only the allocation-local Podman graph, restores that
+exact core into the fresh graph, and commits the final control/Gym delta before
+export. This keeps the broad build cache and the last delta from competing for
+the fixed 334 GiB `/tmp` mount.
+
 When dependencies change, treat the rebuild as two allocations. First run with
 `HERMETIC_CACHE_TAG=rebuild`. The launcher builds and publishes only the
 hermetic target under its dependency fingerprint, prints the exact tag and
 digests to pin, and exits successfully without entering release assembly.
 Replace the pinned tag, fingerprint, and digests with those values, commit the
-change, and start the release from a clean allocation-local Podman store. Do
-not carry the dependency-stage graph into the release build on 334 GiB nodes:
-rootless Podman briefly needs a second copy while committing a layer. Do not
-move the overlay graph to Lustre either; that filesystem does not provide the
-extended-attribute semantics Podman needs.
+change, and start the two-phase release assembly from a clean allocation-local
+Podman store. Do not move the overlay graph to Lustre; that filesystem does not
+provide the extended-attribute semantics Podman needs.
 
 ### Failure and recovery ledger
 
-Thirteen substantive build/recovery attempts were made. Three additional
-18-second Slurm jobs failed during launcher bootstrap and did not begin image
-construction.
+The notable build and recovery outcomes are recorded below. Short jobs that
+failed during launcher bootstrap and did not begin image construction are not
+listed.
 
 | Attempt | Failure or action | Durable fix/result |
 | --- | --- | --- |
@@ -210,10 +211,13 @@ construction.
 | 12 | The first no-sync build invoked the helper by file path, so Python started in `nemo_rl/utils` and could not import `nemo_rl` | Invoke it as `python -m nemo_rl.utils.prefetch_venvs`, preserving the project import root without an outer sync. |
 | 13 | The module-based build recovered two transient direct-wheel failures, committed every worker separately, pushed OCI image `824dff64d3d2`, exported SquashFS, and passed the baked import check | Successful standalone artifact listed above; job `3069254`. |
 | 14 | A dependency-changing build published its hermetic cache but continued into release assembly with the dependency graph still occupying the 334 GiB Podman workspace; release step 34 exhausted `/tmp` | `HERMETIC_CACHE_TAG=rebuild` now targets and publishes only `hermetic`, prints the required cache pin, and exits before release; a fresh job performs release assembly. |
+| 15 | The upstream-sync hermetic environment built successfully, but a one-worker-per-layer release accumulated enough snapshots to exhaust `/tmp` near the end | Group generation and training workers into bounded layers. |
+| 16 | The grouped release persisted every generation and training worker, then exhausted `/tmp` while committing the final control/Gym group; requesting 800 GB job memory did not change the site's fixed 334 GiB mount | Persist `release-core`, reset only the allocation-local graph, and finalize from that exact parent. |
+| 17 | The fresh-graph finalizer committed all four remaining workers, exported the 45,631,471,616-byte SquashFS, and passed both the baked vLLM API check and the protected-path worker smoke | Production artifact listed above; jobs `3270751` and `3270919`. |
 
 Historical build output is under `logs/nrl-vllm0251-image_*.{out,err}`. Direct
-step-39 recovery was an allocation-specific rescue, not the supported rebuild
-path; use `build_nemo_rl_image.slurm` for future builds.
+cache-tag recovery was used to validate the fresh-graph strategy; the launcher
+now performs the same core/final split automatically for future builds.
 
 The earlier `7c68228e4f09` rebuild on job `3077164` restored the persistent hermetic
 manifest, committed every release actor as a bounded layer, exported the
