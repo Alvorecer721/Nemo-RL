@@ -3295,12 +3295,8 @@ class SingleControllerActor:
             seq_error_metrics["_num_valid_seqs_after"] = num_valid_seqs_after
             self._step_log_dict["seq_logprob_error_metrics"].append(seq_error_metrics)
 
-            # Retain only the exact scalar evidence required by the post-run R3
-            # tail gate. The legacy loop writes every training row as JSONL;
-            # SingleController can avoid that large dump by pooling these small
-            # per-chunk tensors before the step is logged.
-            # Overlong and sequence-error rows stay in: those tails are exactly
-            # what the gate inspects. Only environment-masked samples drop out.
+            # Overlong and sequence-error rows stay in the tail evidence; only
+            # environment-masked samples drop out.
             valid_token_mask = (
                 token_mask[:, 1:] * env_sample_mask.unsqueeze(-1)
             ).bool()
@@ -3308,9 +3304,7 @@ class SingleControllerActor:
                 masking_data["generation_logprobs"][:, 1:]
                 - masking_data["prev_logprobs"][:, 1:]
             ).masked_select(valid_token_mask)
-            self._step_log_dict.setdefault("logprob_errors", []).append(
-                logprob_errors.detach().cpu()
-            )
+            self._step_log_dict["logprob_errors"].append(logprob_errors.detach().cpu())
 
         mask = token_mask * final_sample_mask.unsqueeze(-1)
 

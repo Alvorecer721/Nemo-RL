@@ -1941,8 +1941,6 @@ def _ppo_train_pump_controller(
         max_num_steps=1,
         policy_training_start_step=policy_training_start_step,
         seq_logprob_error_threshold=None,
-        advantage_clip_low=None,
-        advantage_clip_high=None,
     )
     ctrl._algo_cfg = ctrl._master_config.ppo
     ctrl._message_level_advantage_penalties_enabled = False
@@ -2249,8 +2247,6 @@ def test_advantage_stage_writes_gae_returns_alongside_advantages() -> None:
     ctrl._master_config = SimpleNamespace(
         ppo=SimpleNamespace(
             seq_logprob_error_threshold=None,
-            advantage_clip_low=None,
-            advantage_clip_high=None,
             overlong_filtering=False,
         )
     )
