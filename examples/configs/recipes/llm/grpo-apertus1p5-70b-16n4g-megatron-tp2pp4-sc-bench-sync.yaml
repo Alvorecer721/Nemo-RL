@@ -1,0 +1,20 @@
+defaults: grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench.yaml
+
+# Strictly on-policy variant: generate the whole batch with the current
+# weights, train on it, refit, repeat. Sampler block follows upstream's
+# single-controller sync recipe; the PPO ratio is forced to 1 because every
+# sample comes from the weights being updated, which also skips the trainer
+# logprob pass.
+loss_fn:
+  force_on_policy_ratio: true
+async_rl:
+  sampler:
+    name: in_order
+    max_lookahead_versions: 0
+  recompute_kv_cache_after_weight_updates: true
+  min_groups_for_streaming_train: ${grpo.num_prompts_per_step}
+  max_inflight_prompts: ${grpo.num_prompts_per_step}
+  max_buffered_rollouts: ${grpo.num_prompts_per_step}
+logger:
+  wandb:
+    name: nemo-rl-70b-tp2pp4-${oc.env:AP_ANSWER_MARKER,boxed}-sync-seed${oc.env:AP_SEED,42}
