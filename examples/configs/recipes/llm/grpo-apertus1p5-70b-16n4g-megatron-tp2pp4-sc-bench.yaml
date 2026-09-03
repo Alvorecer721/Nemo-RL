@@ -107,7 +107,7 @@ policy:
       vllm_metrics_logger_interval: 0.5
 data:
   max_input_seq_length: 512
-  shuffle: false
+  shuffle: true
   num_workers: 1
   train:
     dataset_name: GSM8K
