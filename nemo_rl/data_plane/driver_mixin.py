@@ -55,12 +55,14 @@ class TQDriverMixin:
         return None, None
 
     def _stamp_pad_seqlen(self, meta: KVBatchMeta) -> None:
-        """Mint ``GLOBAL_FORWARD_PAD_SEQLEN`` for the current model topology.
+        """Mint ``GLOBAL_FORWARD_PAD_SEQLEN`` onto ``meta.extra_info`` (idempotent).
 
         Cross-DP forward pad target. Preshard shards inherit it via
         ``dict(meta.extra_info)`` propagation.
         """
         if not meta.sequence_lengths:
+            return
+        if GLOBAL_FORWARD_PAD_SEQLEN in meta.extra_info:
             return
         _, dba = self._packing_args("train_mb_tokens")
         seq_round = int(dba["sequence_length_round"]) if dba is not None else 1
