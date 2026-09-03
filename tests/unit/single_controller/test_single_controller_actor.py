@@ -647,8 +647,12 @@ def test_advantage_stage_composes_all_filters_before_computing_advantages(
     assert metrics[0]["max_seq_mult_prob_error_after_mask"] == pytest.approx(1.0)
     tails = ctrl._step_log_dict["logprob_errors"]
     assert len(tails) == 1
+    # Rows 0, 2, and 3 stay in the evidence; only the env-masked row drops out.
+    # Row 2 carries the four 1.0 deltas that the sequence filter removed from
+    # training, which is exactly what the tail gate must still see.
     assert tails[0].numel() == 12
-    assert not tails[0].bool().any()
+    assert (tails[0] == 1.0).sum() == 4
+    assert (tails[0] == 0.0).sum() == 8
     assert "advantages" in (result_meta.fields or [])
 
 

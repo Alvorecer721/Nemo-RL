@@ -157,6 +157,20 @@ def reduce_advantage_pump_metrics(
     return out
 
 
+def _linear_quantiles(values: torch.Tensor, qs: tuple[float, ...]) -> list[float]:
+    """Linear-interpolation quantiles without ``torch.quantile``'s 2**24 input cap."""
+    ordered = values.flatten().sort().values
+    last = ordered.numel() - 1
+    out = []
+    for q in qs:
+        position = q * last
+        low = int(position)
+        high = min(low + 1, last)
+        weight = position - low
+        out.append(float(ordered[low] * (1 - weight) + ordered[high] * weight))
+    return out
+
+
 def _reduce_token_logprob_error_tails(
     records: list[torch.Tensor],
 ) -> dict[str, float]:
@@ -167,9 +181,7 @@ def _reduce_token_logprob_error_tails(
     if not torch.isfinite(errors).all():
         raise ValueError("Log-probability tail evidence contains non-finite values")
 
-    quantiles = torch.quantile(
-        errors, torch.tensor([0.95, 0.99], dtype=errors.dtype)
-    ).tolist()
+    quantiles = _linear_quantiles(errors, (0.95, 0.99))
     return {
         "logprob_tails/valid_tokens": float(errors.numel()),
         "logprob_tails/mean_abs": float(errors.mean()),
