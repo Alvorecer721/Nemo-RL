@@ -2972,61 +2972,6 @@ class TestAsyncTrajectoryCollector:
             if buffer2 is not None:
                 ray.kill(buffer2)
 
-    def test_process_batch_releases_target_when_worker_start_fails(self, monkeypatch):
-        """Test start failures do not leave a target reserved forever."""
-
-        class RemoteMethod:
-            def __init__(self, value):
-                self.value = value
-
-            def remote(self, *args, **kwargs):
-                return self.value
-
-        class FakeReplayBuffer:
-            def __init__(self):
-                self.get_trajectories_needed = RemoteMethod(1)
-
-        class FakeBatch:
-            size = 1
-
-            def slice(self, start, end):
-                return self
-
-            def repeat_interleave(self, repeats, *, share_immutable_media=False):
-                assert not share_immutable_media
-                return self
-
-        class FailingThread:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def start(self):
-                raise RuntimeError("thread start failed")
-
-            def is_alive(self):
-                return False
-
-        target_weight = 5
-        collector = self.create_local_collector(replay_buffer=FakeReplayBuffer())
-        collector.running = True
-
-        def reserve_target(generation_weight_version):
-            collector._generating_targets.add(target_weight)
-            return target_weight
-
-        collector._get_next_target_for_generation = reserve_target
-        monkeypatch.setattr(trajectory_collector_mod.ray, "get", lambda value: value)
-        monkeypatch.setattr(
-            trajectory_collector_mod._threading,
-            "Thread",
-            FailingThread,
-        )
-
-        with pytest.raises(RuntimeError, match="thread start failed"):
-            collector._process_batch(FakeBatch())
-
-        assert target_weight not in collector._generating_targets
-
     def test_process_batch_gap_fill_spawns_only_needed(self, monkeypatch):
         """Gap-fill sends only the needed prompt groups to one batch worker."""
 

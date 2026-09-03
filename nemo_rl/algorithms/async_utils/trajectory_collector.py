@@ -239,6 +239,7 @@ class AsyncTrajectoryCollector:
         # Event to signal when generation limits are cleared (more efficient than polling)
         self._generation_limit_cleared = _threading.Event()
         self._generation_limit_cleared.set()  # Start in cleared state
+        self._paused_for_limits = False
 
         # Track threads
         self._inflight_threads: set[_threading.Thread] = set()
@@ -368,7 +369,7 @@ class AsyncTrajectoryCollector:
         self.current_weight_version = version
 
         # Resume collection if it was paused due to generation limits
-        was_paused = not self._generation_limit_cleared.is_set()
+        was_paused = self._paused_for_limits
         if was_paused:
             self._generation_limit_cleared.set()  # Signal that collection can resume
             print(f"🔄 Updated weight version to {version}, resuming collection")
@@ -484,7 +485,7 @@ class AsyncTrajectoryCollector:
         """Record the first collection-loop failure with its traceback."""
         import traceback
 
-        failure_traceback = traceback.format_exc()
+        failure_traceback = "".join(traceback.format_exception(error))
         with self._failure_lock:
             if not self.collection_failed:
                 self.collection_failed = True
@@ -547,6 +548,7 @@ class AsyncTrajectoryCollector:
                         self._last_limit_warning_version = self.current_weight_version
 
                     # Efficiently wait for generation limits to be cleared (no polling!)
+                    self._paused_for_limits = True
                     with (
                         efficiency_span(
                             "idle/generation_limit_pause", tracer=self._tracer
@@ -554,6 +556,7 @@ class AsyncTrajectoryCollector:
                         self._efficiency_timer.time("idle/generation_limit_pause"),
                     ):
                         self._generation_limit_cleared.wait()
+                    self._paused_for_limits = False
 
                     # Double-check we're still running after being woken up
                     if not self.running:
@@ -599,11 +602,11 @@ class AsyncTrajectoryCollector:
                         time.sleep(0.05)
 
         except Exception as e:
-            print(f"❌ Error in trajectory collection: {e}")
-            import traceback
-
-            traceback.print_exc()
             self._mark_collection_failed(e)
+            print(
+                f"❌ Error in trajectory collection: {e}\n"
+                f"{self.collection_error_traceback}"
+            )
         finally:
             if dataloader_exhausted:
                 # Keep running=True while workers publish the last batches. Setting
@@ -1024,7 +1027,9 @@ class AsyncTrajectoryCollector:
             import traceback
 
             traceback.print_exc()
-            raise
+            # No worker was started, so nothing in `batch` was consumed: hand
+            # the whole batch back rather than only the gap-fill tail.
+            return batch if not worker_started else leftover
 
     def get_weight_version(self) -> int:
         return self.current_weight_version
