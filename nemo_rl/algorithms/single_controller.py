@@ -77,6 +77,7 @@ from nemo_rl.algorithms.async_utils.staleness_sampler import (
     create_sampler,
 )
 from nemo_rl.algorithms.grpo import (
+    _clip_grpo_advantages,
     GRPOSaveState,
     _write_latest_checkpoint_status,
     aggregate_rollout_metrics,
@@ -3297,7 +3298,9 @@ class SingleControllerActor:
             # tail gate. The legacy loop writes every training row as JSONL;
             # SingleController can avoid that large dump by pooling these small
             # per-chunk tensors before the step is logged.
-            valid_token_mask = (token_mask[:, 1:] * final_sample_mask.unsqueeze(-1)).bool()
+            valid_token_mask = (
+                token_mask[:, 1:] * final_sample_mask.unsqueeze(-1)
+            ).bool()
             logprob_errors = torch.abs(
                 masking_data["generation_logprobs"][:, 1:]
                 - masking_data["prev_logprobs"][:, 1:]
@@ -3379,6 +3382,9 @@ class SingleControllerActor:
                     self._algo_cfg.malformed_thinking_advantage
                 ),
             )
+
+        if not self._is_ppo:
+            advantages = _clip_grpo_advantages(advantages, self._algo_cfg)
 
         response_advantages = torch.masked_select(advantages, mask.bool())
         self._step_log_dict["rewards"].append(rewards.detach().cpu())

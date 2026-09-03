@@ -650,6 +650,63 @@ def test_advantage_stage_composes_all_filters_before_computing_advantages(
     assert "advantages" in (result_meta.fields or [])
 
 
+def test_advantage_stage_applies_configured_clipping() -> None:
+    batch_size, sequence_length = 2, 5
+    data = TensorDict(
+        {
+            "prompt_ids_for_adv": torch.zeros(
+                batch_size, sequence_length, dtype=torch.long
+            ),
+            "total_reward": torch.tensor([-2.0, 3.0]),
+            "token_mask": torch.ones(batch_size, sequence_length),
+            "sample_mask": torch.ones(batch_size),
+            "mask_sample": torch.tensor([False, False]),
+            "truncated": torch.tensor([False, False]),
+        },
+        batch_size=[batch_size],
+    )
+    data_plane = _AdvantageDataPlane(data)
+    estimator = _MaskRecordingAdvantageEstimator()
+
+    controller_cls = SingleControllerActor.__ray_metadata__.modified_class
+    ctrl = object.__new__(controller_cls)
+    ctrl._dp_client = data_plane
+    ctrl._advantage_cfg = AdvantageConfig()
+    ctrl._advantage_estimator = estimator
+    ctrl._policy_logprobs_required = False
+    ctrl._reference_logprobs_required = False
+    ctrl._teacher_logprobs_required = False
+    ctrl._is_ppo = False
+    ctrl._message_level_advantage_penalties_enabled = False
+    ctrl._algo_cfg = GRPOConfig.model_construct(
+        seq_logprob_error_threshold=None,
+        overlong_filtering=False,
+        advantage_clip_low=-1.0,
+        advantage_clip_high=1.0,
+    )
+    ctrl._step_log_dict = {
+        "rewards": [],
+        "masked_advantages": [],
+        "num_mask_sample_filtered": [],
+        "sequence_lengths": [],
+        "seq_logprob_error_metrics": [],
+    }
+    meta = KVBatchMeta(
+        partition_id="rollout_data",
+        task_name="train",
+        sample_ids=[f"sample-{i}" for i in range(batch_size)],
+        fields=list(data.keys()),
+    )
+
+    asyncio.run(ctrl._advantage_stage(meta))
+
+    assert data_plane.written_fields is not None
+    assert torch.equal(
+        data_plane.written_fields["advantages"],
+        torch.tensor([[-1.0] * sequence_length, [1.0] * sequence_length]),
+    )
+
+
 @pytest.mark.parametrize(
     "overlong_filtering, mask_sample, truncated, expected_sample_mask",
     [
