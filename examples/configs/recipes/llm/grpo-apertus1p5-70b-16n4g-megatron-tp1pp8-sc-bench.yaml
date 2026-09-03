@@ -2,7 +2,8 @@ defaults: grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench.yaml
 
 # Same benchmark with the replica cut as TP1 x PP8. Sequence parallelism only
 # exists with TP > 1. Stages are uniform ten layers; the 2.2B embedding and LM
-# head sit on the first and last stage.
+# head sit on the first and last stage. Measured 53.5 s per steady step against
+# 44.8 s for TP2 x PP4 (job 3282653).
 policy:
   megatron_cfg:
     tensor_model_parallel_size: 1
