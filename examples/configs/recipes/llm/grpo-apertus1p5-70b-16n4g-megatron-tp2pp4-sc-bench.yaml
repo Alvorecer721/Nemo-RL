@@ -116,14 +116,14 @@ data:
   validation: null
   default:
     prompt_file: null
-    system_prompt_file: examples/prompts/apertus_bench_gsm8k_system_${oc.env:AP_ANSWER_MARKER,bracket}.txt
+    system_prompt_file: examples/prompts/apertus_bench_gsm8k_system_${oc.env:AP_ANSWER_MARKER,boxed}.txt
     processor: math_hf_data_processor
     env_name: bracket_math
 env:
   bracket_math:
     num_workers: 16
     reward: composite
-    answer_marker: ${oc.env:AP_ANSWER_MARKER,bracket}
+    answer_marker: ${oc.env:AP_ANSWER_MARKER,boxed}
 data_plane:
   enabled: true
   impl: transfer_queue

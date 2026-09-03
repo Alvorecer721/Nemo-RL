@@ -58,7 +58,7 @@ case "$AP_VARIANT" in
 esac
 AP_RECIPE=${AP_RECIPE:-$REPO_DIR/examples/configs/recipes/llm/$RECIPE_NAME}
 AP_CKPT=${AP_CKPT:-$AP_CKPT_DEFAULT}
-AP_ANSWER_MARKER=${AP_ANSWER_MARKER:-bracket}
+AP_ANSWER_MARKER=${AP_ANSWER_MARKER:-boxed}
 AP_TOKENIZER=${AP_TOKENIZER:-/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr}
 AP_RUN_ROOT=${AP_RUN_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_apertus_bench/$AP_VARIANT/$EXPECTED_HEAD}
 SBATCH_LOG_ROOT=${SBATCH_LOG_ROOT:-$REPO_DIR/.tmp/slurm-logs/apertus-bench-$AP_VARIANT/$EXPECTED_HEAD}

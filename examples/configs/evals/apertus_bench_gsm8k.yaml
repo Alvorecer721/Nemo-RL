@@ -35,13 +35,13 @@ data:
   file_format: json
   split: train
   prompt_file: null
-  system_prompt_file: examples/prompts/apertus_bench_gsm8k_system_${oc.env:AP_ANSWER_MARKER,bracket}.txt
+  system_prompt_file: examples/prompts/apertus_bench_gsm8k_system_${oc.env:AP_ANSWER_MARKER,boxed}.txt
   env_name: bracket_math
 env:
   bracket_math:
     num_workers: 8
     reward: outcome
-    answer_marker: ${oc.env:AP_ANSWER_MARKER,bracket}
+    answer_marker: ${oc.env:AP_ANSWER_MARKER,boxed}
 cluster:
   gpus_per_node: 4
   num_nodes: 1
