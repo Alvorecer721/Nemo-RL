@@ -32,12 +32,12 @@ MTP_RECIPE = (
 )
 STREAM8_RECIPE = (
     REPO_ROOT
-    / "infra/slurm/cscs/autoresearch/recipes"
+    / "examples/configs/recipes/llm/autoresearch"
     / "grpo-glm5.1-136n4g-megatron-tp2pp18ep16-ready-first-stream8-fused.yaml"
 )
 STREAM8_MTP_RECIPE = (
     REPO_ROOT
-    / "infra/slurm/cscs/autoresearch/recipes"
+    / "examples/configs/recipes/llm/autoresearch"
     / "grpo-glm5.1-136n4g-megatron-tp2pp18ep16-ready-first-stream8-fused-mtp3.yaml"
 )
 
