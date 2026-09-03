@@ -16,7 +16,7 @@
 Port of ``apertus-benchmarks/reward.py`` (eth-cscs/alps-extended-images): the final
 answer is the last marker span, numbers are compared after comma stripping and
 float normalisation, a 0.1 format bonus rewards any marker, and a length penalty
-of up to -0.2 starts at 350 words. The marker is either ``[[[answer]]]``, the
+of up to -0.2 ramps from 2000 to 4000 words. The marker is either ``[[[answer]]]``, the
 benchmark's original, or ``\\boxed{answer}``, the form Apertus produces on its
 own. The reference's unfinished-``<think>`` rule is not ported: Apertus never
 emits ``<think>``, so on the verl side it never fires.
@@ -34,8 +34,8 @@ AnswerMarker = Literal["bracket", "boxed"]
 FORMAT_REWARD = 0.1
 OUTCOME_REWARD = 1.0
 LENGTH_PENALTY_MAX = 0.2
-LENGTH_PENALTY_START_WORDS = 350
-LENGTH_PENALTY_SPAN_WORDS = 350
+LENGTH_PENALTY_START_WORDS = 2000
+LENGTH_PENALTY_SPAN_WORDS = 2000
 
 _BRACKET_ANSWER = re.compile(r"\[\[\[(.*?)\]\]\]", re.DOTALL)
 _BOXED = "\\boxed"

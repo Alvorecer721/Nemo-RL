@@ -91,11 +91,12 @@ def test_missing_brackets_score_zero() -> None:
     assert score.extracted_answer is None
 
 
-def test_length_penalty_starts_at_350_words_and_saturates() -> None:
-    words = " ".join(["w"] * 525) + " [[[18]]]"
+def test_length_penalty_ramps_from_2000_to_4000_words() -> None:
+    assert score_marked_answer(" ".join(["w"] * 1999) + " [[[18]]]", "18").length_penalty == 0.0
+    words = " ".join(["w"] * 2999) + " [[[18]]]"
     score = score_marked_answer(words, "18")
-    assert score.length_penalty == pytest.approx(-0.2 * (526 - 350) / 350)
-    saturated = score_marked_answer(" ".join(["w"] * 2000) + " [[[18]]]", "18")
+    assert score.length_penalty == pytest.approx(-0.2 * (3000 - 2000) / 2000)
+    saturated = score_marked_answer(" ".join(["w"] * 5000) + " [[[18]]]", "18")
     assert saturated.length_penalty == pytest.approx(-0.2)
     assert saturated.reward == pytest.approx(0.9)
 
