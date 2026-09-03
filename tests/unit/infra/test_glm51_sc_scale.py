@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -53,10 +54,10 @@ def _load_recipe(
 def _validate_config(
     config: MasterConfig,
     *,
-    speculative_tokens: int,
-    speculative_method: str,
-    fused_linear_logprobs: bool,
-    min_groups_for_streaming_train: int,
+    speculative_tokens: int = 0,
+    speculative_method: str = "none",
+    fused_linear_logprobs: bool = False,
+    min_groups_for_streaming_train: int = 16,
 ) -> GLM51ScaleProfile:
     return validate_scale_config(
         config,
@@ -104,7 +105,6 @@ def test_glm51_mtp_recipe_preserves_topology(
         speculative_tokens=3,
         speculative_method="deepseek_mtp",
         fused_linear_logprobs=True,
-        min_groups_for_streaming_train=16,
     )
 
     generation = config.policy["generation"]
@@ -118,14 +118,6 @@ def test_glm51_mtp_recipe_preserves_topology(
         "method": "deepseek_mtp",
         "num_speculative_tokens": 3,
     }
-    assert config.policy["megatron_cfg"]["use_fused_linear_logprobs"] is True
-    assert config.policy["megatron_cfg"]["fused_linear_logprobs_chunk_size"] == 256
-    assert (
-        config.policy["megatron_cfg"]["distributed_data_parallel_config"][
-            "overlap_param_gather"
-        ]
-        is False
-    )
     assert profile.describe().endswith(
         "spec_method=deepseek_mtp spec_tokens=3 fused_logprobs=true "
         "logprob_chunk=256 overlap_param_gather=false"
@@ -137,13 +129,7 @@ def test_validate_scale_config_accepts_baseline(
 ) -> None:
     config = _load_recipe(monkeypatch, BASE_RECIPE, tmp_path / "glm-5.1")
 
-    profile = _validate_config(
-        config,
-        speculative_tokens=0,
-        speculative_method="none",
-        fused_linear_logprobs=False,
-        min_groups_for_streaming_train=16,
-    )
+    profile = _validate_config(config)
 
     assert profile.describe() == (
         "glm51_sc_scale_config=OK tp=2 pp=18 etp=1 ep=16 "
@@ -164,11 +150,7 @@ def test_glm51_stream8_pair_preserves_step_volume_and_fused_profile(
     challenger = _load_recipe(monkeypatch, STREAM8_MTP_RECIPE, model_dir)
 
     control_profile = _validate_config(
-        control,
-        speculative_tokens=0,
-        speculative_method="none",
-        fused_linear_logprobs=True,
-        min_groups_for_streaming_train=8,
+        control, fused_linear_logprobs=True, min_groups_for_streaming_train=8
     )
     challenger_profile = _validate_config(
         challenger,
@@ -182,18 +164,9 @@ def test_glm51_stream8_pair_preserves_step_volume_and_fused_profile(
         assert config.grpo.num_prompts_per_step == 16
         assert config.grpo.num_generations_per_prompt == 8
         assert config.policy["train_global_batch_size"] == 128
-        assert config.grpo.max_num_steps == 10
-        assert config.async_rl.min_groups_for_streaming_train == 8
-    assert control_profile.min_groups_for_streaming_train == 8
-    assert challenger_profile.min_groups_for_streaming_train == 8
-    assert (
-        control.policy["generation"].get("vllm_kwargs", {}).get("speculative_config")
-        is None
+    assert challenger_profile == dataclasses.replace(
+        control_profile, speculative_method="deepseek_mtp", speculative_tokens=3
     )
-    assert challenger.policy["generation"]["vllm_kwargs"]["speculative_config"] == {
-        "method": "deepseek_mtp",
-        "num_speculative_tokens": 3,
-    }
 
 
 def test_validate_scale_config_rejects_drift(
@@ -208,13 +181,7 @@ def test_validate_scale_config_rejects_drift(
             "requires policy.generation.refit_transport='nccl_reshard'; resolved 'ipc'"
         ),
     ):
-        _validate_config(
-            config,
-            speculative_tokens=0,
-            speculative_method="none",
-            fused_linear_logprobs=False,
-            min_groups_for_streaming_train=16,
-        )
+        _validate_config(config)
 
 
 def test_validate_scale_config_applies_single_controller_contract(
@@ -227,13 +194,7 @@ def test_validate_scale_config_applies_single_controller_contract(
         ValueError,
         match="num_prompts_per_step \\(15\\) must be >= .* \\(16\\)",
     ):
-        _validate_config(
-            config,
-            speculative_tokens=0,
-            speculative_method="none",
-            fused_linear_logprobs=False,
-            min_groups_for_streaming_train=16,
-        )
+        _validate_config(config)
 
 
 def test_validate_scale_config_rejects_training_mtp_with_speculation(
@@ -253,7 +214,6 @@ def test_validate_scale_config_rejects_training_mtp_with_speculation(
             speculative_tokens=3,
             speculative_method="deepseek_mtp",
             fused_linear_logprobs=True,
-            min_groups_for_streaming_train=16,
         )
 
 

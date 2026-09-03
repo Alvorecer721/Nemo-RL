@@ -19,6 +19,7 @@ RUN_DIR=$RUN_ROOT/${NRL_SLURM_JOB_ID:?}
 export GLM_RUN_DIR=$RUN_DIR
 
 [[ -r "$RECIPE" ]] || { echo "Missing recipe: $RECIPE" >&2; exit 1; }
+[[ $EXPECTED_FUSED_LINEAR_LOGPROBS == [01] ]] || { echo "GLM_EXPECTED_FUSED_LINEAR_LOGPROBS must be 0 or 1; got '$EXPECTED_FUSED_LINEAR_LOGPROBS'" >&2; exit 1; }
 [[ -r "$GLM_CKPT/model.safetensors.index.json" ]] || { echo "Missing GLM checkpoint: $GLM_CKPT" >&2; exit 1; }
 CACHE_METADATA=$(find "$MEGATRON_CACHE" -mindepth 2 -maxdepth 3 -type f -name .metadata -print -quit 2>/dev/null)
 [[ -n "$CACHE_METADATA" && -r "$CACHE_METADATA" ]] || { echo "Missing converted Megatron cache: $MEGATRON_CACHE" >&2; exit 1; }
@@ -112,13 +113,6 @@ from infra.slurm.cscs.autoresearch.validate_glm51_sc_scale import (
     validate_scale_config,
 )
 
-expected_fused = os.environ["GLM_EXPECTED_FUSED_LINEAR_LOGPROBS"]
-if expected_fused not in {"0", "1"}:
-    raise ValueError(
-        "GLM_EXPECTED_FUSED_LINEAR_LOGPROBS must be 0 or 1; "
-        f"got {expected_fused!r}"
-    )
-
 profile = validate_scale_config(
     load_scale_config(Path(os.environ["GLM_RECIPE"])),
     expected_total_nodes=int(os.environ["GLM_TOTAL_NODES"]),
@@ -130,7 +124,8 @@ profile = validate_scale_config(
     ),
     expected_speculative_tokens=int(os.environ["GLM_EXPECTED_SPEC_TOKENS"]),
     expected_speculative_method=os.environ["GLM_EXPECTED_SPEC_METHOD"],
-    expected_fused_linear_logprobs=expected_fused == "1",
+    expected_fused_linear_logprobs=os.environ["GLM_EXPECTED_FUSED_LINEAR_LOGPROBS"]
+    == "1",
 )
 print(profile.describe())
 PY

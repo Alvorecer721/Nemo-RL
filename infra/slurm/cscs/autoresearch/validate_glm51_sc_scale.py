@@ -486,11 +486,14 @@ def validate_metrics(
         )
     # Bound the per-sequence mean of exp(abs(delta log p)) so one extreme token
     # cannot hide inside an otherwise clean sequence.
-    if min(max_seq_mult) < 1 or max(max_seq_mult) >= 1.1:
+    if (
+        min(max_seq_mult) < 1
+        or max(max_seq_mult) >= r3_validator.R3_MAX_SEQ_MULT_CEILING
+    ):
         raise ValueError(
             "Router Replay sequence probability parity failed: "
             f"min={min(max_seq_mult):.6g}, max={max(max_seq_mult):.6g}, "
-            "required 1 <= value < 1.1"
+            f"required 1 <= value < {r3_validator.R3_MAX_SEQ_MULT_CEILING}"
         )
     if min(js) < 0:
         raise ValueError(f"JS divergence cannot be negative: min={min(js):.6g}")

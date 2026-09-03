@@ -27,6 +27,7 @@ EXPECTED_STEPS = 10
 # historical R3-off 0.00230-0.00271 regime.
 GLM_KL_SAFETY_CEILING = 0.001
 R3_TOKEN_MULT_MEDIAN_CEILING = 1.02
+R3_MAX_SEQ_MULT_CEILING = 1.1
 # R3-on job 3171492 had 4/1,291,712 valid tokens above 0.5 and none above
 # 1.0. The larger SingleController MTP3 run 3240688 had 4/4,237,261 above
 # 1.0, a rate statistically compatible with observing zero in the smaller
