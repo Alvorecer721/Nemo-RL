@@ -1,4 +1,4 @@
-defaults: ../../grpo_math_8B_megatron.yaml
+defaults: ../../../grpo_math_8B_megatron.yaml
 
 # Apertus RL framework benchmark, NeMo RL side (SingleController, non-colocated).
 # Mirrors the verl spec: GSM8K, 96 prompts x 16 samples per step, 768-sample
@@ -116,7 +116,7 @@ data_plane:
   backend: simple
 async_rl:
   sampler:
-    name: ready_first
+    name: windowed
     max_staleness_versions: 8
   recompute_kv_cache_after_weight_updates: false
   min_groups_for_streaming_train: 48
