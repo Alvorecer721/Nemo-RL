@@ -6,6 +6,12 @@ loss_fn:
   truncated_importance_sampling_type: tis
   truncated_importance_sampling_ratio: 2.0
 
+# Safety policy: completed rollouts more than two trainer versions old must
+# never enter an optimizer batch, independent of normal pipeline timing.
+async_rl:
+  sampler:
+    max_staleness_versions: 2
+
 logger:
   wandb:
     name: nemo-rl-70b-tp2pp4-tis2-${oc.env:AP_ANSWER_MARKER,boxed}-seed${oc.env:AP_SEED,42}
