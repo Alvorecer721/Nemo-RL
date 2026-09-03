@@ -11,7 +11,7 @@ eval:
 generation:
   model_name: ${oc.env:AP_CKPT}
   max_new_tokens: 512
-  temperature: 0.0
+  temperature: ${oc.decode:${oc.env:AP_EVAL_TEMPERATURE,0.0}}
   top_p: 1.0
   top_k: -1
   stop_token_ids:
