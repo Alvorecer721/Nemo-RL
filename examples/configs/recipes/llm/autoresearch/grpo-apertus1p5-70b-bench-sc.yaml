@@ -137,7 +137,7 @@ async_rl:
       env_timeout_s: 600
   stall_watchdog:
     interval_s: 30
-    stall_timeout_s: 3600
+    stall_timeout_s: 4200
     stall_action: abort
     gym_subprocess_check: false
   generation_fleet_health:
