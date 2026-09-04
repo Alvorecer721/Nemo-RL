@@ -30,6 +30,7 @@ class GLM51ScaleProfile:
     total_nodes: int
     gpus_per_node: int
     generation_nodes: int
+    generation_gpus_per_node: int
     tensor_parallel_size: int
     pipeline_parallel_size: int
     expert_tensor_parallel_size: int
@@ -59,7 +60,7 @@ class GLM51ScaleProfile:
             * self.pipeline_parallel_size
         )
         vllm_dp = (
-            self.generation_nodes * self.gpus_per_node
+            self.generation_nodes * self.generation_gpus_per_node
         ) // self.vllm_tensor_parallel_size
         return (
             "glm51_sc_scale_config=OK "
@@ -126,6 +127,7 @@ def validate_scale_config(
         total_nodes=config.cluster["num_nodes"],
         gpus_per_node=config.cluster["gpus_per_node"],
         generation_nodes=generation["colocated"]["resources"]["num_nodes"],
+        generation_gpus_per_node=generation["colocated"]["resources"]["gpus_per_node"],
         tensor_parallel_size=megatron["tensor_model_parallel_size"],
         pipeline_parallel_size=megatron["pipeline_model_parallel_size"],
         expert_tensor_parallel_size=megatron["expert_tensor_parallel_size"],
@@ -155,6 +157,11 @@ def validate_scale_config(
             "policy.generation.colocated.resources.num_nodes",
             profile.generation_nodes,
             expected_generation_nodes,
+        ),
+        (
+            "policy.generation.colocated.resources.gpus_per_node",
+            profile.generation_gpus_per_node,
+            4,
         ),
         (
             "policy.megatron_cfg.tensor_model_parallel_size",
@@ -251,7 +258,7 @@ def validate_scale_config(
     for field, actual, expected in checks:
         _require_equal(field, actual, expected)
 
-    generation_ranks = profile.generation_nodes * profile.gpus_per_node
+    generation_ranks = profile.generation_nodes * profile.generation_gpus_per_node
     _require(
         generation_ranks % profile.vllm_tensor_parallel_size == 0,
         "generation GPU count to be divisible by the vLLM tensor parallel size; "

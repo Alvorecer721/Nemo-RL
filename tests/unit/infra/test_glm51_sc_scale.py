@@ -184,6 +184,21 @@ def test_validate_scale_config_rejects_drift(
         _validate_config(config)
 
 
+def test_validate_scale_config_rejects_generation_gpus_per_node_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _load_recipe(monkeypatch, BASE_RECIPE, tmp_path / "glm-5.1")
+    config.policy["generation"]["colocated"]["resources"]["gpus_per_node"] = 3
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "requires policy.generation.colocated.resources.gpus_per_node=4; resolved 3"
+        ),
+    ):
+        _validate_config(config)
+
+
 def test_validate_scale_config_applies_single_controller_contract(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -281,6 +296,20 @@ def test_scale_runner_uses_fail_closed_validator() -> None:
     assert "validate_scale_config(" in preflight
     assert "GLM_EXPECTED_MIN_GROUPS_FOR_STREAMING_TRAIN" in preflight
     assert "\nassert " not in preflight
+
+
+def test_scale_launchers_guard_recursive_submodule_state() -> None:
+    submitter = (
+        REPO_ROOT / "infra/slurm/cscs/autoresearch/submit_glm51_sc_scale.sh"
+    ).read_text()
+    runner = (
+        REPO_ROOT / "infra/slurm/cscs/autoresearch/run_glm51_sc_scale.sh"
+    ).read_text()
+
+    for script in (submitter, runner):
+        assert "--ignore-submodules=untracked" in script
+        assert 'git -C "$REPO_DIR" submodule status --recursive' in script
+    assert "  3rdparty \\\n" in runner
 
 
 def _metrics(steps: int = 10) -> dict[str, dict[str, float]]:

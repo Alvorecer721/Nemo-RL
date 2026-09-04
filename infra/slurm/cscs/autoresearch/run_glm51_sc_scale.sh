@@ -25,8 +25,9 @@ CACHE_METADATA=$(find "$MEGATRON_CACHE" -mindepth 2 -maxdepth 3 -type f -name .m
 [[ -n "$CACHE_METADATA" && -r "$CACHE_METADATA" ]] || { echo "Missing converted Megatron cache: $MEGATRON_CACHE" >&2; exit 1; }
 [[ $(git -C "$REPO_DIR" rev-parse HEAD) == "$EXPECTED_HEAD" ]] || { echo "Source HEAD changed after submission" >&2; exit 1; }
 SOURCE_STATUS=$(git -C "$REPO_DIR" status \
-  --porcelain --untracked-files=no --ignore-submodules=all -- \
+  --porcelain --untracked-files=no --ignore-submodules=untracked -- \
   .gitmodules \
+  3rdparty \
   docker/nemo_rl_vllm0251.toml \
   examples/configs \
   examples/prompts \
@@ -42,6 +43,12 @@ SOURCE_STATUS=$(git -C "$REPO_DIR" status \
   tools/check_r3_trace.py \
   uv.lock)
 [[ -z "$SOURCE_STATUS" ]] || { echo "Tracked source is dirty: $SOURCE_STATUS" >&2; exit 1; }
+SUBMODULE_STATUS=$(git -C "$REPO_DIR" submodule status --recursive)
+INVALID_SUBMODULES=$(printf '%s\n' "$SUBMODULE_STATUS" | awk 'substr($0, 1, 1) == "-" || substr($0, 1, 1) == "+"')
+[[ -z "$INVALID_SUBMODULES" ]] || {
+  echo "Submodules are uninitialized or do not match gitlinks: $INVALID_SUBMODULES" >&2
+  exit 1
+}
 
 mkdir -p "$RUN_ROOT"
 if ! mkdir "$RUN_DIR"; then
