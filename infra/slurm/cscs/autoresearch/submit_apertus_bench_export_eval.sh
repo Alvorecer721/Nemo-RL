@@ -21,6 +21,7 @@ AP_RESERVATION=${AP_RESERVATION-SD-69241-apertus-1-5-0}
 AP_TIME=${AP_TIME:-02:00:00}
 SBATCH_LOG_ROOT=${SBATCH_LOG_ROOT:-$REPO_DIR/.tmp/slurm-logs/apertus-bench-export-eval/$EXPECTED_HEAD}
 SBATCH_BIN=${SBATCH_BIN:-sbatch}
+MCORE_PYTHON=${MCORE_PYTHON:-/opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python}
 
 AP_STEP=${AP_STEP:-}
 STEP_DIR=$(ls -d "$AP_BENCH_RUN_DIR"/checkpoints/step_${AP_STEP:-*} 2>/dev/null | sort -V | tail -1)
@@ -62,10 +63,10 @@ srun --cpu-bind=none --environment=$CONTAINER_ENV --ntasks=1 --gpus-per-task=4 -
   export HF_HOME=/iopsstor/scratch/cscs/xyixuan/.cache/huggingface HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1
   export WANDB_DISABLED=true VLLM_ALLREDUCE_USE_SYMM_MEM=0 VLLM_DISABLE_PYNCCL=1
   if [ ! -r $EXPORT_DIR/model.safetensors.index.json ]; then
+    test -x $MCORE_PYTHON
+    $MCORE_PYTHON -c \"import torch, causal_conv1d_cuda; from megatron.bridge import AutoBridge\"
     rm -rf $EXPORT_DIR
-    export UV=/root/.local/bin/uv; [ -x \$UV ] || UV=/usr/local/bin/uv
-    export UV_PROJECT_ENVIRONMENT=$REPO_DIR/venvs/export-mcore UV_NO_PROGRESS=1
-    \$UV run --locked --extra mcore --directory $REPO_DIR torchrun --nproc-per-node=4 tools/export_megatron_to_hf.py --hf-base $AP_HF_BASE --megatron-ckpt $STEP_DIR/policy/weights --out $EXPORT_DIR --tokenizer $AP_TOKENIZER --tp 4 > $AP_BENCH_RUN_DIR/export.log 2>&1
+    $MCORE_PYTHON -m torch.distributed.run --nproc-per-node=4 tools/export_megatron_to_hf.py --hf-base $AP_HF_BASE --megatron-ckpt $STEP_DIR/policy/weights --out $EXPORT_DIR --tokenizer $AP_TOKENIZER --tp 4 > $AP_BENCH_RUN_DIR/export.log 2>&1
   fi
   export AP_CKPT=$EXPORT_DIR AP_TOKENIZER=$AP_TOKENIZER AP_EVAL_DATA=$AP_EVAL_DATA AP_ANSWER_MARKER=$AP_ANSWER_MARKER
   export AP_RUN_DIR=$AP_BENCH_RUN_DIR/eval-$AP_EVAL_TAG-$AP_ANSWER_MARKER-\$SLURM_JOB_ID
