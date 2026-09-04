@@ -528,6 +528,42 @@ print("xgrammar:", version("xgrammar"))
 print("vLLM 0.25 renderer, tokenization, and tool-parser imports: OK")
 PY
 
+# TE is compiled independently in the Megatron worker environment. Verify the
+# exact MCore pairing and that the Hopper build retained NCCL-EP support.
+enroot start --root --rw "$SQSH_PATH" \
+    /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python - <<'PY'
+import ctypes
+from importlib.metadata import version
+
+import transformer_engine_torch as tex
+from megatron.core.extensions.transformer_engine import TELinear
+from transformer_engine.pytorch import DotProductAttention, GroupedLinear
+from transformer_engine.pytorch.ep import EpBuffer
+
+expected_te = "2.17.1+4329ff84"
+actual_te = version("transformer-engine")
+if actual_te != expected_te:
+    raise RuntimeError(f"Expected Transformer Engine {expected_te}, found {actual_te}")
+
+required_ep_symbols = ("ep_initialize", "ep_finalize", "ep_get_zero_copy")
+missing = [name for name in required_ep_symbols if not hasattr(tex, name)]
+if missing:
+    raise RuntimeError(f"Transformer Engine was built without NCCL-EP symbols: {missing}")
+
+nccl = ctypes.CDLL("libnccl.so.2", mode=ctypes.RTLD_GLOBAL)
+nccl_version = ctypes.c_int()
+if nccl.ncclGetVersion(ctypes.byref(nccl_version)) != 0:
+    raise RuntimeError("ncclGetVersion failed")
+if nccl_version.value < 23004:
+    raise RuntimeError(f"NCCL-EP requires NCCL >=2.30.4, found {nccl_version.value}")
+
+if any(symbol is None for symbol in (TELinear, DotProductAttention, GroupedLinear, EpBuffer)):
+    raise RuntimeError("Required MCore/Transformer Engine APIs are unavailable")
+print("Transformer Engine:", actual_te)
+print("Runtime NCCL:", nccl_version.value)
+print("MCore TE adapters and NCCL-EP symbols: OK")
+PY
+
 echo "SquashFS checksum and size:"
 sha256sum "$SQSH_PATH"
 du -h "$SQSH_PATH"
