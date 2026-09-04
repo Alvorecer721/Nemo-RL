@@ -32,6 +32,7 @@ CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
 RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nrl_vllm0251_smoke_${SLURM_JOB_ID}}
 APERTUS_CKPT=${APERTUS_CKPT:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200}
 APERTUS_TOKENIZER=${APERTUS_TOKENIZER:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official}
+EXPECTED_VLLM_VERSION=${EXPECTED_VLLM_VERSION:-0.25.1}
 
 [[ -r "$CONTAINER_ENV" ]] || {
   echo "Container EDF not found at CONTAINER_ENV=$CONTAINER_ENV" >&2
@@ -54,8 +55,9 @@ srun \
     set -euo pipefail
     unset PYTHONPATH
     export PYTHONUNBUFFERED=1
+    export EXPECTED_VLLM_VERSION='"$EXPECTED_VLLM_VERSION"'
     export HF_HOME=${HF_HOME:-/iopsstor/scratch/cscs/${USER:-$(id -un)}/.cache/huggingface}
-    export VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT:-$HF_HOME/vllm-0.25.1-smoke}
+    export VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT:-$HF_HOME/vllm-${EXPECTED_VLLM_VERSION}-smoke}
     export RUN_LOG='"$RUN_DIR"'/run.log
     export APERTUS_CKPT='"$APERTUS_CKPT"'
     export APERTUS_TOKENIZER='"$APERTUS_TOKENIZER"'

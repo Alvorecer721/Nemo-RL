@@ -83,7 +83,11 @@ def main() -> None:
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
 
-    assert vllm.__version__ == "0.25.1", vllm.__version__
+    expected_vllm_version = os.environ.get("EXPECTED_VLLM_VERSION", "0.25.1")
+    if vllm.__version__ != expected_vllm_version:
+        raise RuntimeError(
+            f"Expected vLLM {expected_vllm_version}, found {vllm.__version__}"
+        )
     tensor_parallel_size = int(os.environ.get("TENSOR_PARALLEL_SIZE", "1"))
     enforce_eager = os.environ.get("ENFORCE_EAGER", "true").lower() == "true"
     num_prompts = int(os.environ.get("PROBE_NUM_PROMPTS", "1"))
@@ -149,7 +153,7 @@ def main() -> None:
     )
     print(f"generated_text={generated.text!r}")
 
-    # Validate the plugin against vLLM 0.25.1 protocol objects in this runtime.
+    # Validate the plugin against the installed vLLM protocol objects.
     from vllm.tool_parsers.abstract_tool_parser import ToolParserManager
 
     from nemo_rl.models.generation.vllm.apertus_tool_parser import ApertusToolParser
