@@ -652,3 +652,85 @@ def test_wire_safe_pickle_is_independent_of_a_patched_storage_loader(monkeypatch
 
     assert b"dummy_unpickler_module" in pickle.dumps(info)
     assert b"dummy_unpickler_module" not in pickle.dumps(wire)
+
+
+# --------------------------------------------------------------------------
+# attention output projection and vocab-parallel params on the bulk path
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("model.layers.0.self_attn.o_proj.weight", True),
+        ("model.language_model.layers.3.self_attn.o_proj.weight", True),
+        ("model.layers.0.self_attn.q_proj.weight", False),
+        ("model.layers.0.self_attn.o_proj.bias", False),
+    ],
+)
+def test_is_nccl_reshard_param_takes_attention_output_projection(name, expected):
+    assert is_nccl_reshard_param(name) is expected
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "model.embed_tokens.weight",
+        "lm_head.weight",
+        "model.language_model.embed_tokens.weight",
+    ],
+)
+def test_is_nccl_reshard_param_vocab_parallel_is_opt_in(name):
+    assert is_nccl_reshard_param(name) is False
+    assert is_nccl_reshard_param(name, include_vocab_parallel=True) is True
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("model.layers.0.self_attn.o_proj.weight", 1),
+        ("model.embed_tokens.weight", 0),
+        ("lm_head.weight", 0),
+        ("model.layers.0.self_attn.q_proj.weight", None),
+    ],
+)
+def test_get_tp_shard_dim_for_attention_output_and_vocab_params(name, expected):
+    assert get_tp_shard_dim(name) == expected
+
+
+def test_get_placements_shards_o_proj_rows_and_vocab_columns():
+    dm = {"tp": 0}
+    assert (
+        _shard_dim_at(get_placements("a.self_attn.o_proj.weight", dm, 2), dm, "tp") == 1
+    )
+    assert (
+        _shard_dim_at(get_placements("model.embed_tokens.weight", dm, 2), dm, "tp") == 0
+    )
+    assert _shard_dim_at(get_placements("lm_head.weight", dm, 2), dm, "tp") == 0
+
+
+@pytest.mark.parametrize(
+    "vocab,padded_vocab,gen_tp,expected",
+    [
+        (266752, 266752, 4, True),  # Apertus 70B: no padding on either side
+        (154880, 155648, 8, False),  # GLM-5.1 at TP8: Megatron padded the vocab
+        (
+            128256,
+            128256,
+            8,
+            False,
+        ),  # 128256 / 8 = 16032 is not a multiple of 64 -> vLLM pads
+        (128256, 128256, 4, True),
+        (32000, 32000, 1, True),
+        (32000, 32000, 7, False),  # not divisible across gen TP
+    ],
+)
+def test_vocab_parallel_bulk_ok_requires_unpadded_shards_on_both_sides(
+    vocab, padded_vocab, gen_tp, expected
+):
+    from nemo_rl.weight_sync.nccl_reshard_utils import vocab_parallel_bulk_ok
+
+    assert (
+        vocab_parallel_bulk_ok(
+            vocab_size=vocab, padded_vocab_size=padded_vocab, gen_tp_size=gen_tp
+        )
+        is expected
+    )

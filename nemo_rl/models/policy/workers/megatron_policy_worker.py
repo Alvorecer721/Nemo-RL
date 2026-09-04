@@ -547,6 +547,7 @@ class MegatronPolicyWorkerImpl(
         self.is_generation_colocated = runtime_config.is_generation_colocated
         self.final_padded_vocab_size = runtime_config.final_padded_vocab_size
         self.sampling_params = runtime_config.sampling_params
+        self._bulk_vocab_parallel = False
 
         self.defer_fp32_logits = self.cfg["megatron_cfg"].get(
             "defer_fp32_logits", None
@@ -2450,12 +2451,15 @@ class MegatronPolicyWorkerImpl(
             yield param_name, scale_tensor
 
     def _iter_local_hf_param_shards(self) -> Iterator[tuple[str, torch.Tensor]]:
-        """Yield (hf_name, local_tp_shard) for this rank's locally owned FFN params.
+        """Yield (hf_name, local_shard_view) for this rank's bulk-path params.
 
         Used by the nccl_reshard_refit bulk path (``build_hf_to_local_param_map``).
-        Only the FFN projections (gate/up/down_proj) take the bulk
-        path, so this yields ONLY those. Others. take the misc packed_broadcast path
-        and are skipped here (see ``is_nccl_reshard_param``).
+        Bridge's per-parameter ``local_hf_param_specs`` contract names the
+        canonical HF views of each local Megatron tensor that can leave the
+        rank without collectives or layout conversion; a mapping that needs
+        conversion (interleaved QKV, transposed or permuted exports) declares
+        no views and stays on the misc packed_broadcast path. The bulk-path
+        whitelist then decides which declared views this transport carries.
 
         Unlike ``_iter_params_with_optional_kv_scales`` (PP broadcast + TP gather
         via ``export_hf_weights``), this yields TP-local shards directly from the
@@ -2464,61 +2468,19 @@ class MegatronPolicyWorkerImpl(
         only this rank's local experts; PP non-local params have
         ``param_weight is None``.
         """
-        from megatron.bridge.models.conversion.param_mapping import (
-            FusedExpertMapping,
-            FusedGatedExpertMapping,
-            GatedMLPMapping,
-        )
-
         from nemo_rl.weight_sync.nccl_reshard_utils import is_nccl_reshard_param
-
-        def _expert_idx(megatron_name: str) -> str:
-            # Grouped-GEMM experts are numbered by the megatron param name
-            m = re.search(r"\d+$", megatron_name)
-            assert m, f"expected trailing expert index in {megatron_name!r}"
-            return m.group()
 
         for task in self.refit_conversion_tasks:
             local_tensor = task.param_weight  # local megatron tensor
             if local_tensor is None:
                 continue  # non-local PP rank
-            # FP8 scale siblings take the misc path.
             if task.global_param_name.endswith("_scale_inv"):
                 continue
-
-            if isinstance(task.mapping, GatedMLPMapping):
-                # FFN gate/up fused in linear_fc1 as [gate_shard; up_shard] (dim 0).
-                gate, up = torch.chunk(local_tensor, 2, dim=0)
-                yield task.mapping.hf_param["gate"], gate
-                yield task.mapping.hf_param["up"], up
-                continue
-
-            if isinstance(task.mapping, FusedGatedExpertMapping):
-                # Grouped-GEMM MoE (e.g. Qwen3.5-VL): linear_fc1 fuses gate+up per
-                # expert [gate; up] (dim 0) — same layout as the dense branch
-                # above, but the hf_param is a single, index-less string.  Un-fuse
-                # into gate/up AND re-attach the per-expert index.
-                idx = _expert_idx(task.global_param_name)
-                prefix = str(task.mapping.hf_param)[: -len(".gate_up_proj")]
-                gate, up = torch.chunk(local_tensor, 2, dim=0)
-                yield f"{prefix}.{idx}.gate_proj.weight", gate
-                yield f"{prefix}.{idx}.up_proj.weight", up
-                continue
-
-            if isinstance(task.mapping, FusedExpertMapping):
-                # Grouped-GEMM down (linear_fc2): re-attach the per-expert index +
-                # ``.weight`` so it matches standard per-expert down_proj.
-                idx = _expert_idx(task.global_param_name)
-                prefix = str(task.mapping.hf_param)[: -len(".down_proj")]
-                yield f"{prefix}.{idx}.down_proj.weight", local_tensor
-                continue
-
-            # Simple 1:1 mappings: only the FFN down_proj (and any non-gated
-            # simple gate/up) hits this branch. QKV (a compound mapping) and
-            # every non-FFN param fall through to misc, so they are skipped.
-            hf_param = task.mapping.hf_param
-            if not isinstance(hf_param, dict) and is_nccl_reshard_param(str(hf_param)):
-                yield str(hf_param), local_tensor
+            for spec in task.local_hf_param_specs():
+                if is_nccl_reshard_param(
+                    spec.name, include_vocab_parallel=self._bulk_vocab_parallel
+                ):
+                    yield spec.name, spec.select(local_tensor)
 
     # ------------------------------------------------------------------
     # SGLang weight update (colocate IPC + disaggregate broadcast)
@@ -2844,7 +2806,14 @@ class MegatronPolicyWorkerImpl(
         assert layer_idx == num_layers, (
             f"Layer assignment incomplete: assigned {layer_idx} of {num_layers}"
         )
-        # Embeddings and the final lm_head are taking misc path, we can ignore them here.
+        from nemo_rl.weight_sync.nccl_reshard_utils import _extract_layer_name
+
+        model_prefix = f"{layer_prefix}." if layer_prefix else ""
+        layer_to_pp_stage[_extract_layer_name(f"{model_prefix}embed_tokens.weight")] = 0
+        layer_to_pp_stage[_extract_layer_name(f"{model_prefix}norm.weight")] = (
+            pp_size - 1
+        )
+        layer_to_pp_stage[_extract_layer_name("lm_head.weight")] = pp_size - 1
         return layer_to_pp_stage
 
     @torch.no_grad()
@@ -2885,9 +2854,13 @@ class MegatronPolicyWorkerImpl(
         # state_dict_metadata[hf_name] -> [shape, dtype]
         # At the same time, filter the params to the misc subset (packed_broadcast path).
         # misc_meta[hf_name] -> [shape, dtype]
+        from megatron.core.utils import unwrap_model
+
         from nemo_rl.weight_sync.nccl_reshard_utils import (
+            VOCAB_PARALLEL_SUFFIXES,
             _extract_layer_name,
             _extract_layer_prefix,
+            vocab_parallel_bulk_ok,
         )
 
         # HF layers whose weights come from Megatron's MTP module. The prefix
@@ -2900,34 +2873,64 @@ class MegatronPolicyWorkerImpl(
 
         layer_prefix = None
         with _meta_tensor_alloc_context():
-            for name, tensor in self._iter_params_with_optional_kv_scales():
-                meta = {
-                    "shape": list(tensor.shape),
-                    "dtype": str(tensor.dtype),
-                }
-                _nbytes = tensor.numel() * tensor.element_size()
-                # Downsized whitelist: only FFN gate/up/down weights take the bulk
-                # nccl-reshard path; everything else -> misc (packed_broadcast).
-                if (
-                    is_nccl_reshard_param(name)
-                    and _extract_layer_name(name) not in mtp_hf_layers_names
-                ):
-                    state_dict_metadata[name] = meta
-                    _xfer_bytes += _nbytes
-                    if layer_prefix is not None:
-                        assert layer_prefix == _extract_layer_prefix(name), (
-                            f"layer_prefix mismatch: {layer_prefix} != {_extract_layer_prefix(name)}"
-                        )
-                    else:  # first param layer_prefix=None
-                        layer_prefix = _extract_layer_prefix(name)
-                else:
-                    misc_meta[name] = meta
-                    _bcast_bytes += _nbytes
+            exported = [
+                (
+                    name,
+                    list(tensor.shape),
+                    str(tensor.dtype),
+                    tensor.numel() * tensor.element_size(),
+                )
+                for name, tensor in self._iter_params_with_optional_kv_scales()
+            ]
+        hf_vocab_sizes = {
+            shape[0]
+            for name, shape, _, _ in exported
+            if name.endswith(VOCAB_PARALLEL_SUFFIXES)
+        }
+        # A tied output head is an alias of the embedding on both sides, so
+        # only untied models carry the two vocab-parallel weights on the bulk path.
+        untied = not getattr(
+            unwrap_model(self.model), "share_embeddings_and_output_weights", True
+        )
+        self._bulk_vocab_parallel = (
+            untied
+            and len(hf_vocab_sizes) == 1
+            and vocab_parallel_bulk_ok(
+                vocab_size=next(iter(hf_vocab_sizes)),
+                padded_vocab_size=self.final_padded_vocab_size,
+                gen_tp_size=gen_parallelism.get("tp_size", 1),
+            )
+        )
+        for name, shape, dtype, _nbytes in exported:
+            meta = {"shape": shape, "dtype": dtype}
+            # Bulk path: FFN gate/up/down, the attention output projection and,
+            # when neither side pads it, the vocab-parallel embedding/output head;
+            # everything else -> misc (packed_broadcast).
+            if (
+                is_nccl_reshard_param(
+                    name, include_vocab_parallel=self._bulk_vocab_parallel
+                )
+                and _extract_layer_name(name) not in mtp_hf_layers_names
+            ):
+                state_dict_metadata[name] = meta
+                _xfer_bytes += _nbytes
+                name_prefix = _extract_layer_prefix(name)
+                if name_prefix is None:
+                    continue
+                if layer_prefix is not None:
+                    assert layer_prefix == name_prefix, (
+                        f"layer_prefix mismatch: {layer_prefix} != {name_prefix}"
+                    )
+                else:  # first layer param
+                    layer_prefix = name_prefix
+            else:
+                misc_meta[name] = meta
+                _bcast_bytes += _nbytes
 
         _gib = 1024**3
         _tot = _xfer_bytes + _bcast_bytes
         print(
-            f"[xferd-payload] ffn_only "
+            f"[xferd-payload] vocab_parallel={self._bulk_vocab_parallel} "
             f"nccl_reshard={_xfer_bytes / _gib:.2f}GiB "
             f"bcast_misc={_bcast_bytes / _gib:.2f}GiB "
             f"total={_tot / _gib:.2f}GiB "
