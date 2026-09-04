@@ -38,11 +38,22 @@ OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 MAX_JOBS=${MAX_JOBS:-4}
 NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS:-90}
-# Clariden's unversioned python3 is Python 3.6, while the repository's
-# fingerprint helper uses modern stdlib/Python syntax. Pin the known host
-# interpreter explicitly so clean sbatch jobs do not depend on an inherited
-# container PATH.
-HOST_PYTHON=${HOST_PYTHON:-/usr/bin/python3.11}
+# The fingerprint helper needs modern Python, while the host interpreter varies
+# across Clariden images. Prefer a system interpreter and fall back to the
+# user's shared Miniconda installation.
+if [[ -z "${HOST_PYTHON:-}" ]]; then
+    for candidate in \
+        /usr/bin/python3.13 \
+        /usr/bin/python3.12 \
+        /usr/bin/python3.11 \
+        "/users/$CSCS_USER/miniconda3/bin/python"; do
+        if [[ -x "$candidate" ]] \
+            && "$candidate" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+            HOST_PYTHON=$candidate
+            break
+        fi
+    done
+fi
 # This Apertus production image is validated with vLLM. Keep TensorRT-LLM an
 # explicit opt-in until its GH200 source build has independent evidence.
 BUILD_TRTLLM=${BUILD_TRTLLM:-0}
@@ -78,10 +89,11 @@ HERMETIC_FINGERPRINT_SHA256=3e3d9dc43114407930cbf7d1626397ab979c5eebfec2b1b0ade2
 PODMAN_STORAGE_BASE=${PODMAN_STORAGE_BASE:-/tmp/nemo-rl-podman-$CSCS_USER-$SLURM_JOB_ID}
 
 cd "$REPO_DIR"
-command -v "$HOST_PYTHON" >/dev/null || {
-    echo "Host Python not found: HOST_PYTHON=$HOST_PYTHON" >&2
+if [[ -z "${HOST_PYTHON:-}" || ! -x "$HOST_PYTHON" ]] \
+    || ! "$HOST_PYTHON" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+    echo "No host Python >=3.11 found; set HOST_PYTHON explicitly." >&2
     exit 1
-}
+fi
 [[ -f docker/Dockerfile ]] || {
     echo "NeMo-RL Dockerfile not found under REPO_DIR=$REPO_DIR" >&2
     exit 1
