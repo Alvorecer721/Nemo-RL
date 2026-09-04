@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #SBATCH --account=infra01
-#SBATCH --job-name=nrl-vllm0251-image
+#SBATCH --job-name=nrl-vllm026-image
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --time=12:00:00
@@ -52,7 +52,7 @@ BUILD_TRTLLM=${BUILD_TRTLLM:-0}
 # script name only when deliberately producing an image that needs the
 # upstream custom-setup layer.
 CUSTOM_SETUP_FNAME=${CUSTOM_SETUP_FNAME-}
-VLLM_VERSION=0.25.1
+VLLM_VERSION=0.26.0
 # Pin the arm64 manifest used on Clariden rather than resolving a mutable NGC
 # tag differently on a later rebuild. Override only when deliberately updating
 # the foundation image.
@@ -503,8 +503,8 @@ from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tool_parsers import utils as tool_parser_utils
 
-if vllm.__version__ != "0.25.1":
-    raise RuntimeError(f"Expected vLLM 0.25.1, found {vllm.__version__}")
+if vllm.__version__ != "0.26.0":
+    raise RuntimeError(f"Expected vLLM 0.26.0, found {vllm.__version__}")
 if any(
     symbol is None
     for symbol in (OnlineRenderer, ServingTokenization, tool_parser_utils.NamespaceTool)
