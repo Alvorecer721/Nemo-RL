@@ -21,7 +21,6 @@ hour three of a run.
 """
 
 import warnings
-from types import SimpleNamespace
 from typing import get_args
 
 import pytest
@@ -29,6 +28,7 @@ from pydantic import ValidationError
 
 from nemo_rl.algorithms.async_utils.staleness_sampler import SamplerConfig
 from nemo_rl.algorithms.grpo import GRPOConfig
+from nemo_rl.algorithms.loss import ClippedPGLossConfig
 from nemo_rl.algorithms.single_controller_utils.config import (
     AsyncRLConfig,
     FleetHealthConfig,
@@ -39,6 +39,10 @@ from nemo_rl.algorithms.single_controller_utils.config import (
     validate_single_controller_config,
 )
 from nemo_rl.algorithms.single_controller_utils.setup import _build_retry_policy
+from nemo_rl.distributed.virtual_cluster import (
+    DEFAULT_GENERATION_ROUTER_PORT_RANGE_HIGH,
+    DEFAULT_GENERATION_ROUTER_PORT_RANGE_LOW,
+)
 
 
 def _all_sampler_names() -> list[str]:
@@ -64,10 +68,11 @@ def _master_config(*, num_prompts_per_step: int = 8, **async_kwargs) -> MasterCo
             num_generations_per_prompt=4,
             skip_reference_policy_logprobs_calculation=False,
         ),
-        policy={"train_global_batch_size": num_prompts_per_step * 4},
-        # The last two are read only on the ready_first branch, which rejects a run
-        # without them before it reaches anything under test here.
-        loss_fn=SimpleNamespace(
+        policy={
+            "train_global_batch_size": num_prompts_per_step * 4,
+            "generation": {"colocated": {"enabled": False}},
+        },
+        loss_fn=ClippedPGLossConfig(
             reference_policy_kl_penalty=0,
             use_importance_sampling_correction=True,
             force_on_policy_ratio=False,
@@ -297,6 +302,39 @@ class TestFleetHealthValidation:
             FleetHealthConfig(on_dead_shard="degrade_and_restore")
 
 
+class TestTheRefitDeadlineIsArmedByDefault:
+    """The deadline is a precondition for recovery, so it may not default to None.
+
+    A shard dying mid-collective leaves every trainer blocked inside NCCL. A Ray actor
+    runs one task at a time, so the rebuild's own ``init_collective`` queues behind that
+    blocked task and never runs -- the recovery wedges and the run ends on the stall
+    watchdog instead. Only the abort releases those ranks.
+
+    With ``None`` as the default, turning fleet health on bought detection and quarantine
+    but no refit recovery, and nothing said so. These tests exist so that reverting the
+    default to None fails loudly rather than silently removing recovery.
+    """
+
+    def test_the_documented_default_is_armed(self):
+        assert AsyncRLConfig().generation_fleet_health.refit_timeout_s == 300.0
+
+    def test_turning_fleet_health_on_does_not_have_to_ask_for_it(self):
+        """The combination that used to be silently non-recovering."""
+        cfg = FleetHealthConfig(enabled=True)
+        assert cfg.refit_timeout_s is not None, (
+            "enabled=True with no deadline is the configuration that advertises recovery "
+            "and cannot perform it"
+        )
+
+    def test_it_clears_a_healthy_refit_by_a_wide_margin(self):
+        """~1.9s measured for a 1.5B model on GB200, so it cannot fire on a slow one."""
+        assert AsyncRLConfig().generation_fleet_health.refit_timeout_s >= 100 * 1.9
+
+    def test_none_still_disarms_it_when_asked_explicitly(self):
+        """The escape hatch stays: an explicit None starts no watchdog thread."""
+        assert FleetHealthConfig(refit_timeout_s=None).refit_timeout_s is None
+
+
 class TestWatchdogVersusRolloutTimeout:
     """The watchdog must outlast EVERY deadline, not just the NeMo-Gym one.
 
@@ -369,8 +407,11 @@ class TestWrongPathFaultToleranceIsRejected:
                 num_generations_per_prompt=4,
                 skip_reference_policy_logprobs_calculation=False,
             ),
-            policy={"train_global_batch_size": 8},
-            loss_fn=SimpleNamespace(reference_policy_kl_penalty=0),
+            policy={
+                "train_global_batch_size": 8,
+                "generation": {"colocated": {"enabled": False}},
+            },
+            loss_fn=ClippedPGLossConfig(reference_policy_kl_penalty=0),
             env={"should_use_nemo_gym": use_nemo_gym},
             # Read by the metric_name check upstream #3429 added to this same
             # validator, which runs before the wrong-path check under test.
@@ -437,14 +478,20 @@ class TestWrongPathFaultToleranceIsRejected:
 
 
 class TestGenerationRouterPortAndTimeoutValidation:
+    def test_default_port_range_uses_the_reserved_router_band(self):
+        cfg = GenerationRouterConfig()
+
+        assert cfg.port_range_low == DEFAULT_GENERATION_ROUTER_PORT_RANGE_LOW
+        assert cfg.port_range_high == DEFAULT_GENERATION_ROUTER_PORT_RANGE_HIGH
+
     def test_a_transposed_port_range_is_rejected(self):
         """Otherwise it surfaces as 'empty range for randrange()' far from the typo."""
         with pytest.raises(ValidationError, match="port_range_low"):
-            GenerationRouterConfig(port_range_low=6099, port_range_high=6000)
+            GenerationRouterConfig(port_range_low=1300, port_range_high=1202)
 
     def test_an_equal_port_range_is_rejected(self):
         with pytest.raises(ValidationError, match="port_range_low"):
-            GenerationRouterConfig(port_range_low=6000, port_range_high=6000)
+            GenerationRouterConfig(port_range_low=1202, port_range_high=1202)
 
     def test_the_connect_timeout_defaults_well_below_the_backend_timeout(self):
         """A handshake to a local vLLM is ms-or-never; the generation is minutes."""
@@ -705,4 +752,86 @@ class TestADropBudgetNeedsASamplerThatStamps:
             sampler={"name": "custom", "target": "my_pkg.samplers:MySampler"},
             rollout_failure={"max_consecutive_dropped_prompts": 2},
         )
+        validate_single_controller_config(cfg)
+
+
+class TestUnsupportedAlgorithmKnobsFailLoudly:
+    @pytest.mark.parametrize(
+        "grpo_override",
+        [
+            {"deduplicate_multimodal_data": True},
+            {"calculate_advantages_on_gpu": True},
+            {"debug_payload_metrics": True},
+        ],
+    )
+    def test_ignored_grpo_knob_is_rejected(self, grpo_override: dict) -> None:
+        cfg = _master_config()
+        cfg.grpo = cfg.grpo.model_copy(update=grpo_override)
+
+        with pytest.raises(
+            NotImplementedError, match="not supported on the SingleController"
+        ):
+            validate_single_controller_config(cfg)
+
+    def test_validation_early_stop_is_rejected(self) -> None:
+        cfg = _master_config()
+        cfg.grpo.stop_at_validation_metric = "accuracy"
+        cfg.grpo.stop_at_validation_threshold = 0.9
+
+        with pytest.raises(
+            NotImplementedError, match="not supported on the SingleController"
+        ):
+            validate_single_controller_config(cfg)
+
+    def test_enabled_legacy_async_block_is_rejected(self) -> None:
+        cfg = _master_config()
+        cfg.grpo.async_grpo = GRPOConfig().async_grpo.model_copy(
+            update={"enabled": True}
+        )
+
+        with pytest.raises(ValueError, match="legacy async loop"):
+            validate_single_controller_config(cfg)
+
+    def _fused_policy(self, **overrides) -> dict:
+        policy = {
+            "train_global_batch_size": 32,
+            "megatron_cfg": {"enabled": True, "use_fused_linear_logprobs": True},
+            "sequence_packing": {"enabled": False},
+            "generation": {
+                "colocated": {"enabled": False},
+                "top_k": None,
+                "top_p": 1.0,
+            },
+        }
+        for key, value in overrides.items():
+            policy[key].update(value)
+        return policy
+
+    def test_fused_logprobs_accept_a_clean_policy(self) -> None:
+        cfg = _master_config()
+        cfg.policy = self._fused_policy()
+
+        validate_single_controller_config(cfg)
+
+    def test_fused_logprobs_reject_sequence_packing(self) -> None:
+        cfg = _master_config()
+        cfg.policy = self._fused_policy(sequence_packing={"enabled": True})
+
+        with pytest.raises(ValueError, match="sequence packing"):
+            validate_single_controller_config(cfg)
+
+    @pytest.mark.parametrize("generation", [{"top_k": 50}, {"top_p": 0.9}])
+    def test_fused_logprobs_reject_training_time_filtering(
+        self, generation: dict
+    ) -> None:
+        cfg = _master_config()
+        cfg.policy = self._fused_policy(generation=generation)
+
+        with pytest.raises(ValueError, match="top-k/top-p"):
+            validate_single_controller_config(cfg)
+
+    def test_disabled_legacy_async_block_is_inert(self) -> None:
+        cfg = _master_config()
+        cfg.grpo.async_grpo = GRPOConfig().async_grpo
+
         validate_single_controller_config(cfg)

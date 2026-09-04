@@ -141,26 +141,48 @@ class RefitBuilderInterface(Protocol):
 # Placement rules (from xferdtensor/src/placement_rules.py)
 # =========================================================================
 
-# FFN column-parallel suffixes: TP shards along dim 0 (output / intermediate).
+# Column-parallel suffixes: TP shards along dim 0 (output / intermediate, or
+# the vocab rows of the embedding and output head).
 COLUMN_PARALLEL_SUFFIXES = ("gate_proj.weight", "up_proj.weight")
-# FFN row-parallel suffix: TP shards along dim 1 (input dimension).
-ROW_PARALLEL_SUFFIXES = ("down_proj.weight",)
+VOCAB_PARALLEL_SUFFIXES = ("embed_tokens.weight", "lm_head.weight")
+# Row-parallel suffixes: TP shards along dim 1 (input dimension).
+ROW_PARALLEL_SUFFIXES = ("down_proj.weight", "o_proj.weight")
+# vLLM pads each TP shard of a vocab-parallel weight to this many rows.
+GEN_VOCAB_PADDING_SIZE = 64
 
 
 def get_tp_shard_dim(param_name: str) -> Optional[int]:
-    """Return the TP shard dim for an FFN weight, or None if not TP-sharded.
+    """Return the TP shard dim for a bulk-path weight, or None if not TP-sharded.
 
-    gate/up are column-parallel (dim 0), down is row-parallel (dim 1).  MoE
-    experts shard on EP not TP, so they return None here — ``get_placements``
+    gate/up and the vocab-parallel embedding/output head are column-parallel
+    (dim 0); down and the attention output projection are row-parallel (dim 1).
+    MoE experts shard on EP not TP, so they return None here — ``get_placements``
     routes experts through ``_get_expert_tp_shard_dim`` instead.
     """
     if ".experts." in param_name:
         return None
-    if param_name.endswith(COLUMN_PARALLEL_SUFFIXES):
+    if param_name.endswith(COLUMN_PARALLEL_SUFFIXES + VOCAB_PARALLEL_SUFFIXES):
         return 0
     if param_name.endswith(ROW_PARALLEL_SUFFIXES):
         return 1
     return None
+
+
+def vocab_parallel_bulk_ok(
+    *, vocab_size: int, padded_vocab_size: int, gen_tp_size: int
+) -> bool:
+    """True iff neither side pads its vocab-parallel shards.
+
+    Megatron's padded vocab is visible as ``padded_vocab_size``; vLLM pads each
+    of its TP shards to a multiple of ``GEN_VOCAB_PADDING_SIZE``. A padded shard
+    is not a canonical HF view, so the embedding and output head can only take
+    the bulk path when both sides are unpadded.
+    """
+    if padded_vocab_size != vocab_size:
+        return False
+    if vocab_size % gen_tp_size:
+        return False
+    return (vocab_size // gen_tp_size) % GEN_VOCAB_PADDING_SIZE == 0
 
 
 def is_expert_param(param_name: str) -> bool:
@@ -183,12 +205,17 @@ FFN_GROUPED_EXPERT_SUFFIXES = (
 )
 
 
-def is_nccl_reshard_param(param_name: str) -> bool:
+def is_nccl_reshard_param(
+    param_name: str, *, include_vocab_parallel: bool = False
+) -> bool:
     """Return True iff the param takes the xferdtensor bulk reshard path.
 
     FFN projection weights take the bulk path: the split ``gate_proj`` /
     ``up_proj`` / ``down_proj`` (dense MLP + per-expert MoE) and the grouped
-    gate-up-fused MoE experts (``experts.gate_up_proj`` / ``experts.down_proj``).
+    gate-up-fused MoE experts (``experts.gate_up_proj`` / ``experts.down_proj``),
+    plus the attention output projection ``o_proj.weight``. The vocab-parallel
+    embedding and output head join only when the caller has verified with
+    ``vocab_parallel_bulk_ok`` that neither side pads them.
     Everything else falls back to the misc packed_broadcast + vLLM
     ``load_weights`` path.
 
@@ -204,8 +231,10 @@ def is_nccl_reshard_param(param_name: str) -> bool:
         return False
     if param_name.startswith("mtp."):
         return False
-    return param_name.endswith(FFN_PROJ_WEIGHT_SUFFIXES) or param_name.endswith(
-        FFN_GROUPED_EXPERT_SUFFIXES
+    if include_vocab_parallel and param_name.endswith(VOCAB_PARALLEL_SUFFIXES):
+        return True
+    return param_name.endswith(
+        FFN_PROJ_WEIGHT_SUFFIXES + FFN_GROUPED_EXPERT_SUFFIXES + ("o_proj.weight",)
     )
 
 
@@ -559,8 +588,14 @@ def _extract_layer_name(param_name: str) -> str:
     return param_name.split(".")[0]
 
 
-def check_nccl_reshard_refit_support(master_config: dict) -> None:
+def check_nccl_reshard_refit_support(master_config: Any) -> None:
     """Validate ``master_config`` against every precondition of nccl_reshard_refit.
+
+    Typed ``Any`` because the annotation was ``dict`` and the body reads
+    ``master_config.policy`` -- attribute access a plain dict does not support. Both
+    callers pass a MasterConfig object (grpo's and the single-controller's are different
+    classes), so there is no one concrete type to name here; what is required is an object
+    exposing ``.policy`` as a mapping.
 
     Collects all violations and raises a single ``ValueError`` listing them, so
     a user fixing their config can address everything in one pass rather than

@@ -13,6 +13,89 @@ Megatron MoE policy training with vLLM rollout generation. Other
 inference/generation backends are not wired into this path and have not been
 tested with Router Replay.
 
+## End-to-end behavior
+
+The expert IDs are the only values replayed. Megatron still evaluates its
+current router scores for those experts, executes its current expert weights,
+and computes gradients normally. This removes the discontinuous backend
+top-k mismatch without freezing the router or copying vLLM probabilities into
+training.
+
+```mermaid
+flowchart LR
+    Refit["Refit the same policy weights"]
+
+    subgraph Rollout["Rollout / behavior policy: vLLM"]
+        VHidden["Token hidden states"]
+        VScores["vLLM router scores"]
+        VTopK["vLLM top-k selection"]
+        VExperts["Selected experts execute"]
+        VLogprobs["generation_logprobs"]
+        VRoutes["routed_experts<br/>token x MoE layer x top-k"]
+
+        VHidden --> VScores --> VTopK --> VExperts --> VLogprobs
+        VTopK --> VRoutes
+    end
+
+    subgraph Transport["NeMo RL rollout payload"]
+        Messages["tokens + masks + generation_logprobs"]
+        Routes["routed_experts<br/>encoded and batch-aligned"]
+        ReplayBuffer["ReplayBuffer or TransferQueue"]
+
+        Messages --> ReplayBuffer
+        Routes --> ReplayBuffer
+    end
+
+    subgraph Alignment["Megatron route preparation"]
+        Decode["Decode route tensor"]
+        ParallelMap["Map global MoE layers to local PP layers<br/>and slice token rows for TP/SP/CP"]
+        Validate{"Every route complete and valid?"}
+        Install["Install expert IDs on each<br/>model-owned RouterReplay instance"]
+        Fallback["All -1 row only:<br/>compute Megatron top-k for that row<br/>and emit fallback telemetry"]
+
+        Decode --> ParallelMap --> Validate
+        Validate -- "yes" --> Install
+        Validate -- "missing sentinel" --> Fallback --> Install
+    end
+
+    subgraph Training["Policy backend: Megatron"]
+        MWeights["Current Megatron policy weights"]
+        MScores["Current Megatron router scores"]
+        FixedTopK["Use replayed expert IDs<br/>instead of a new top-k decision"]
+        Gather["Gather current scores for<br/>the replayed experts"]
+        Prev["Prev-logprob forward"]
+        PrevLP["prev_logprobs"]
+        Train["Training forward"]
+        Loss["GRPO loss / importance ratio"]
+        Backward["Backward or activation recomputation<br/>replays the same expert IDs"]
+        Update["Update router and expert parameters"]
+
+        MWeights --> MScores --> FixedTopK --> Gather
+        Gather --> Prev --> PrevLP
+        Gather --> Train --> Loss --> Backward --> Update
+        Install --> FixedTopK
+        FixedTopK --> Backward
+    end
+
+    Refit --> VHidden
+    Refit --> MWeights
+    VLogprobs --> Messages
+    VRoutes --> Routes
+    ReplayBuffer --> Decode
+    VLogprobs --> Compare["Generation-KL and<br/>token probability-error metrics"]
+    PrevLP --> Compare
+
+    Independent["Without R3: Megatron independently<br/>selects top-k; a boundary tie can choose<br/>different experts despite matched weights"]
+    MScores -. "R3 disabled" .-> Independent -. "artificial mismatch" .-> Compare
+```
+
+The route tensor follows the generated tokens through the same packing and
+transport transformations as the logprobs. Before a Megatron forward, NeMo RL
+maps its global layer axis to the model's local pipeline stages and its token
+axis to the relevant parallel shard. A missing route is represented only by an
+all-`-1` sentinel row; that row falls back to Megatron's ordinary top-k while
+the rest of the batch continues to replay vLLM's routes.
+
 ## Configuration
 
 Set `policy.router_replay.enabled=true` in the training config:

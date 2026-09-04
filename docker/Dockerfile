@@ -73,6 +73,7 @@ apt-get install -y --no-install-recommends \
     less \
     vim \
     ccache \
+    protobuf-compiler \
 
 # Nsight
 apt install -y --no-install-recommends gnupg
@@ -106,6 +107,13 @@ RUN GITHUB_ARTIFACTORY=github.com \
     && tar -xzf "${CMAKE_ARCHIVE}" -C /usr/local --strip-components=1 \
         "${CMAKE_INSTALLER}/bin" "${CMAKE_INSTALLER}/share" \
     && rm -f "${CMAKE_ARCHIVE}"
+
+# Rust toolchain for setuptools-rust extensions in SGLang.
+ENV PATH="/root/.cargo/bin:$PATH"
+RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal \
+    && rustc --version \
+    && cargo --version
 
 # Install uv and python
 ARG UV_VERSION=0.11.28
@@ -177,6 +185,10 @@ ARG TRTLLM_BUILD_JOBS=24
 
 ENV UV_PROJECT_ENVIRONMENT=/opt/nemo_rl_venv
 ENV UV_LINK_MODE=copy
+# Registry downloads are retried by uv, but Git dependencies are fetched by
+# Git itself. Keep one bounded outer retry for transient GitHub failures.
+ENV UV_HTTP_RETRIES=10
+ENV UV_HTTP_TIMEOUT=60
 
 # Ensure DeepEP is built for H100 and B200 (also mcore inference unified memory API now invokes a torch API that requires these to be set)
 ENV TORCH_CUDA_ARCH_LIST="9.0 10.0"
@@ -197,7 +209,12 @@ ENV CPLUS_INCLUDE_PATH=/usr/local/cuda/include/cccl
 # Verify with: python -c "import transformer_engine.pytorch as te; print(te.get_cudnn_version())"
 ENV CUDNN_HOME=/opt/nemo_rl_venv/lib/python3.13/site-packages/nvidia/cudnn
 ENV CUDNN_PATH=/opt/nemo_rl_venv/lib/python3.13/site-packages/nvidia/cudnn
-ENV LD_LIBRARY_PATH="/opt/nemo_rl_venv/lib/python3.13/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}"
+# TileLang's $ORIGIN-relative RUNPATH breaks when uv installs worker venvs in
+# symlink mode: libtvm_compiler.so resolves into TileLang's cache directory and
+# cannot find libz3.so in Z3's separate cache directory.
+# TODO: Remove this workaround once the upstream issue is resolved.
+# See https://github.com/tile-ai/tilelang/issues/3075
+ENV LD_LIBRARY_PATH="/opt/nemo_rl_venv/lib/python3.13/site-packages/z3/lib:/opt/nemo_rl_venv/lib/python3.13/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}"
 
 # First copy only the dependency files
 COPY --from=nemo-rl pyproject.toml uv.lock ./
@@ -205,6 +222,7 @@ COPY --from=nemo-rl pyproject.toml uv.lock ./
 COPY --from=nemo-rl nemo_rl/__init__.py nemo_rl/package_info.py ./nemo_rl/
 COPY --from=nemo-rl tools/build-custom-vllm.sh ./tools/build-custom-vllm.sh
 COPY --from=nemo-rl tools/build-custom-flashinfer.sh ./tools/build-custom-flashinfer.sh
+COPY --from=nemo-rl tools/uv-sync-retry.sh ./tools/uv-sync-retry.sh
 COPY --from=nemo-rl --link research/ ./research/
 COPY --from=nemo-rl --link \
     --exclude=TensorRT-LLM-workspace \
@@ -212,6 +230,7 @@ COPY --from=nemo-rl --link \
     3rdparty/ ./3rdparty/
 
 RUN --mount=type=ssh \
+    --mount=type=secret,id=git_credentials \
     --mount=type=bind,from=uv-cache-seed,source=.,target=/tmp/uv-cache-seed <<"EOF" bash -exu
 CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}" | md5sum | cut -c1-12)
 SEED_KEY=$(cat /tmp/uv-cache-seed/.cache-key 2>/dev/null || echo "")
@@ -239,62 +258,62 @@ fi
 # Install the common environment first. Later backend-specific syncs use
 # disposable environments so their conflicting package sets warm the uv cache
 # without bloating image layers.
-UV_LINK_MODE=hardlink uv sync --frozen --no-install-project
+UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --no-install-project
 EOF
 
 # Commit backend cache additions independently. This bounds the mutable overlay
 # Podman must snapshot at once and makes expensive native builds reusable after
 # an interrupted build.
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
     source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
     uv venv --seed /tmp/nemo-rl-warm-vllm
     UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
-        uv sync --frozen --no-install-project
+        bash tools/uv-sync-retry.sh --frozen --no-install-project
     UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
-        uv sync --frozen --extra vllm --no-install-project
+        bash tools/uv-sync-retry.sh --frozen --extra vllm --no-install-project
     rm -rf /tmp/nemo-rl-warm-vllm
 fi
 EOF
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
     uv venv --seed /tmp/nemo-rl-warm-sglang
     UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
-        uv sync --frozen --no-install-project
+        bash tools/uv-sync-retry.sh --frozen --no-install-project
     UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
-        uv sync --frozen --extra sglang --no-install-project
+        bash tools/uv-sync-retry.sh --frozen --extra sglang --no-install-project
     rm -rf /tmp/nemo-rl-warm-sglang
 fi
 EOF
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 uv venv --seed /tmp/nemo-rl-warm-mcore
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
-    uv sync --frozen --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --no-install-project
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
-    uv sync --frozen --extra mcore --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --extra mcore --no-install-project
 rm -rf /tmp/nemo-rl-warm-mcore
 EOF
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 uv venv --seed /tmp/nemo-rl-warm-automodel
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
-    uv sync --frozen --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --no-install-project
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
-    uv sync --frozen --extra automodel --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --extra automodel --no-install-project
 rm -rf /tmp/nemo-rl-warm-automodel
 EOF
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 uv venv --seed /tmp/nemo-rl-warm-modelopt
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
-    uv sync --frozen --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --no-install-project
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
-    uv sync --frozen --extra modelopt --no-install-project
+    bash tools/uv-sync-retry.sh --frozen --extra modelopt --no-install-project
 rm -rf /tmp/nemo-rl-warm-modelopt
 EOF
 
 # Assemble the image's actual project environment from the now-warm cache.
-RUN <<"EOF" bash -exu
+RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
-uv sync --link-mode symlink --frozen --all-groups --no-install-project
+bash tools/uv-sync-retry.sh --link-mode symlink --frozen --all-groups --no-install-project
 
 # Remove the aiohttp in this uv cache dir to fully address CVE GHSA-mqqc-3gqh-h2x8
 # The ray install will include the older aiohttp version in its cache
@@ -385,10 +404,16 @@ ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
 # Custom setup layer (override with: --build-context custom-setup=<dir> --build-arg CUSTOM_SETUP_FNAME=<script>)
 # To skip: --build-arg CUSTOM_SETUP_FNAME=
 ARG CUSTOM_SETUP_FNAME=install_apptainer.sh
-RUN --mount=from=custom-setup,src=/,dst=/tmp/custom-setup <<"EOF" bash -exu
+RUN --mount=from=custom-setup,src=/,dst=/tmp/custom-setup --mount=type=secret,id=APPTAINER_GITHUB_TOKEN <<"EOF" bash -exu
 if [[ -z "${CUSTOM_SETUP_FNAME}" ]]; then
     echo "CUSTOM_SETUP_FNAME is empty, skipping custom setup"
     exit 0
+fi
+if [[ -r /run/secrets/APPTAINER_GITHUB_TOKEN ]]; then
+    set +x
+    GITHUB_TOKEN=$(cat /run/secrets/APPTAINER_GITHUB_TOKEN)
+    export GITHUB_TOKEN
+    set -x
 fi
 cp /tmp/custom-setup/${CUSTOM_SETUP_FNAME} /opt/${CUSTOM_SETUP_FNAME}
 bash -x /opt/${CUSTOM_SETUP_FNAME}
@@ -396,13 +421,7 @@ EOF
 
 WORKDIR /opt/nemo-rl
 
-FROM hermetic AS release
-
-# Release-stage venv materialization should normally be cache-only, but direct
-# wheel sources can still be fetched if a prior warm was interrupted. Tolerate
-# transient registry/GitHub HTTP failures without publishing a partial image.
-ENV UV_HTTP_RETRIES=10
-ENV UV_HTTP_TIMEOUT=60
+FROM hermetic AS release-core
 
 # Re-declare build args for this stage
 ARG SKIP_VLLM_BUILD
@@ -464,14 +483,11 @@ EOF
 # Potentially not necessary if the repo is passed in as a complete repository (w/ full git history),
 # so do a quick check before trying to unshallow.
 RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
-# Commit the frozen Ray environments in bounded groups. A single layer for all
-# workers temporarily requires Podman to hold the working tree, compressed
-# blob, and unpacked result at once, which exceeds Clariden's node-local tmpfs.
-# The larger training and utility environments are committed one actor at a
-# time: even the five-environment DTensor group exceeds the temporary space
-# available while Podman packs and then unpacks a cache layer. Positive filters
-# match actor FQNs and retain every non-system environment in the current actor
-# registry.
+# Commit the frozen Ray environments in bounded groups. One layer for every
+# worker exceeds Clariden's node-local graph, while one layer per actor creates
+# too many cumulative snapshots. Groups of at most four fit both constraints.
+# Positive filters match actor FQNs and retain every non-system environment in
+# the current actor registry.
 RUN <<"EOF" bash -exu
 if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
     UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs vllm
@@ -496,28 +512,33 @@ if [[ -z "${SKIP_TRTLLM_BUILD:-}" ]]; then
 fi
 EOF
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_policy_worker.DTensorPolicyWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_policy_worker_v2.DTensorPolicyWorkerV2
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    dtensor_policy_worker.DTensorPolicyWorker \
+    dtensor_policy_worker_v2.DTensorPolicyWorkerV2 \
     dtensor_value_worker_v2.DTensorValueWorkerV2
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_quant_policy_worker.DTensorQuantPolicyWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    megatron_policy_worker.MegatronPolicyWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    megatron_value_worker.MegatronValueWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    dtensor_quant_policy_worker.DTensorQuantPolicyWorker \
+    dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2 \
     megatron_quant_policy_worker.MegatronQuantPolicyWorker
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    async_utils.AsyncTrajectoryCollector
+    megatron_policy_worker.MegatronPolicyWorker \
+    megatron_value_worker.MegatronValueWorker
+
+# CSCS finalizes this stage from a fresh allocation-local Podman graph. Keeping
+# the control/Gym environments in one last delta avoids retaining every build
+# cache candidate while that delta is packed and unpacked.
+FROM release-core AS release
+
+ARG NEMO_GYM_PREFETCH_CONFIGS=
+ARG NEMO_GYM_CUDA=cu130
+ARG NEMO_GYM_VLLM_VERSION=0.24.0
+ARG NEMO_RL_BUILD_FINGERPRINT_B64
+ARG RC_DATE=00.00
+ARG TARGETARCH
+
 RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    async_utils.ReplayBuffer
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    sync_rollout_actor.SyncRolloutActor
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
+    async_utils.AsyncTrajectoryCollector \
+    async_utils.ReplayBuffer \
+    sync_rollout_actor.SyncRolloutActor \
     nemo_gym.NemoGym
 
 # Prefetch NeMo Gym internal venvs (gym servers like code_gen, math_with_judge, etc.)
@@ -525,8 +546,6 @@ RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs
 # source COPY above so examples/nemo_gym/prefetch_venvs.py is present.
 # Gym pins vllm==0.24.0; override it to vLLM's default prebuilt CUDA wheel so Gym's venvs share
 # RL's torch/nvidia stack. UV_TORCH_BACKEND keeps torch on the same CUDA backend.
-ARG NEMO_GYM_CUDA=cu130
-ARG NEMO_GYM_VLLM_VERSION=0.24.0
 RUN <<"EOF" bash -exu
 if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
     case "${TARGETARCH:-amd64}" in arm64) WHEEL_ARCH=aarch64 ;; *) WHEEL_ARCH=x86_64 ;; esac
@@ -545,9 +564,13 @@ EOF
 # Remote/default builds retain the existing in-container fallback.
 RUN if [[ -n "${NEMO_RL_BUILD_FINGERPRINT_B64:-}" ]]; then \
         printf '%s' "${NEMO_RL_BUILD_FINGERPRINT_B64}" \
-            | base64 -d > /opt/nemo_rl_container_fingerprint; \
+            | base64 -d \
+            | tee /opt/nemo_rl_container_fingerprint \
+                > /opt/nemo-rl/.nemo_rl_source_fingerprint.json; \
     else \
-        python tools/generate_fingerprint.py > /opt/nemo_rl_container_fingerprint; \
+        python tools/generate_fingerprint.py \
+            | tee /opt/nemo_rl_container_fingerprint \
+                > /opt/nemo-rl/.nemo_rl_source_fingerprint.json; \
     fi
 
 # NOTICES.txt file points to where the OSS source code is archived

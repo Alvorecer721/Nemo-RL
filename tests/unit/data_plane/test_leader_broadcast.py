@@ -29,6 +29,15 @@ from nemo_rl.data_plane.worker_mixin import _broadcast_batched_data_dict
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
 
+def _noncontiguous_int16_routes() -> torch.Tensor:
+    routes = torch.tensor(
+        [[[-1, -1], [127, 128]], [[255, 256], [1024, 32767]]],
+        dtype=torch.int16,
+    ).transpose(0, 1)
+    assert not routes.is_contiguous()
+    return routes
+
+
 def _worker(rank: int, world_size: int, tmp_init_file: str, q):
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["RANK"] = str(rank)
@@ -45,6 +54,7 @@ def _worker(rank: int, world_size: int, tmp_init_file: str, q):
                 {
                     "input_ids": torch.arange(12, dtype=torch.long).reshape(3, 4),
                     "input_lengths": torch.tensor([4, 3, 2], dtype=torch.int32),
+                    "routed_experts": _noncontiguous_int16_routes(),
                     "scalar_meta": "step_42",
                 }
             )
@@ -61,6 +71,11 @@ def _worker(rank: int, world_size: int, tmp_init_file: str, q):
         assert torch.equal(
             out["input_lengths"], torch.tensor([4, 3, 2], dtype=torch.int32)
         )
+        assert torch.equal(
+            out["routed_experts"],
+            _noncontiguous_int16_routes(),
+        )
+        assert out["routed_experts"].dtype == torch.int16
         assert out["scalar_meta"] == "step_42"
         q.put((rank, "ok"))
     except Exception as e:  # pragma: no cover — surface failures to parent
@@ -99,3 +114,27 @@ def test_get_replica_group_default_is_none():
         pass
 
     assert _Stub()._get_replica_group() is None
+
+
+def _nccl_int16_worker(rank: int, world_size: int) -> None:
+    if rank == 0:
+        data = BatchedDataDict({"routed_experts": _noncontiguous_int16_routes()})
+    else:
+        data = None
+
+    out = _broadcast_batched_data_dict(
+        data,
+        is_leader=(rank == 0),
+        src=0,
+        group=dist.group.WORLD,
+    )
+
+    expected = _noncontiguous_int16_routes()
+    assert out["routed_experts"].device.type == "cpu"
+    assert out["routed_experts"].dtype == torch.int16
+    assert torch.equal(out["routed_experts"], expected)
+
+
+def test_leader_broadcast_int16_round_trip_nccl(distributed_test_runner):
+    """NCCL byte transport handles non-contiguous Router Replay routes."""
+    distributed_test_runner(_nccl_int16_worker, world_size=2, backend="nccl")

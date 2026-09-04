@@ -15,7 +15,8 @@
 
 Mix into a worker class to add per-rank TQ-mediated entrypoints
 (:meth:`train_presharded`, :meth:`get_logprobs_presharded`,
-:meth:`get_reference_policy_logprobs_presharded`) without touching
+:meth:`get_reference_policy_logprobs_presharded`, and the frozen-teacher
+variant) without touching
 ``BasePolicyWorker``. Subclasses that don't need TQ keep their bare
 inheritance and stay zero-cost.
 
@@ -43,6 +44,10 @@ from nemo_rl.data_plane.schema import (
 )
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict, SequencePackingArgs
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
+from nemo_rl.utils.packed_tensor import (
+    restore_tensor_from_bytes,
+    tensor_to_contiguous_bytes,
+)
 from nemo_rl.utils.r3_trace import trace_tq_fetch_payload
 
 if TYPE_CHECKING:
@@ -62,8 +67,11 @@ def _broadcast_batched_data_dict(
     Two-phase to avoid pickling tensor payloads on the hot path: a small
     descriptor (per-key dtype/shape) ships via ``broadcast_object_list``
     first, then each tensor's data ships via ``broadcast`` on its
-    current device. The leader supplies ``data``; non-leaders pass
-    ``None`` and get an empty BatchedDataDict filled in-place.
+    current device. The Torch 2.11 Gloo and NCCL process groups do not support
+    ``torch.int16``, so those tensors ride the collective as an exact byte view
+    and are reconstructed without changing their logical dtype. The leader
+    supplies ``data``; non-leaders pass ``None`` and get an empty
+    BatchedDataDict filled in-place.
     """
     # NCCL groups can only broadcast CUDA tensors; pick the broadcast
     # device from the group backend so CPU TQ outputs are moved to GPU
@@ -76,8 +84,21 @@ def _broadcast_batched_data_dict(
         descriptor: list[Any] = []
         for k, v in data.items():
             if isinstance(v, torch.Tensor):
+                byte_wire = v.dtype == torch.int16
+                wire_dtype = torch.uint8 if byte_wire else v.dtype
+                wire_shape = (
+                    (v.numel() * v.element_size(),) if byte_wire else tuple(v.shape)
+                )
                 descriptor.append(
-                    (k, "tensor", str(v.dtype), tuple(v.shape), str(v.device))
+                    (
+                        k,
+                        "tensor",
+                        str(v.dtype),
+                        tuple(v.shape),
+                        str(v.device),
+                        str(wire_dtype),
+                        wire_shape,
+                    )
                 )
             else:
                 descriptor.append((k, "raw", v))
@@ -96,23 +117,27 @@ def _broadcast_batched_data_dict(
         kind = entry[1]
         if kind == "tensor":
             dtype_str, shape, src_device = entry[2], entry[3], entry[4]
+            wire_dtype_str, wire_shape = entry[5], entry[6]
+            dtype = getattr(torch, dtype_str.split(".")[-1])
+            wire_dtype = getattr(torch, wire_dtype_str.split(".")[-1])
             if is_leader:
-                tensor = out[key]
-                if tensor.device.type != torch.device(bcast_device).type:
+                source_tensor = out[key]
+                tensor = source_tensor
+                if tensor.dtype != wire_dtype:
+                    tensor = tensor_to_contiguous_bytes(
+                        tensor, device=bcast_device
+                    ).reshape(wire_shape)
+                elif tensor.device.type != torch.device(bcast_device).type:
                     tensor = tensor.to(bcast_device)
-                    out[key] = tensor
             else:
-                dtype = getattr(torch, dtype_str.split(".")[-1])
-                tensor = torch.empty(shape, dtype=dtype, device=bcast_device)
-                out[key] = tensor
+                tensor = torch.empty(wire_shape, dtype=wire_dtype, device=bcast_device)
             torch.distributed.broadcast(tensor, src=src, group=group)
-            # Restore non-leader tensors to the leader's source device
-            # so downstream code sees the same layout pre-broadcast.
-            if (
-                not is_leader
-                and torch.device(src_device).type != torch.device(bcast_device).type
-            ):
-                out[key] = tensor.to(src_device)
+            if not is_leader:
+                if tensor.dtype != dtype:
+                    tensor = restore_tensor_from_bytes(tensor, shape, dtype)
+                if torch.device(src_device).type != torch.device(bcast_device).type:
+                    tensor = tensor.to(src_device)
+                out[key] = tensor
         else:
             if not is_leader:
                 out[key] = entry[2]
@@ -522,6 +547,66 @@ class TQWorkerMixin:
             result,
             result_key="reference_logprobs",
             tq_field="reference_policy_logprobs",
+        )
+        del result
+
+    @wrap_with_nvtx_name("policy_worker/get_teacher_logprobs_presharded")
+    def get_teacher_logprobs_presharded(
+        self,
+        meta: "KVBatchMeta",
+        micro_batch_size: Optional[int] = None,
+    ) -> None:
+        """Per-rank frozen-teacher logprob entrypoint for SingleController MOPD."""
+        data = self._fetch(meta)
+        cfg = getattr(self, "cfg", {})
+        batching_enabled = bool(
+            cfg.get("sequence_packing", {}).get("enabled", False)
+            or cfg.get("dynamic_batching", {}).get("enabled", False)
+        )
+        extra = meta.extra_info or {}
+        if batching_enabled and not (
+            MICRO_BATCH_INDICES in extra and MICRO_BATCH_LENGTHS in extra
+        ):
+            raise RuntimeError(
+                "SingleController teacher batching requires driver-provided global "
+                "micro_batch_indices and micro_batch_lengths; local worker planning "
+                "can desynchronize data-parallel collectives."
+            )
+        data = self._attach_or_repack_pack_metadata(data, meta)
+        result: BatchedDataDict[Any] = self.get_logprobs(  # type: ignore[attr-defined]
+            data=data,
+            micro_batch_size=micro_batch_size,
+        )
+        self._write_back_result_field(
+            meta,
+            result,
+            result_key="logprobs",
+            tq_field="teacher_reference_logprobs",
+        )
+        del result
+
+    @wrap_with_nvtx_name("value_worker/get_values_presharded")
+    def get_values_presharded(
+        self,
+        meta: "KVBatchMeta",
+        micro_batch_size: Optional[int] = None,
+    ) -> None:
+        """Per-rank value-forward entrypoint. Fetch → packing prep → run → write back.
+
+        Same contract as get_logprobs_presharded, and only the value workers
+        mix it in: only the PPO critic implements get_values.
+        """
+        data = self._fetch(meta)
+        data = self._attach_or_repack_pack_metadata(data, meta)
+        result: BatchedDataDict[Any] = self.get_values(  # type: ignore[attr-defined]
+            data=data,
+            micro_batch_size=micro_batch_size,
+        )
+        self._write_back_result_field(
+            meta,
+            result,
+            result_key="values",
+            tq_field="values",
         )
         del result
 

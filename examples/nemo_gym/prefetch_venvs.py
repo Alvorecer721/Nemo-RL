@@ -51,6 +51,7 @@ def prefetch_nemo_gym_venvs(config_paths: list[str]) -> None:
     nemo_gym_runtime_env = make_actor_runtime_env(
         "nemo_rl.environments.nemo_gym.NemoGym"
     )
+    nemo_gym_runtime_env["env_vars"]["UV_LINK_MODE"] = "hardlink"
 
     succeeded = []
     failed = []

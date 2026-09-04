@@ -1,0 +1,19 @@
+defaults: ./grpo-glm5.1-136n4g-megatron-tp2pp18ep16-ready-first.yaml
+
+# Release training after at least eight of the step's sixteen prompt groups are
+# ready. The optimizer step still consumes all sixteen groups (128 trajectories);
+# this changes only generation/training overlap. Keep fused logprobs enabled in
+# both stream8 variants so MTP3 is the only difference in the matched pair.
+async_rl:
+  min_groups_for_streaming_train: 8
+
+policy:
+  megatron_cfg:
+    use_fused_linear_logprobs: true
+    fused_linear_logprobs_chunk_size: 256
+    distributed_data_parallel_config:
+      overlap_param_gather: false
+
+logger:
+  wandb:
+    name: glm51-r3-ready-first-136n-tp2-vllm-dp8-stream8-fused

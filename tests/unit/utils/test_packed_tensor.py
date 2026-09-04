@@ -20,6 +20,8 @@ import torch
 from nemo_rl.utils.packed_tensor import (
     packed_broadcast_consumer,
     packed_broadcast_producer,
+    restore_tensor_from_bytes,
+    tensor_to_contiguous_bytes,
 )
 
 
@@ -51,6 +53,28 @@ class MockConsumerCommunicationGroup:
             self.current_index += 1
 
 
+def test_byte_helpers_restore_noncontiguous_tensor_and_scalar():
+    routes = torch.tensor(
+        [[[-1, -1], [127, 128]], [[255, 256], [1024, 32767]]],
+        dtype=torch.int16,
+    ).transpose(0, 1)
+    assert not routes.is_contiguous()
+
+    route_bytes = tensor_to_contiguous_bytes(routes)
+    assert route_bytes.dtype == torch.uint8
+    assert route_bytes.is_contiguous()
+    restored_routes = restore_tensor_from_bytes(route_bytes, routes.shape, routes.dtype)
+    assert torch.equal(restored_routes, routes)
+
+    scalar = torch.tensor(42.0, dtype=torch.bfloat16)
+    scalar_bytes = tensor_to_contiguous_bytes(scalar)
+    restored_scalar = restore_tensor_from_bytes(
+        scalar_bytes, scalar.shape, scalar.dtype
+    )
+    assert restored_scalar.shape == torch.Size([])
+    assert torch.equal(restored_scalar, scalar)
+
+
 def create_mock_model_params():
     """Create mock model parameters for testing."""
     params = [
@@ -71,7 +95,13 @@ def create_mock_state_dict_info(params):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_packed_broadcast_producer_consumer_roundtrip():
+@pytest.mark.parametrize(
+    ("producer_num_buffers", "consumer_num_buffers"),
+    [(None, None), (2, 1)],
+)
+def test_packed_broadcast_producer_consumer_roundtrip(
+    producer_num_buffers, consumer_num_buffers
+):
     """Test that producer and consumer work together correctly."""
     # Create mock parameters
     params = create_mock_model_params()
@@ -97,6 +127,7 @@ def test_packed_broadcast_producer_consumer_roundtrip():
             group=producer_group,
             src=0,
             post_iter_func=post_iter_func,
+            num_buffers=producer_num_buffers,
         )
 
         # Now test consumer with the broadcasted tensors
@@ -124,6 +155,7 @@ def test_packed_broadcast_producer_consumer_roundtrip():
             group=consumer_group,
             src=0,
             post_unpack_func=post_unpack_func,
+            num_buffers=consumer_num_buffers,
         )
 
     # Verify all parameters were unpacked

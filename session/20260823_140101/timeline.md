@@ -78,3 +78,47 @@
 - Merged PR #26 as `c85af58d9aa815504e006e736df6dc16042ee76c`. The merge tree is byte-identical to tested head `12c16cb23af3d1e1548a3d3bd22074558dd4ae33`; local `main` is clean and level with `origin/main`.
 - Proved clean public MCore reachability by fetching `9c82d4ca` into an empty repository directly from the Bridge-recorded NVIDIA URL. Removed the two clean NeMo task worktrees and restored the exact submodule pins in the sole remaining main checkout.
 - Reverified the preserved TP2 checkpoint under `step_1/policy/weights/iter_0000000`: 288 `.distcp` shards totaling 8,946,006,731,964 bytes, 35,338,056-byte `.metadata`, and three small control files. No reservation, checkpoint, or conversion-cache mutation was issued.
+
+## 2026-08-24 09:28 CEST
+
+- User requested deeper analysis of the `0.0027` GLM generation KL and a ten-step run rather than relying on one checkpoint step.
+- Recovered the ten-step R3-off body from job `3147936`. Per-step KL ranged from `0.0022966` to `0.0027089` with mean about `0.00250`; however, token-multiplicative-error tails were severe. Applying both token and sample loss masks leaves 3,858,221 valid tokens: 7,873 had `abs(delta log p) > 0.5`, 570 exceeded `1.0`, and the maximum reached `37.7257`.
+- Decision: run a fresh TP2 ten-step R3-on experiment from the merged stack, not from the route-less saved replay buffer. Gate average metrics, tail metrics, route trace integrity, learning signal and clean finalization; disable checkpointing and preserve the complete checkpoint and reservation.
+
+## 2026-08-24 11:16 CEST
+
+- Job `3171492` completed ten TP2/PP18/EP16 legacy-async GRPO steps with TP32/EP32 vLLM and Router Replay enabled. Per-step generation KL was `0.0003615-0.0004061` (mean `0.0003876`), versus the R3-off control mean `0.00250`.
+- Direct masked-token evidence improved from 7,873 errors above `0.5`, 570 above `1.0`, and maximum `37.7` in the control to four above `0.5`, zero above `1.0`, and maximum `0.676` across 1,291,712 valid tokens.
+- Only five steps carried learning signal. Response truncation was `94.5-100%` per step under the 1536-total / 1024-new-token envelope; the next experiment will use 2048 total / 1536 new tokens and retain the strict eight-of-ten signal gate.
+- The training process printed `Async GRPO training complete!`; the wrapper failed afterward because its trace checker assumed the SingleController/TransferQueue event schema. The legacy async path correctly emitted Router Replay assignment/action/forward-verification and CP-identity records but no TransferQueue producer/fetch records. This is a harness contract bug, not a model or training failure.
+- A broader path audit is in progress before the rerun: make the trace transport contract explicit and reject unsupported legacy-async plus data-plane configurations before expensive setup.
+
+## 2026-08-24 publication preparation
+
+- Implemented explicit `legacy-async` and `transfer-queue` Router Replay trace contracts. Legacy async now rejects TransferQueue records, while the SingleController contract requires producer/fetch integrity and every expected forward stage.
+- Centralized test-suite completion handling so direct/final runs require `train/loss` through `MAX_STEPS`, chained intermediate runs remain valid, and original nonzero exit codes are preserved. GLM artifacts are now isolated by Slurm job ID to prevent stale evidence reuse.
+- Strengthened the next GLM gate to 2048 total / 1536 generated tokens, at least eight learning-signal and nonzero-loss steps, mean truncation below 0.9, no valid-token error above 1.0, and fewer than 1e-4 above 0.5.
+- Added fail-fast entrypoint and SingleController config validation, including unsupported transport/backend combinations and formerly accepted no-op controls. Applied configured GRPO advantage clipping in the SingleController training path.
+- Current-source compilation, shell syntax, diff hygiene, and 13 pure trace/completion unit tests passed. Dependency-bearing tests remain an exact-image gate because host Python lacks Ray.
+
+## 2026-08-24 15:32 CEST
+
+- Submitted exact-image changed-path job `3173736` from PR head `5143b429d`. It started Ray and passed 242 tests before the broad SingleController suite exposed one stale fixture: `_setup_master_config` modeled the new SingleController path but inherited the default legacy `grpo.async_grpo` block.
+- Decision: preserve the production fail-fast guard, set `async_grpo=None` in that fixture as the nearest SingleController fixture already does, and rerun the full exact-image gate from a new committed head. The 80-node GLM run remains held until the rerun exits green.
+- Committed and pushed the fixture correction as `dfc9e50bb`. Exact-image rerun `3173779` passed all 420 tests and Ruff check, then failed closed on Ruff format for a single existing PR-side line in `test_resiliency_config.py`. Exact-image job `3173814` applied only Ruff's mechanical reflow and completed `0:0`; a new immutable-head full rerun is next.
+
+## 2026-08-24 18:28 CEST
+
+- Preserved the complete ten-step legacy-async run as the Router Replay control: all ten train steps completed, mean generation KL was `0.0003867`, and only one of 1,918,607 valid tokens exceeded absolute logprob delta `0.5`; the terminal failure was the independent 94.77% response-truncation gate.
+- Decided to certify the current SingleController + TransferQueue path instead of rerunning legacy async. Prepared an ignored one-step probe at `.tmp/glm51-sc-probe/` with the same 80-node GLM topology, a 3072/2560-token envelope, R3 validation, and fail-closed terminal checks.
+- Host config validation stopped at the known environment boundary (`ModuleNotFoundError: ray`). The probe repeats Pydantic construction and cross-section validation inside the certified image before actor setup.
+
+## 2026-08-24 23:10 CEST
+
+- SingleController/TransferQueue one-step job `3175340` reached the current runtime path: all 320 Ray worker units connected, 160 actor environments completed, initial NCCL reshard refit took 5.817 seconds, rollout produced all prompt groups, and the trainer fetched one TransferQueue batch.
+- The first prev-logprob fetch failed in `_broadcast_batched_data_dict` because the R3 payload carries `routed_experts` as `torch.int16` and NCCL does not accept `Short`. The trace records the exact `[8, 2171, 78, 8]` int16 route tensor; no training step ran.
+- Diff against `upstream/main` is empty for the broadcast helper and its existing Gloo-only test. Decision: fix the generic data-plane wire representation, not the GLM recipe or R3 storage dtype, and require a real NCCL regression before rerunning the 80-node gate.
+- Implemented an exact-byte NCCL wire view for int16 tensors, preserving route dtype, values, and compact storage outside the collective. Added int16 coverage to the Gloo test and a two-GPU NCCL regression using the repository distributed-test fixture.
+- Host Python compilation, Ruff check/format, `git diff --check`, and a standalone bit-exact int16 byte-view round trip passed. Attempts to submit the exact-image one-node gate did not create a job because `sbatch` and `squeue` timed out against the Slurm controller; the reservation was not mutated.
+- The controller calls were sandbox-blocked rather than unhealthy. Exact-image job `3178396` started immediately and exposed that Torch 2.11 Gloo also rejects int16 with `RuntimeError: Invalid scalar type`. Generalized the byte wire from NCCL-only to every backend; this makes the existing CPU/Gloo test exercise the conversion as well as the dedicated NCCL test.
+- Corrected exact-image job `3178422` passed all three focused tests, including the real two-GPU NCCL round trip, in 57.98 seconds; Ruff and formatting also passed. Online source review confirmed NCCL exposes 8-, 32- and 64-bit integer types but no 16-bit integer type, PyTorch's NCCL mapping omits `Short`, and established arbitrary-payload broadcasters use `uint8` wire buffers. Keep the exact byte view rather than widening route IDs to int32.

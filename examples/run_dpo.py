@@ -22,6 +22,7 @@ from nemo_rl.algorithms.dpo import DPOTrainStatus, MasterConfig, dpo_train, setu
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_preference_data
 from nemo_rl.distributed.virtual_cluster import init_ray
+from nemo_rl.telemetry.setup import init_telemetry_driver, shutdown_telemetry
 from nemo_rl.utils.config import load_config, parse_hydra_overrides
 from nemo_rl.utils.logger import get_next_experiment_dir
 
@@ -70,40 +71,51 @@ def main() -> int:
             f"📊 Using checkpoint directory: {config.checkpointing['checkpoint_dir']}"
         )
 
-    init_ray()
+    # Initialise telemetry on the driver BEFORE init_ray() so the resolved
+    # NEMO_RL_OTEL_* env is snapshotted into the Ray runtime_env and inherited
+    # by every worker. No-op unless nemo-lens is installed and telemetry is on.
+    init_telemetry_driver(config, algorithm="dpo")
 
-    # setup tokenizer
-    tokenizer = get_tokenizer(config.policy["tokenizer"])
+    try:
+        init_ray()
 
-    # setup data
-    dataset, val_dataset = setup_preference_data(tokenizer, config.data)
+        # setup tokenizer
+        tokenizer = get_tokenizer(config.policy["tokenizer"])
 
-    (
-        policy,
-        cluster,
-        train_dataloader,
-        val_dataloader,
-        loss_fn,
-        logger,
-        checkpointer,
-        dpo_save_state,
-        master_config,
-    ) = setup(config, tokenizer, dataset, val_dataset)
+        # setup data
+        dataset, val_dataset = setup_preference_data(tokenizer, config.data)
 
-    # The checkpointer owns background async-checkpoint finalization threads;
-    # the context manager guarantees they are flushed (rename + delete) on exit.
-    with checkpointer:
-        train_status = dpo_train(
+        (
             policy,
+            cluster,
             train_dataloader,
             val_dataloader,
-            tokenizer,
             loss_fn,
-            master_config,
             logger,
             checkpointer,
             dpo_save_state,
-        )
+            master_config,
+        ) = setup(config, tokenizer, dataset, val_dataset)
+
+        # The checkpointer owns background async-checkpoint finalization threads;
+        # the context manager guarantees they are flushed (rename + delete) on exit.
+        with checkpointer:
+            train_status = dpo_train(
+                policy,
+                train_dataloader,
+                val_dataloader,
+                tokenizer,
+                loss_fn,
+                master_config,
+                logger,
+                checkpointer,
+                dpo_save_state,
+            )
+    finally:
+        # Flush on the failure paths too, and before cluster teardown: the OTel
+        # SDK's own atexit hook is registered ahead of Ray's and so runs after
+        # it. No-op when telemetry is inactive.
+        shutdown_telemetry()
     if train_status is DPOTrainStatus.TIMED_OUT:
         return DPO_TIMEOUT_EXIT_CODE
     return 0

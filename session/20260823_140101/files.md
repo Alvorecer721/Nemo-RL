@@ -29,3 +29,18 @@
 - `infra/slurm/cscs/autoresearch/submit_glm51_cross_allocation_checkpoint.sh`: rejects uninitialized or gitlink-mismatched recursive submodules before allocating nodes.
 - `tests/unit/infra/test_glm51_cross_allocation_checkpoint.py`: launcher preflight plus topology/cluster contracts; 10/10 focused tests pass.
 - `3rdparty/Megatron-Bridge-workspace/Megatron-Bridge`: NeMo gitlink at merged Bridge SHA `6b24b9e7`, which pins merged MCore SHA `9c82d4ca`.
+
+## GLM R3 ten-step characterization
+
+- `examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-r3-10step.yaml`: fresh R3-on ten-step recipe with checkpointing disabled.
+- `infra/slurm/cscs/autoresearch/submit_glm51_r3_10step.sh`: 80-node reservation, checked-in container TOML and single-srun Ray submission contract.
+- `infra/slurm/cscs/autoresearch/run_glm51_r3_10step.sh`: strict route validation, bounded trace, ten-step metrics and terminal-artifact driver.
+- `infra/slurm/cscs/autoresearch/validate_glm51_r3_10step.py`: KL, probability-tail and learning-signal validator against the preserved ten-step R3-off reference.
+- `tests/unit/infra/test_glm51_r3_10step.py`: resolved recipe, validator and launcher safety coverage.
+
+## SingleController R3 NCCL failure
+
+- `nemo_rl/data_plane/worker_mixin.py`: upstream TransferQueue leader-broadcast helper that currently passes every logical tensor dtype directly to NCCL.
+- `tests/unit/data_plane/test_leader_broadcast.py`: existing two-rank Gloo coverage; it does not exercise NCCL's rejection of `torch.int16`.
+- `.tmp/glm51-sc-probe/test_nccl_wire.slurm`: ignored one-node exact-image Ruff plus Gloo/NCCL test launcher, staged for when Slurm recovers.
+- `/iopsstor/scratch/cscs/xyixuan/nemo_rl_glm51_sc_probe/13a043c2bf4beb2e8706616c4f7ae8e6819e0bd1/3175340/`: terminal artifact, run log, and R3 trace for the failed one-step gate.

@@ -27,6 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.distributed.tensor.placement_types import Shard
 
 pytest.importorskip("vllm")  # module-top `import vllm` in vllm_backend
 
@@ -652,3 +653,65 @@ def test_build_hf_to_local_param_map_rejects_invalid_mxfp8_metadata(
 
     with pytest.raises(ValueError, match=error):
         _make_ext(vllm_params).build_hf_to_local_param_map(refit_info)
+
+
+def test_build_hf_to_local_param_map_rejects_local_shape_mismatch():
+    """A direct param whose engine shard does not match the wire shape sharded
+    by gen TP must fail loudly instead of letting xferdtensor scatter into it."""
+    embed = _param(64, 8)  # vLLM padded the local vocab shard: 64 rows, not 60
+    ext = _make_ext({"model.embed_tokens.weight": embed})
+    refit_info = {
+        "layer_names": ["model.embed_tokens"],
+        "per_layer_params": {
+            "model.embed_tokens": [
+                {
+                    "name": "model.embed_tokens.weight",
+                    "global_shape": [240, 8],
+                    "dtype": "torch.float32",
+                    "dst_placements": [Shard(0)],
+                }
+            ]
+        },
+        "gen_tp_size": 4,
+    }
+    with pytest.raises(ValueError, match="local shape"):
+        ext.build_hf_to_local_param_map(refit_info)
+
+
+def test_build_hf_to_local_param_map_accepts_matching_direct_shards():
+    o_proj = _param(8, 4)  # [hidden, hidden/tp] row-parallel shard
+    embed = _param(60, 8)
+    ext = _make_ext(
+        {
+            "model.layers.0.self_attn.o_proj.weight": o_proj,
+            "model.embed_tokens.weight": embed,
+        }
+    )
+    refit_info = {
+        "layer_names": ["model.layers.0", "model.embed_tokens"],
+        "per_layer_params": {
+            "model.layers.0": [
+                {
+                    "name": "model.layers.0.self_attn.o_proj.weight",
+                    "global_shape": [8, 16],
+                    "dtype": "torch.float32",
+                    "dst_placements": [Shard(1)],
+                }
+            ],
+            "model.embed_tokens": [
+                {
+                    "name": "model.embed_tokens.weight",
+                    "global_shape": [240, 8],
+                    "dtype": "torch.float32",
+                    "dst_placements": [Shard(0)],
+                }
+            ],
+        },
+        "gen_tp_size": 4,
+    }
+    pmap = ext.build_hf_to_local_param_map(refit_info)
+    assert (
+        pmap.get("model.layers.0.self_attn.o_proj.weight").base.data_ptr()
+        == o_proj.data_ptr()
+    )
+    assert pmap.get("model.embed_tokens.weight").base.data_ptr() == embed.data_ptr()
