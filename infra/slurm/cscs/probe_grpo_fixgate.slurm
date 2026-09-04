@@ -38,6 +38,10 @@ RUN_LOG=${RUN_LOG:-$REPO_DIR/logs/grpo_fixgate_${SLURM_JOB_ID:-manual}.run.log}
 # earlier on PATH misses the seeded cache and rebuilds from source. Expanded by this shell
 # into the srun command (the body below is double-quoted), so it must be set out here.
 UV=${UV:-/root/.local/bin/uv}
+# Release images prefetch worker environments under /opt/ray_venvs. Keep the
+# persistent checkout-local path as the default for source-overlay probes, but
+# allow an exact-image gate to reuse the baked environments.
+WORKER_VENV_DIR=${WORKER_VENV_DIR:-$REPO_DIR/venvs}
 
 # Fail fast if submodules are not initialized — the driver imports megatron.core and the refit uses the bridge, so an empty submodule dir otherwise surfaces as a cryptic ModuleNotFoundError mid-run.
 for sm in 3rdparty/Megatron-Bridge-workspace/Megatron-Bridge 3rdparty/Gym-workspace/Gym 3rdparty/Automodel-workspace/Automodel; do
@@ -69,7 +73,7 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     # right after large first-time installs; plain log lines are enough here.
     export UV_NO_PROGRESS=1
     export UV_PROJECT_ENVIRONMENT=$REPO_DIR/.venv
-    export NEMO_RL_VENV_DIR=$REPO_DIR/venvs
+    export NEMO_RL_VENV_DIR=$WORKER_VENV_DIR
     cd $REPO_DIR
     # Apertus runtime guard: fail loud if nemo_rl is the stock /opt copy rather than this checkout (online GRPO otherwise silently regresses to gen-KL ~0.79).
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'
