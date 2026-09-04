@@ -35,7 +35,6 @@ import json
 import subprocess
 from pathlib import Path
 
-
 SOURCE_FINGERPRINT_FILENAME = ".nemo_rl_source_fingerprint.json"
 
 

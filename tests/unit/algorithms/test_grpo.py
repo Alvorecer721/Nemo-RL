@@ -32,7 +32,6 @@ from nemo_rl.algorithms.advantage_estimator import (
     ReinforcePlusPlusAdvantageEstimator,
 )
 from nemo_rl.algorithms.grpo import (
-    _raise_if_grpo_batch_has_no_valid_tokens,
     AdvEstimatorConfig,
     AsyncGRPOConfig,
     GRPOConfig,
@@ -47,6 +46,7 @@ from nemo_rl.algorithms.grpo import (
     _initial_policy_generation_stale,
     _maybe_restore_async_replay_buffer_checkpoint,
     _needs_hf_refit_handshake,
+    _raise_if_grpo_batch_has_no_valid_tokens,
     _raise_if_reward_penalties_enabled_without_nemo_gym,
     _resolve_logprob_skip_flags,
     _resolve_message_level_advantage_penalties,

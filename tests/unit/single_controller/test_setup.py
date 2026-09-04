@@ -1000,6 +1000,16 @@ class TestSetup:
         _, call_kwargs = mock_rollout_manager.call_args
         assert call_kwargs["effort_config"] is None
 
+    def test_rollout_manager_gets_grpo_cot_think_tokens(self, patched_factories):
+        mc = _make_master_config()
+        mc.grpo.cot_think_token_ids = [10, 11]
+
+        with patch.object(sc_setup_mod, "RolloutManager") as mock_rollout_manager:
+            setup_single_controller(mc, MagicMock(pad_token_id=0))
+
+        _, call_kwargs = mock_rollout_manager.call_args
+        assert call_kwargs["cot_token_ids"] == (10, 11)
+
     def test_router_replay_requires_routes_in_tq_buffer(self, patched_factories):
         mc = _make_master_config()
         mc.policy["router_replay"] = {"enabled": True}

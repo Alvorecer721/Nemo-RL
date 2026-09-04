@@ -5,7 +5,6 @@ import os
 import subprocess
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).parents[3]
 HELPER = REPO_ROOT / "tests/test_suites/completion_helpers.bash"
 

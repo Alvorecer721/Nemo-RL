@@ -35,15 +35,15 @@ from nemo_rl.algorithms.async_utils.staleness_sampler import (
     SamplerConfig,
     required_buffer_capacity_for_config,
 )
-from nemo_rl.algorithms.logits_sampling_utils import (
-    TrainingSamplingParams,
-    need_top_k_or_top_p_filtering,
-)
 from nemo_rl.algorithms.grpo import (
     _REWARD_PENALTY_FLAGS,
     GRPOConfig,
     GRPOLoggerConfig,
     RewardPenaltyConfig,
+)
+from nemo_rl.algorithms.logits_sampling_utils import (
+    TrainingSamplingParams,
+    need_top_k_or_top_p_filtering,
 )
 from nemo_rl.algorithms.loss import ClippedPGLossConfig
 from nemo_rl.algorithms.loss.loss_functions import MseValueLossConfig

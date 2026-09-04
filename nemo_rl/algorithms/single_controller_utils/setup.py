@@ -48,6 +48,7 @@ from nemo_rl.algorithms.async_utils.staleness_sampler import (
     sampler_supports_buffer_checkpoint,
 )
 from nemo_rl.algorithms.grpo import (
+    GRPOConfig,
     GRPOSaveState,
     _get_effort_config,
     _get_grpo_save_state,
@@ -62,10 +63,10 @@ from nemo_rl.algorithms.metric_utils import (
 )
 from nemo_rl.algorithms.ppo import MasterConfig as PPOMasterConfig
 from nemo_rl.algorithms.single_controller_utils.config import (
-    resolve_fused_linear_logprobs,
     MasterConfig,
     algo_config,
     is_ppo_run,
+    resolve_fused_linear_logprobs,
     validate_single_controller_config,
 )
 from nemo_rl.algorithms.utils import set_seed
@@ -1423,6 +1424,9 @@ def setup_single_controller(
         ),
         require_routed_experts=router_replay_enabled(policy_config),
     )
+    cot_think_token_ids = (
+        algo_cfg.cot_think_token_ids if isinstance(algo_cfg, GRPOConfig) else None
+    )
     rollout_manager = RolloutManager(
         tokenizer=tokenizer,
         task_to_env=env_handles,
@@ -1442,11 +1446,7 @@ def setup_single_controller(
         ),
         retry_policy=_build_retry_policy(master_config),
         effort_config=_get_effort_config(cast(GRPOMasterConfig, master_config)),
-        cot_token_ids=(
-            tuple(algo_cfg.cot_think_token_ids)
-            if getattr(algo_cfg, "cot_think_token_ids", None)
-            else None
-        ),
+        cot_token_ids=tuple(cot_think_token_ids) if cot_think_token_ids else None,
     )
 
     # Print setup timing metrics
