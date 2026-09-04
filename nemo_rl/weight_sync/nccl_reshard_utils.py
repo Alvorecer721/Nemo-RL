@@ -169,21 +169,16 @@ def get_tp_shard_dim(param_name: str) -> Optional[int]:
 
 
 def vocab_parallel_bulk_ok(
-    *,
-    vocab_size: int,
-    train_tp_size: int,
-    make_vocab_size_divisible_by: int,
-    gen_tp_size: int,
+    *, vocab_size: int, padded_vocab_size: int, gen_tp_size: int
 ) -> bool:
     """True iff neither side pads its vocab-parallel shards.
 
-    Megatron pads the vocab to a multiple of ``make_vocab_size_divisible_by *
-    tp``; vLLM pads each of its TP shards to a multiple of
-    ``GEN_VOCAB_PADDING_SIZE``. A padded shard is not a canonical HF view, so
-    the embedding and output head can only take the bulk path when both
-    conditions hold.
+    Megatron's padded vocab is visible as ``padded_vocab_size``; vLLM pads each
+    of its TP shards to a multiple of ``GEN_VOCAB_PADDING_SIZE``. A padded shard
+    is not a canonical HF view, so the embedding and output head can only take
+    the bulk path when both sides are unpadded.
     """
-    if vocab_size % (make_vocab_size_divisible_by * train_tp_size):
+    if padded_vocab_size != vocab_size:
         return False
     if vocab_size % gen_tp_size:
         return False
