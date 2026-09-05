@@ -38,6 +38,11 @@ OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 MAX_JOBS=${MAX_JOBS:-4}
 NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS:-90}
+NVTE_WITH_NCCL_EP=${NVTE_WITH_NCCL_EP:-0}
+[[ "$NVTE_WITH_NCCL_EP" == 0 || "$NVTE_WITH_NCCL_EP" == 1 ]] || {
+    echo "NVTE_WITH_NCCL_EP must be 0 or 1, got: $NVTE_WITH_NCCL_EP" >&2
+    exit 2
+}
 # The fingerprint helper needs modern Python, while the host interpreter varies
 # across Clariden images. Prefer a system interpreter and fall back to the
 # user's shared Miniconda installation.
@@ -127,6 +132,7 @@ BUILD_INPUTS_SHA256=$(
         printf 'base_image\0%s\0' "$BASE_IMAGE"
         printf 'max_jobs\0%s\0' "$MAX_JOBS"
         printf 'nvte_cuda_archs\0%s\0' "$NVTE_CUDA_ARCHS"
+        printf 'nvte_with_nccl_ep\0%s\0' "$NVTE_WITH_NCCL_EP"
         printf 'build_trtllm\0%s\0' "$BUILD_TRTLLM"
         printf 'custom_setup_fname\0%s\0' "$CUSTOM_SETUP_FNAME"
         printf 'platform\0linux/arm64\0'
@@ -138,8 +144,8 @@ IMAGE="nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
 SQSH_PATH="${OUTPUT_DIR}/nemo-rl-apertus-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
 generate_hermetic_cache_fingerprint() {
     "$HOST_PYTHON" tools/generate_fingerprint.py
-    printf '\nbase_image=%s\nnvte_cuda_archs=%s\nbuild_trtllm=%s\ncustom_setup_fname=%s\n' \
-        "$BASE_IMAGE" "$NVTE_CUDA_ARCHS" "$BUILD_TRTLLM" "$CUSTOM_SETUP_FNAME"
+    printf '\nbase_image=%s\nnvte_cuda_archs=%s\nnvte_with_nccl_ep=%s\nbuild_trtllm=%s\ncustom_setup_fname=%s\n' \
+        "$BASE_IMAGE" "$NVTE_CUDA_ARCHS" "$NVTE_WITH_NCCL_EP" "$BUILD_TRTLLM" "$CUSTOM_SETUP_FNAME"
 }
 # The runtime version check expects this file to contain exactly one JSON
 # document. Image-construction choices participate only in the separate
@@ -404,6 +410,7 @@ podman build \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "MAX_JOBS=$MAX_JOBS" \
     --build-arg "NVTE_CUDA_ARCHS=$NVTE_CUDA_ARCHS" \
+    --build-arg "NVTE_WITH_NCCL_EP=$NVTE_WITH_NCCL_EP" \
     --build-arg "SKIP_TRTLLM_BUILD=$SKIP_TRTLLM_BUILD" \
     --build-arg "CUSTOM_SETUP_FNAME=$CUSTOM_SETUP_FNAME" \
     --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
@@ -529,39 +536,45 @@ print("vLLM 0.25 renderer, tokenization, and tool-parser imports: OK")
 PY
 
 # TE is compiled independently in the Megatron worker environment. Verify the
-# exact MCore pairing and that the Hopper build retained NCCL-EP support.
+# exact MCore pairing and the TE APIs used by the dense and grouped-MoE paths.
 enroot start --root --rw "$SQSH_PATH" \
-    /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python - <<'PY'
+    /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python \
+    - "$NVTE_WITH_NCCL_EP" <<'PY'
 import ctypes
+import sys
 from importlib.metadata import version
 
 import transformer_engine_torch as tex
 from megatron.core.extensions.transformer_engine import TELinear
 from transformer_engine.pytorch import DotProductAttention, GroupedLinear
-from transformer_engine.pytorch.ep import EpBuffer
 
 expected_te = "2.17.1+4329ff84"
 actual_te = version("transformer-engine")
 if actual_te != expected_te:
     raise RuntimeError(f"Expected Transformer Engine {expected_te}, found {actual_te}")
 
-required_ep_symbols = ("ep_initialize", "ep_finalize", "ep_get_zero_copy")
-missing = [name for name in required_ep_symbols if not hasattr(tex, name)]
-if missing:
-    raise RuntimeError(f"Transformer Engine was built without NCCL-EP symbols: {missing}")
+expect_nccl_ep = bool(int(sys.argv[1]))
+ep_symbols = [
+    name
+    for name in ("ep_initialize", "ep_finalize", "ep_get_zero_copy")
+    if hasattr(tex, name)
+]
+if expect_nccl_ep:
+    if len(ep_symbols) != 3:
+        raise RuntimeError(f"NCCL-EP was enabled but only found symbols: {ep_symbols}")
+    nccl = ctypes.CDLL("libnccl.so.2", mode=ctypes.RTLD_GLOBAL)
+    nccl_version = ctypes.c_int()
+    if nccl.ncclGetVersion(ctypes.byref(nccl_version)) != 0:
+        raise RuntimeError("ncclGetVersion failed")
+    if nccl_version.value < 23004:
+        raise RuntimeError(f"NCCL-EP requires NCCL >=2.30.4, found {nccl_version.value}")
+elif ep_symbols:
+    raise RuntimeError(f"NCCL-EP was expected to be disabled, found symbols: {ep_symbols}")
 
-nccl = ctypes.CDLL("libnccl.so.2", mode=ctypes.RTLD_GLOBAL)
-nccl_version = ctypes.c_int()
-if nccl.ncclGetVersion(ctypes.byref(nccl_version)) != 0:
-    raise RuntimeError("ncclGetVersion failed")
-if nccl_version.value < 23004:
-    raise RuntimeError(f"NCCL-EP requires NCCL >=2.30.4, found {nccl_version.value}")
-
-if any(symbol is None for symbol in (TELinear, DotProductAttention, GroupedLinear, EpBuffer)):
+if any(symbol is None for symbol in (TELinear, DotProductAttention, GroupedLinear)):
     raise RuntimeError("Required MCore/Transformer Engine APIs are unavailable")
 print("Transformer Engine:", actual_te)
-print("Runtime NCCL:", nccl_version.value)
-print("MCore TE adapters and NCCL-EP symbols: OK")
+print("MCore TE adapters: OK; NCCL-EP enabled:", expect_nccl_ep)
 PY
 
 echo "SquashFS checksum and size:"

@@ -163,6 +163,10 @@ ARG NVTE_BUILD_MAX_JOBS=8
 ARG NVTE_BUILD_THREADS_PER_JOB=2
 ARG NVTE_CUDA_ARCHS=90;100
 ARG NVTE_FRAMEWORK=pytorch
+# The base image provides NCCL 2.29 headers, while TE's optional NCCL-EP
+# backend requires the NCCL 2.30 internal API. Keep ordinary TE enabled and
+# leave NCCL-EP off until the image's system NCCL is upgraded as one unit.
+ARG NVTE_WITH_NCCL_EP=0
 # Only use for custom vllm installs. Learn more at https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/use-custom-vllm.md
 ARG BUILD_CUSTOM_VLLM
 ARG BUILD_CUSTOM_VLLM_URL
