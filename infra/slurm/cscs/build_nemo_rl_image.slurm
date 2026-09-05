@@ -552,7 +552,7 @@ if not mcore_te.HAVE_TE:
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
-expected_te = "2.17.1+4329ff84"
+expected_te = "2.18.0+27486e03"
 actual_te = version("transformer-engine")
 if actual_te != expected_te:
     raise RuntimeError(f"Expected Transformer Engine {expected_te}, found {actual_te}")

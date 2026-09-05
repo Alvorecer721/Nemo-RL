@@ -395,7 +395,7 @@ link-mode = "copy"
 # vllm defaults to opencv for video IO but falls back to torchcodec.
 # The timm override is needed because sglang requires timm==1.0.16.
 override-dependencies = [
-  "transformer-engine[pytorch,core_cu13] @ git+https://github.com/NVIDIA/TransformerEngine.git@4329ff84bfbdaa778a33cba02a15fb0807c64689",
+  "transformer-engine[pytorch,core_cu13] @ git+https://github.com/NVIDIA/TransformerEngine.git@27486e03cfc1fa41f6932dcecdc47c71c47eac3e",
   "nvidia-cublas==13.5.1.27; sys_platform != 'darwin'",
   "nvidia-cudnn-cu13==9.20.0.48; sys_platform != 'darwin'",
   "nvidia-cudnn-frontend==1.25.0 ; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
@@ -639,12 +639,23 @@ requires-dist = ["torch", "packaging", "ninja"]
 
 [[tool.uv.dependency-metadata]]
 name = "transformer-engine"
-version = "2.17.1+4329ff84"
-requires-dist = ["torch", "pydantic", "importlib-metadata>=1.0", "packaging"]
+version = "2.18.0+27486e03"
+# Match setup_requirements() with NVTE_FRAMEWORK=pytorch at the pinned source.
+requires-dist = [
+  "torch>=2.1",
+  "pydantic",
+  "importlib-metadata>=1.0",
+  "packaging",
+  "einops",
+  "onnxscript",
+  "onnx",
+  "nvdlfw-inspect",
+  "nvidia-cudnn-frontend>=1.25.0",
+]
 
 [[tool.uv.dependency-metadata]]
 name = "transformer-engine-torch"
-version = "2.17.1+4329ff84"
+version = "2.18.0+27486e03"
 requires-dist = ["torch", "transformer-engine"]
 
 [[tool.uv.dependency-metadata]]
