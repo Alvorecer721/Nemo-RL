@@ -124,8 +124,8 @@ AP_PHASE=training
   --config "$RECIPE" >"$RUN_LOG" 2>&1
 
 AP_PHASE=completion_log
-rg -Fq "train step $EXPECTED_STEPS/$EXPECTED_STEPS" "$RUN_LOG"
-rg -Fq "SC run complete:" "$RUN_LOG"
+grep -Fq "train step $EXPECTED_STEPS/$EXPECTED_STEPS" "$RUN_LOG"
+grep -Fq "SC run complete:" "$RUN_LOG"
 
 AP_PHASE=metrics_dump
 "$UV" run --no-config --no-project --offline --python /opt/nemo_rl_venv/bin/python python tests/json_dump_tb_logs.py "$RUN_DIR/tb" \
