@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import torch
+from torch.utils._pytree import tree_map
 
 FetchPolicy = Literal["auto", "independent", "leader_broadcast"]
 
@@ -53,6 +54,14 @@ from nemo_rl.utils.r3_trace import trace_tq_fetch_payload
 if TYPE_CHECKING:
     from nemo_rl.data_plane import DataPlaneConfig, KVBatchMeta
     from nemo_rl.data_plane.interfaces import DataPlaneClient
+
+
+def _metric_tensor_to_python(value: Any) -> Any:
+    """Keep training results independent of backend tensor pickle loaders."""
+    if isinstance(value, torch.Tensor):
+        detached = value.detach()
+        return detached.item() if detached.numel() == 1 else detached.cpu().tolist()
+    return value
 
 
 def _broadcast_batched_data_dict(
@@ -679,7 +688,10 @@ class TQWorkerMixin:
         """
         result = self.finish_train_step()  # type: ignore[attr-defined]
         result["is_replica_leader"] = bool(self._is_replica_leader())
-        return result
+        # Megatron patches Tensor's storage unpickler to a Megatron function.
+        # The controller has no Megatron dependency; only scalar/list metrics
+        # need to cross this boundary, after the optimizer has already stepped.
+        return tree_map(_metric_tensor_to_python, result)
 
     @wrap_with_nvtx_name("policy_worker/abort_train_step_presharded")
     def abort_train_step_presharded(self) -> None:
