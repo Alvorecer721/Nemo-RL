@@ -50,6 +50,11 @@ def main() -> None:
     )
     p.add_argument("--out", required=True)
     p.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Load/export on CPU for models exceeding one GPU",
+    )
+    p.add_argument(
         "--tokenizer",
         default=None,
         help="tokenizer dir to copy into the output (default: from --hf-base)",
@@ -65,7 +70,9 @@ def main() -> None:
 
     # load_megatron_model requires initialized distributed + parallel state
     # even single-process (TP1/PP1); torch-dist re-shards any source geometry.
-    torch.distributed.init_process_group("nccl", world_size=1, rank=0)
+    torch.distributed.init_process_group(
+        "gloo" if args.cpu else "nccl", world_size=1, rank=0
+    )
     from megatron.core import parallel_state
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
@@ -81,7 +88,7 @@ def main() -> None:
     # (Apertus xIELU beta/eps) come from the base checkpoint — the same
     # constants-from-disk rule as the vLLM refit fix. save_hf_pretrained's
     # shard writer refuses incomplete shards, so we assemble and write the
-    # full 451-tensor state dict ourselves as a single safetensors file.
+    # full state dict ourselves as a single safetensors file.
     import json
 
     from safetensors import safe_open
@@ -95,6 +102,20 @@ def main() -> None:
     with open(base / "model.safetensors.index.json") as f:
         index = json.load(f)["weight_map"]
     missing = [k for k in index if k not in state]
+    config = json.loads((base / "config.json").read_text())
+    allowed_buffers = (
+        {
+            f"model.layers.{layer}.mlp.act_fn.{name}"
+            for layer in range(config["num_hidden_layers"])
+            for name in ("beta", "eps")
+        }
+        if config["model_type"].startswith("apertus")
+        else set()
+    )
+    unexpected_missing = set(missing) - allowed_buffers
+    assert not unexpected_missing, (
+        f"Missing trained tensors; refusing base-weight fallback: {sorted(unexpected_missing)}"
+    )
     for name in missing:
         with safe_open(base / index[name], framework="pt") as f:
             state[name] = f.get_tensor(name)
@@ -105,6 +126,20 @@ def main() -> None:
         f"exported {len(state) - len(missing)} params + {len(missing)} buffers from base"
     )
     save_file(state, str(out / "model.safetensors"), metadata={"format": "pt"})
+    (out / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "total_size": sum(
+                        t.numel() * t.element_size() for t in state.values()
+                    )
+                },
+                "weight_map": {name: "model.safetensors" for name in sorted(state)},
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
     tok_src = Path(args.tokenizer) if args.tokenizer else base
     for name in (
@@ -121,6 +156,8 @@ def main() -> None:
         if src.exists():
             shutil.copy2(src, out / name)
     print(f"exported -> {out}")
+    parallel_state.destroy_model_parallel()
+    torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
