@@ -2870,6 +2870,77 @@ class TestSetupModelConfig:
         model_cfg.__post_init__ = MagicMock()
         return model_cfg
 
+    @pytest.mark.parametrize("derive_from_hf", [False, True])
+    @pytest.mark.parametrize(
+        ("packing", "graph_impl", "dispatcher", "backend", "expected_padding"),
+        [
+            (True, "none", "flex", "hybridep", True),
+            (False, "none", "flex", "hybridep", False),
+            (True, "local", "flex", "hybridep", False),
+            (True, "none", "alltoall", "hybridep", False),
+            (True, "none", "flex", "deepep", False),
+        ],
+    )
+    def test_hybridep_padding_uses_nemo_packing_after_graph_overrides(
+        self,
+        request,
+        tmp_path,
+        derive_from_hf,
+        packing,
+        graph_impl,
+        dispatcher,
+        backend,
+        expected_padding,
+    ):
+        """NeMo's dataset=None must not hide its eager packed HybridEP layout."""
+        from nemo_rl.models.megatron.setup import setup_model_config
+
+        mocks = self._apply_patches(request)
+        model_cfg = SimpleNamespace(
+            moe_token_dispatcher_type=dispatcher,
+            moe_flex_dispatcher_backend=backend,
+            moe_hybridep_pad_uneven_dispatch_inputs=False,
+            cuda_graph_impl="none",
+            finalize=lambda: None,
+            __post_init__=lambda: None,
+        )
+        # Changing graph mode here makes the ordering part of the regression.
+        mocks["_apply_performance_config"].side_effect = lambda model, config: (
+            setattr(model, "cuda_graph_impl", graph_impl)
+        )
+        config = {
+            "megatron_cfg": {},
+            "sequence_packing": {"enabled": packing},
+        }
+        if not derive_from_hf:
+            config["pretrained_checkpoint"] = {
+                "format": "megatron_bridge",
+                "path": str(tmp_path),
+            }
+        (tmp_path / "run_config.yaml").touch()
+        with (
+            patch("transformers.AutoConfig.from_pretrained"),
+            patch("nemo_rl.models.megatron.setup.AutoBridge") as auto_bridge,
+            patch(
+                "nemo_rl.models.megatron.setup._patch_hf_config_double_instantiation"
+            ),
+            patch(
+                "nemo_rl.models.megatron.setup.load_model_config",
+                return_value=(model_cfg, None),
+            ),
+        ):
+            auto_bridge.from_hf_config.return_value.to_megatron_provider.return_value = model_cfg
+            setup_model_config(
+                config,
+                rank=0,
+                dtype=torch.bfloat16,
+                hf_model_name="test-model",
+                pretrained_path=str(tmp_path),
+                skip_weight_load=derive_from_hf,
+            )
+
+        assert model_cfg.moe_hybridep_pad_uneven_dispatch_inputs is expected_padding
+
     @pytest.mark.parametrize(
         ("pretrained_checkpoint", "skip_weight_load"),
         [

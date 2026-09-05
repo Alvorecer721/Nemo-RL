@@ -446,7 +446,7 @@ class TestTrainMicrobatch:
             pytest.param(False, False, True, id="model-owned-cp-slicing"),
         ],
     )
-    def test_forwards_model_owned_packing_flags(
+    def test_body_forwards_model_owned_packing_flags(
         self,
         mock_module_symbols: dict[str, MagicMock],
         delegate_pack_to_model: bool,
@@ -462,7 +462,7 @@ class TestTrainMicrobatch:
         w.model_slices_context_parallel_inputs = model_slices_context_parallel_inputs
 
         w.begin_train_step(loss_fn=w._test_loss_fn)
-        w.train_microbatch(_fake_batch())
+        w._train_microbatch_body(w._assert_step_open(), _fake_batch())
 
         kwargs = mock_module_symbols["gmi"].call_args.kwargs
         assert kwargs["delegate_pack_to_model"] is delegate_pack_to_model
@@ -473,6 +473,40 @@ class TestTrainMicrobatch:
             kwargs["model_slices_context_parallel_inputs"]
             is model_slices_context_parallel_inputs
         )
+
+    @pytest.mark.parametrize(
+        "media_token_id,model_slices_cp", [(123, False), (None, True)]
+    )
+    def test_public_split_path_rejects_multimodal_models(
+        self, mock_module_symbols, media_token_id, model_slices_cp
+    ):
+        from nemo_rl.algorithms.loss.interfaces import LossType
+
+        w = _make_worker(LossType.TOKEN_LEVEL)
+        w.media_placeholder_token_id = media_token_id
+        w.model_slices_context_parallel_inputs = model_slices_cp
+        w.begin_train_step(loss_fn=w._test_loss_fn)
+
+        with pytest.raises(NotImplementedError, match="train_presharded"):
+            w.train_microbatch(_fake_batch())
+
+        assert w._train_step_state["num_chunks"] == 0
+        mock_module_symbols["gmi"].assert_not_called()
+        mock_module_symbols["mfb"].assert_not_called()
+
+    def test_public_split_path_allows_model_owned_packing(self, mock_module_symbols):
+        from nemo_rl.algorithms.loss.interfaces import LossType
+
+        w = _make_worker(LossType.TOKEN_LEVEL)
+        w.delegate_pack_to_model = True
+        w.delegate_mtp_loss_mask_to_model = True
+        w.begin_train_step(loss_fn=w._test_loss_fn)
+        w.train_microbatch(_fake_batch())
+
+        kwargs = mock_module_symbols["gmi"].call_args.kwargs
+        assert kwargs["delegate_pack_to_model"] is True
+        assert kwargs["delegate_mtp_loss_mask_to_model"] is True
+        assert kwargs["model_slices_context_parallel_inputs"] is False
 
     def test_passes_placeholder_n_one_to_loss(self, mock_module_symbols):
         """The N=1 trick: loss must be called with global_valid_*=1 so it

@@ -266,8 +266,8 @@ class TQWorkerMixin:
         # that carry the flag into ``models/megatron/data.py``.
         #
         # ``train_microbatch_presharded`` is the exception: it lands in
-        # ``_train_microbatch_body``, which passes none of the capability flags
-        # and never attaches the media-token validity mask. That path is
+        # ``_train_microbatch_body``, which forwards the capability flags but
+        # never attaches the media-token validity mask. That path is
         # SingleController-only, so ``train_microbatch`` raises for a
         # multimodal model rather than training on rows it mis-describes.
         if self._dp_client is not None:
