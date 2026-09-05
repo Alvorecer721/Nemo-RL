@@ -544,9 +544,13 @@ import ctypes
 import sys
 from importlib.metadata import version
 
+import megatron.core.extensions.transformer_engine as mcore_te
+
+if not mcore_te.HAVE_TE:
+    raise RuntimeError("MCore did not discover Transformer Engine")
+
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
-from megatron.core.extensions.transformer_engine import TELinear
 
 expected_te = "2.17.1+4329ff84"
 actual_te = version("transformer-engine")
@@ -571,7 +575,10 @@ if expect_nccl_ep:
 elif ep_symbols:
     raise RuntimeError(f"NCCL-EP was expected to be disabled, found symbols: {ep_symbols}")
 
-if any(symbol is None for symbol in (TELinear, te.DotProductAttention, te.GroupedLinear)):
+if any(
+    symbol is None
+    for symbol in (mcore_te.TELinear, te.DotProductAttention, te.GroupedLinear)
+):
     raise RuntimeError("Required MCore/Transformer Engine APIs are unavailable")
 print("Transformer Engine:", actual_te)
 print("MCore TE adapters: OK; NCCL-EP enabled:", expect_nccl_ep)
