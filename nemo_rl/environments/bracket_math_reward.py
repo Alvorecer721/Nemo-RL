@@ -125,6 +125,28 @@ def completed_final_text(response: str) -> str | None:
     return None if in_thinking else "".join(visible)
 
 
+def thinking_mode_compliant(response: str, *, enable_thinking: bool) -> bool:
+    """Check generated Apertus delimiters, without rewarding reasoning length.
+
+    Apertus puts the requested mode in the developer message; the assistant
+    generates both delimiters. Thinking on requires one nonempty block followed
+    by a final response. Thinking off forbids either delimiter.
+    """
+    prefix, suffix = "<|inner_prefix|>", "<|inner_suffix|>"
+    if not enable_thinking:
+        return prefix not in response and suffix not in response
+    if response.count(prefix) != 1 or response.count(suffix) != 1:
+        return False
+    before, _, remainder = response.partition(prefix)
+    thinking, closing, final = remainder.partition(suffix)
+    return (
+        not before.strip()
+        and bool(thinking.strip())
+        and bool(closing)
+        and bool(final.strip())
+    )
+
+
 def score_marked_answer(
     response: str, ground_truth: str, marker: AnswerMarker = "bracket"
 ) -> BracketMathScore:

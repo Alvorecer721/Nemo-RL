@@ -5,11 +5,11 @@
 from __future__ import annotations
 
 import itertools
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 import ray
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, model_validator
 
 from nemo_rl.data.interfaces import LLMMessageLogType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
@@ -18,6 +18,7 @@ from nemo_rl.environments.bracket_math_reward import (
     AnswerMarker,
     BracketMathScore,
     score_marked_answer,
+    thinking_mode_compliant,
 )
 from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
 from nemo_rl.environments.math_environment import MathEnvironmentMetadata
@@ -31,6 +32,27 @@ class BracketMathEnvConfig(BaseModel, extra="forbid"):
     num_workers: int = Field(gt=0)
     reward: Literal["composite", "outcome"]
     answer_marker: AnswerMarker
+    enable_thinking: StrictBool | None = Field(
+        default=None,
+        description="Requested Apertus mode; tie to the tokenizer chat-template setting.",
+    )
+    thinking_mode_penalty: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+        description="Subtract once per mode violation in composite reward; zero disables.",
+    )
+
+    @model_validator(mode="after")
+    def validate_thinking_mode_penalty(self) -> Self:
+        if self.thinking_mode_penalty > 0:
+            if self.enable_thinking is None:
+                raise ValueError(
+                    "thinking_mode_penalty requires explicit enable_thinking"
+                )
+            if self.reward != "composite":
+                raise ValueError("thinking_mode_penalty requires reward='composite'")
+        return self
 
 
 @ray.remote  # pragma: no cover
@@ -103,6 +125,19 @@ class BracketMathEnvironment(EnvironmentInterface[MathEnvironmentMetadata]):
                     ),
                 }
             )
+            if self.cfg.thinking_mode_penalty > 0:
+                assert self.cfg.enable_thinking is not None
+                rewards["reward/thinking_mode_penalty"] = torch.tensor(
+                    [
+                        0.0
+                        if thinking_mode_compliant(
+                            response, enable_thinking=self.cfg.enable_thinking
+                        )
+                        else -self.cfg.thinking_mode_penalty
+                        for response in responses
+                    ],
+                    dtype=torch.float32,
+                )
         return EnvironmentReturn(
             observations=[
                 {

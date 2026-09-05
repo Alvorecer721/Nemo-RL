@@ -1,0 +1,12 @@
+# Opt-in mode-compliance penalty; inherits the 92-step baseline unchanged otherwise.
+defaults: grpo-apertus1p5-70b-16n4g-tp2pp4-gsm8k-2k-windowed-optimized.yaml
+
+env:
+  bracket_math:
+    enable_thinking: ${policy.tokenizer.chat_template_kwargs.enable_thinking}
+    # Default is 0 (disabled). 0.1 is an initial experiment coefficient, not tuned.
+    thinking_mode_penalty: 0.1
+
+logger:
+  wandb:
+    name: nemo-rl-70b-gsm8k-2k-thinking-mode-penalty-seed${oc.env:AP_SEED,42}
