@@ -27,6 +27,7 @@ nemo_rl.models.megatron.setup, focusing on:
 import os
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -2883,15 +2884,15 @@ class TestSetupModelConfig:
     )
     def test_hybridep_padding_uses_nemo_packing_after_graph_overrides(
         self,
-        request,
-        tmp_path,
-        derive_from_hf,
-        packing,
-        graph_impl,
-        dispatcher,
-        backend,
-        expected_padding,
-    ):
+        request: pytest.FixtureRequest,
+        tmp_path: Path,
+        derive_from_hf: bool,
+        packing: bool,
+        graph_impl: str,
+        dispatcher: str,
+        backend: str,
+        expected_padding: bool,
+    ) -> None:
         """NeMo's dataset=None must not hide its eager packed HybridEP layout."""
         from nemo_rl.models.megatron.setup import setup_model_config
 

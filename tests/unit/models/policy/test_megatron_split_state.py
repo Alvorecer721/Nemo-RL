@@ -478,8 +478,11 @@ class TestTrainMicrobatch:
         "media_token_id,model_slices_cp", [(123, False), (None, True)]
     )
     def test_public_split_path_rejects_multimodal_models(
-        self, mock_module_symbols, media_token_id, model_slices_cp
-    ):
+        self,
+        mock_module_symbols: dict[str, MagicMock],
+        media_token_id: int | None,
+        model_slices_cp: bool,
+    ) -> None:
         from nemo_rl.algorithms.loss.interfaces import LossType
 
         w = _make_worker(LossType.TOKEN_LEVEL)
@@ -494,7 +497,9 @@ class TestTrainMicrobatch:
         mock_module_symbols["gmi"].assert_not_called()
         mock_module_symbols["mfb"].assert_not_called()
 
-    def test_public_split_path_allows_model_owned_packing(self, mock_module_symbols):
+    def test_public_split_path_allows_model_owned_packing(
+        self, mock_module_symbols: dict[str, MagicMock]
+    ) -> None:
         from nemo_rl.algorithms.loss.interfaces import LossType
 
         w = _make_worker(LossType.TOKEN_LEVEL)
