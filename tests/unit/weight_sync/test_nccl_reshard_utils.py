@@ -653,6 +653,30 @@ def test_wire_safe_pickle_is_independent_of_a_patched_storage_loader(monkeypatch
     assert b"dummy_unpickler_module" in pickle.dumps(info)
     assert b"dummy_unpickler_module" not in pickle.dumps(wire)
 
+    raw_payload = pickle.dumps(info)
+    wire_payload = pickle.dumps(wire)
+    monkeypatch.delitem(sys.modules, "dummy_unpickler_module")
+    with pytest.raises(ModuleNotFoundError, match="dummy_unpickler_module"):
+        pickle.loads(raw_payload)
+
+    # The driver receives the worker's wire form before forwarding it to vLLM.
+    # Neither process has the storage-loader module used by the training worker.
+    driver_info = pickle.loads(wire_payload)
+    generation_info = pickle.loads(
+        pickle.dumps(make_nccl_reshard_refit_info_wire_safe(driver_info))
+    )
+    restored = restore_refit_info_placements(generation_info)
+    for layer in info["layer_names"]:
+        for original, received in zip(
+            info["per_layer_params"][layer],
+            restored["per_layer_params"][layer],
+            strict=True,
+        ):
+            for key in ("src_mesh_info", "dst_mesh_info"):
+                assert torch.equal(original[key].mesh, received[key].mesh)
+            for key in ("src_placements", "dst_placements"):
+                assert original[key] == received[key]
+
 
 # --------------------------------------------------------------------------
 # attention output projection and vocab-parallel params on the bulk path

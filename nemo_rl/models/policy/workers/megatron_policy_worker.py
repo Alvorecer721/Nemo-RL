@@ -2834,6 +2834,7 @@ class MegatronPolicyWorkerImpl(
         from nemo_rl.weight_sync.nccl_reshard_utils import (
             build_nccl_reshard_refit_info,
             is_nccl_reshard_param,
+            make_nccl_reshard_refit_info_wire_safe,
         )
 
         self.refit_param_info_mcore = self._calculate_refit_param_info()
@@ -2982,7 +2983,9 @@ class MegatronPolicyWorkerImpl(
             if task is not None and _task_is_misc(task)
         ]
 
-        return self.nccl_reshard_refit_info
+        # The driver also runs without Megatron. Convert before the first Ray
+        # boundary; keep the native meshes and placements for local transfers.
+        return make_nccl_reshard_refit_info_wire_safe(self.nccl_reshard_refit_info)
 
     def _build_expert_groups(self, param_map):
         """Group this rank's local expert params into stack-ready views.
