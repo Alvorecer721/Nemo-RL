@@ -5,31 +5,18 @@ defaults: ../../grpo_math_8B_megatron.yaml
 grpo:
   num_prompts_per_step: 48
   num_generations_per_prompt: 16
-  max_num_epochs: 1
   max_num_steps: 92
-  normalize_rewards: true
   use_leave_one_out_baseline: false
-  overlong_filtering: false
   val_period: 0
-  val_at_start: false
-  val_at_end: false
   seed: ${oc.decode:${oc.env:AP_SEED,42}}
-  use_dynamic_sampling: false
   skip_reference_policy_logprobs_calculation: true
   async_grpo: null
   cot_think_token_ids:
   - 32
   - 33
-  seq_logprob_error_threshold: null
-  reward_shaping:
-    enabled: false
-    alp_coef: null
 loss_fn:
   reference_policy_kl_penalty: 0.0
-  ratio_clip_min: 0.2
-  ratio_clip_max: 0.2
   ratio_clip_c: 3.0
-  token_level_loss: true
   use_importance_sampling_correction: true
   force_on_policy_ratio: true
   truncated_importance_sampling_type: tis
@@ -39,10 +26,8 @@ checkpointing:
   enabled: true
   checkpoint_dir: ${oc.env:AP_RUN_DIR}/checkpoints
   metric_name: null
-  higher_is_better: true
   keep_top_k: null
   save_period: ${oc.decode:${oc.env:AP_SAVE_PERIOD,100000}}
-  checkpoint_must_save_by: null
   save_optimizer: false
   save_data_plane: true
 policy:
@@ -52,14 +37,11 @@ policy:
     chat_template_kwargs:
       enable_thinking: false
   train_global_batch_size: 768
-  train_micro_batch_size: 1
   logprob_batch_size: 2
   logprob_chunk_size: 256
   max_total_sequence_length: 2048
-  max_grad_norm: 1.0
   sequence_packing:
     enabled: false
-  make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
   megatron_cfg:
     tensor_model_parallel_size: 2
     pipeline_model_parallel_size: 4
@@ -69,25 +51,16 @@ policy:
     env_vars:
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
     bias_activation_fusion: false
-    use_fused_linear_logprobs: false
     defer_fp32_logits: true
     optimizer:
       lr: 1.0e-06
       min_lr: 1.0e-06
-      weight_decay: 0.01
-      adam_beta1: 0.9
-      adam_beta2: 0.999
-      adam_eps: 1.0e-08
       use_precision_aware_optimizer: false
     scheduler:
-      lr_decay_style: constant
       lr_warmup_iters: 0
       lr_warmup_init: 1.0e-06
   generation:
     max_new_tokens: 2048
-    temperature: 1.0
-    top_p: 1.0
-    top_k: null
     stop_token_ids:
     - 2
     - 68
@@ -102,27 +75,21 @@ policy:
       env_vars:
         PYTHONPATH: ${oc.env:AP_EXPERIMENT_DIR}
       tensor_parallel_size: 4
-      pipeline_parallel_size: 1
       gpu_memory_utilization: 0.75
       max_model_len: 2048
       async_engine: true
       use_tqdm: false
-      enable_vllm_metrics_logger: true
-      vllm_metrics_logger_interval: 0.5
       load_format: dummy
 data:
   max_input_seq_length: 512
   shuffle: false
-  num_workers: 1
   train:
     dataset_name: GSM8K
     split: train
     split_validation_size: 0.0
-  validation: null
   default:
     prompt_file: null
     system_prompt_file: examples/prompts/apertus_bench_gsm8k_system_${oc.env:AP_ANSWER_MARKER,boxed}.txt
-    processor: math_hf_data_processor
     env_name: bracket_math
 env:
   bracket_math:
@@ -131,8 +98,6 @@ env:
     answer_marker: ${oc.env:AP_ANSWER_MARKER,boxed}
 data_plane:
   enabled: true
-  impl: transfer_queue
-  backend: simple
 async_rl:
   sampler:
     name: windowed
@@ -180,4 +145,3 @@ logger:
 cluster:
   gpus_per_node: 4
   num_nodes: 16
-  segment_size: null
