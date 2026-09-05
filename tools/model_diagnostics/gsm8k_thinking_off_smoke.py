@@ -210,6 +210,10 @@ def run(cfg: SmokeConfig, output_dir: Path, *, preflight_only: bool) -> None:
     if preflight_only:
         return
 
+    from nemo_rl.models.generation.vllm.patches import ensure_vllm_source_compat
+
+    # Match the certified image's import probe and NeMo's worker startup.
+    ensure_vllm_source_compat()
     from vllm import LLM, SamplingParams
 
     metadata["versions"] = {
