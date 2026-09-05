@@ -33,6 +33,7 @@ class SmokeConfig(BaseModel):
     sample_count: int = Field(gt=0)
     seed: int
     max_sequence_length: int = Field(gt=0)
+    max_new_tokens: int | None = Field(default=None, gt=0)
     temperature: float = Field(gt=0)
     top_p: float = Field(gt=0, le=1)
     top_k: int
@@ -110,6 +111,8 @@ def run(cfg: SmokeConfig, output_dir: Path, *, preflight_only: bool) -> None:
         budget = cfg.max_sequence_length - len(tokens)
         if budget <= 0:
             raise ValueError(f"Prompt {source_index} exceeds the total context budget")
+        if cfg.max_new_tokens is not None:
+            budget = min(budget, cfg.max_new_tokens)
         rows.append(
             {
                 "source_index": source_index,
