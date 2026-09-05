@@ -64,7 +64,8 @@
 **Interface:** Produces an immutable image, validation results and a documented baseline for rollout PP implementation.
 
 - [ ] Review integrated diffs and resolve findings; require clean committed source and recursive submodule state.
-- [ ] Submit the existing image builder with HERMETIC_CACHE_TAG=rebuild and NVTE_WITH_NCCL_EP=0, using a task-specific cache/output where needed for isolation.
-- [ ] Monitor build phases; diagnose and fix concrete failures. Verify baked imports, exact package versions, source fingerprint and output image integrity.
+- [ ] In a fresh first allocation, submit the image builder with HERMETIC_CACHE_TAG=rebuild and NVTE_WITH_NCCL_EP=0. This builds and publishes only the hermetic cache, prints its fingerprint and pyproject/lock digests, and exits without producing a release image or SquashFS. Verify the printed pins exactly match the committed target values before proceeding.
+- [ ] In a second fresh allocation, use the verified hermetic cache pin to assemble the release image and SquashFS, then verify baked imports, exact package versions, source fingerprint and output image integrity. The allocations are separate because the 334 GiB allocation-local Podman graph cannot safely hold both the dependency rebuild and release-layer commit.
+- [ ] Monitor both build jobs; diagnose and fix concrete failures. Do not mark either phase complete until its allocation succeeds and its required outputs are verified.
 - [ ] Run focused GPU regressions and a bounded 70B training/refit plus checkpoint-resume validation against the candidate image, with unchanged dataset/model identities.
 - [ ] Report source pins, image path, jobs, completed checks and remaining limitations; do not report the foundation as validated while required checks remain outstanding.

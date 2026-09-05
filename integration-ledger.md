@@ -38,4 +38,6 @@ Ruling: local integration commits use DCO sign-off without GPG signatures becaus
 
 Ruling: keep unrelated package identities fixed during integration; update TE's static runtime metadata to match its pinned PyTorch source instead of retaining the incomplete old declaration. The newly required nvdlfw-inspect package is part of TE's declared dependency set.
 
+Ruling: image qualification requires two fresh allocations because the 334 GiB allocation-local Podman graph cannot safely contain both the hermetic dependency rebuild and the release-layer commit. The first allocation will use HERMETIC_CACHE_TAG=rebuild to build and publish only the hermetic cache, print its fingerprint and pyproject/lock digests, and exit without a release image or SquashFS. The printed values must match the committed target pins before a second fresh allocation uses that cache to assemble the release image and SquashFS and run final version checks. Neither phase has been run or completed; GPU checks and bounded 70B training/refit with checkpoint save/resume remain outstanding, and rollout validation stays at PP1 before any later PP implementation.
+
 Review artifacts and detailed command logs are under /tmp/nrl-pp-integration; durable validation records will accompany the image/run results. No main branch, historical checkpoint, or existing user allocation was changed.
