@@ -54,6 +54,7 @@ policy:
   train_global_batch_size: 768
   train_micro_batch_size: 1
   logprob_batch_size: 2
+  logprob_chunk_size: 256
   max_total_sequence_length: 2048
   max_grad_norm: 1.0
   sequence_packing:
@@ -69,6 +70,7 @@ policy:
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
     bias_activation_fusion: false
     use_fused_linear_logprobs: false
+    defer_fp32_logits: true
     optimizer:
       lr: 1.0e-06
       min_lr: 1.0e-06
