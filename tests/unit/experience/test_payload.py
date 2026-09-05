@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from nemo_rl.data_plane.schema import (
+    EPISODE_SUCCESS,
     INVALID_TOOL_CALL_MASK,
     MALFORMED_THINKING_MASK,
 )
@@ -378,3 +380,53 @@ def test_pack_payload_stamps_violation_counts_on_tags() -> None:
             "num_assistant_messages": 0,
         },
     ]
+
+
+@pytest.mark.parametrize("history_has_logprobs", [False, True])
+def test_payload_keeps_episode_success_separate_and_masks_all_generated_turns(
+    history_has_logprobs,
+):
+    completion = _completion(route_start=10, reward=2.7, with_routes=False)
+    completion.episode_success = 0.0
+    # The original prompt contains an assistant message; it must not be charged.
+    history = {
+        "role": "assistant",
+        "content": "old",
+        "token_ids": torch.tensor([5, 6, 7]),
+    }
+    if history_has_logprobs:
+        history["generation_logprobs"] = torch.zeros(3)
+    completion.message_log.insert(0, history)
+    completion.message_log.append(
+        {
+            "role": "assistant",
+            "content": "second response",
+            "token_ids": torch.tensor([40, 41, 42]),
+            "generation_logprobs": torch.tensor([-0.1, -0.2, -0.3]),
+        }
+    )
+    record = _record([completion])
+    record.prompt.insert(0, history)
+    batch = record_to_train_batch(
+        record, pad_value_dict={"token_ids": 0}, include_message_violation_fields=False
+    )
+    assert batch["total_reward"].item() == torch.tensor(2.7).item()
+    assert batch[EPISODE_SUCCESS].tolist() == [0.0]
+    assert batch["token_mask"].sum().item() == 5  # two generated turns, 2 + 3
+    assert batch["token_mask"][0, :5].sum().item() == 0  # complete prompt history
+    _, fields, _ = pack_payload(batch, weight_version=1, group_id="q", prompt_idx=0)
+    assert fields[EPISODE_SUCCESS].item() == 0.0
+    again = record_to_train_batch(
+        record, pad_value_dict={"token_ids": 0}, include_message_violation_fields=False
+    )
+    torch.testing.assert_close(again["token_mask"], batch["token_mask"])
+    assert ("generation_logprobs" in history) == history_has_logprobs
+
+
+def test_payload_missing_success_is_not_inferred_from_reward():
+    batch = record_to_train_batch(
+        _record([_completion(route_start=0, reward=1.0)]),
+        pad_value_dict={"token_ids": 0},
+        include_message_violation_fields=False,
+    )
+    assert torch.isnan(batch[EPISODE_SUCCESS]).all()

@@ -81,7 +81,7 @@ class MockEnvironment(EnvironmentInterface):
         self, messages: list[LLMMessageLogType], env_info: list[dict]
     ) -> EnvironmentReturn:
         self._calls += 1
-        return (
+        return EnvironmentReturn(
             [{"role": "environment", "content": "observation"}] * len(messages),
             [{}] * len(messages),
             [[]] * len(messages),

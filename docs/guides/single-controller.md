@@ -230,6 +230,61 @@ Do not carry `max_num_epochs: -1` across either. [ppo.md](./ppo.md#asynchronous-
 | *(no legacy equivalent — matches legacy `max_trajectory_age + 1` batches in flight)* | `max_inflight_prompts: num_prompts_per_step × (max_lookahead_versions + 1)` |
 | *(no legacy equivalent — legacy sizes its buffer to `num_prompts_per_step × max_trajectory_age_steps × 2`)* | `max_buffered_rollouts: num_prompts_per_step × (max_lookahead_versions + 1)` (tight; see the [Config → behavior map](#config--behavior-map) for per-sampler values) |
 
+## Adaptive length penalty (ALP)
+
+SingleController supports ALP with the GRPO advantage estimator, including
+composite task rewards and multi-turn rollouts. For each complete group of `G`
+rollouts of one prompt occurrence, it applies
+`shaped_reward = task_reward - alp_coef * success_rate * response_tokens / max_response_length`
+before computing advantages. `success_rate` is the fraction of binary successful
+episodes in that group. The penalty has no positive floor: an all-unsuccessful
+group receives no length penalty. Shaped rewards are not clipped.
+
+```yaml
+grpo:
+  reward_shaping:
+    enabled: true
+    alp_coef: 0.25
+    alp_success_source: episode_success
+    max_response_length: 12288
+    overlong_buffer_length: null
+    overlong_buffer_penalty: null
+    stop_properly_penalty_coef: null
+```
+
+These values illustrate the configuration; tune the coefficient and normalization
+length for the experiment. ALP requires at least two generations per prompt.
+Inherited overlong and stop-properly shaping settings must be cleared as shown.
+PPO, other advantage estimators, reward scaling, and dynamic sampling are not
+supported with SC ALP and are rejected during setup.
+
+Native environments provide `EnvironmentReturn.episode_successes`, a binary
+tensor with one value per graded state. Return an `EnvironmentReturn` object and
+access its named fields; it now includes this optional seventh field. The native
+rollout retains the final graded outcome across turns, while accumulating task
+rewards separately. NeMo Gym graders provide `episode_success` in the full rollout
+result alongside `reward`. That value describes episode correctness before
+format or other reward penalties. Missing outcomes are not inferred from the
+composite score and cause ALP to reject the group.
+
+For environments whose accumulated episode reward is itself exactly binary,
+`alp_success_source: binary_reward` explicitly uses that reward as success. It
+rejects fractional, signed, missing, or nonfinite values. Do not use this mode
+for composite scores or accumulated per-turn rewards that can exceed one.
+
+`response_tokens` counts all newly generated assistant tokens across turns,
+including thinking and final answers. The original generated-token mask excludes
+historical assistant messages, prompt tokens, tool observations, and padding.
+Policy-side sample filtering does not change the lengths or success-rate
+denominator. Prompt occurrence IDs keep repeated instances of identical prompt
+text in separate groups for both ALP and GRPO advantages.
+
+The data-plane task reward remains unchanged, so replay or retries recompute ALP
+from the raw reward. The `reward` metric reports that raw reward; `alp/shaped_reward`,
+`alp/penalty`, `alp/success_rate`, and `alp/response_tokens` report the shaping
+statistics. Checkpoints made before the success field was added require fresh
+rollouts to use `alp_success_source: episode_success`.
+
 ## Known Missing Features
 
 The SC path is still under active development. Feature gaps are tracked in [issue #2625](https://github.com/NVIDIA-NeMo/RL/issues/2625). Notable items:
@@ -241,6 +296,16 @@ The SC path is still under active development. Feature gaps are tracked in [issu
 - Generation backend: vLLM and Megatron generation are supported; SGLang and TRT-LLM have not been tested on SC.
 - Validation is not yet supported (setup raises on `val_period > 0`, `val_at_start`, or `val_at_end`); checkpointing is.
 - (PPO) Rollout drop budgets — `async_rl.rollout_failure.max_skipped_prompts` and `max_consecutive_dropped_prompts` must both be `0`. A drop shortens the step, and the critic shards it against the configured `value.train_global_batch_size` rather than its actual size, so setup rejects a non-zero budget. The resiliency layer stays available on GRPO.
-- Reward shaping and sample filtering — `reward_shaping`, `reward_scaling`, and `use_dynamic_sampling` are implemented on neither algorithm block, so setup rejects them rather than silently skipping the shaping. Environment-flagged sample masking and `overlong_filtering` are supported; truncated completions are excluded from the loss through `sample_mask`, and a step in which every completion is filtered is rejected rather than skipped.
+- Reward shaping and sample filtering — ALP is supported with GRPO as described above. Other `reward_shaping`, `reward_scaling`, and `use_dynamic_sampling` settings are rejected during setup. Environment-flagged sample masking and `overlong_filtering` are supported; truncated completions are excluded from the loss through `sample_mask`, and a step in which every completion is filtered is rejected rather than skipped.
 - The `windowed` sampler has no `over_sampling_ratio` cap — over-produced groups aged past the window are evicted, wasting rollout compute.
 - The drain gate in refit is not yet supported.
+
+### Apertus GSM8K benchmark adapter
+
+The GSM8K2k recipe uses the boxed-answer benchmark environment with composite
+reward and a separate binary episode-success signal. Correctness, format and
+word-length terms are also exposed as reward components. Native unfinished
+deliberation is rejected by the scorer. The recipe performs92 single-update
+GRPO steps using windowed age1 and token TIS2; force_on_policy_ratio skips the
+pre-update logprob pass. This configuration does not establish backend gradient
+equivalence or enable ALP shaping.

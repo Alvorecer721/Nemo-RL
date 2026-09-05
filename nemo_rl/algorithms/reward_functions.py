@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import torch
 from pydantic import BaseModel
@@ -50,6 +50,10 @@ class RewardShapingConfig(BaseModel, extra="allow"):
     # response_length / max_response_length. Difficulty-aware — harder prompts (lower pass rate)
     # are penalized less. Mutually exclusive with the DAPO overlong / stop-properly penalties.
     alp_coef: float | None = None
+
+    # SingleController: use the environment's binary episode outcome by default.
+    # binary_reward is an explicit opt-in for unshaped, binary episode rewards.
+    alp_success_source: Literal["episode_success", "binary_reward"] = "episode_success"
 
 
 def ngram_rate(gen_ids: torch.Tensor, ngram_size: int) -> float:

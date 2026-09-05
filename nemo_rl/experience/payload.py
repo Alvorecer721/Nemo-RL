@@ -25,6 +25,7 @@ from nemo_rl.data.interfaces import LLMMessageLogType, VLMMessageLogType
 from nemo_rl.data_plane.codec import pack_jagged_fields
 from nemo_rl.data_plane.column_io import TOKEN_ALIGNED_FIELDS
 from nemo_rl.data_plane.schema import (
+    EPISODE_SUCCESS,
     INVALID_TOOL_CALL_MASK,
     MALFORMED_THINKING_MASK,
     MASK_SAMPLE,
@@ -106,7 +107,7 @@ def record_to_train_batch(
     Returns:
         BatchedDataDict with input_ids, input_lengths, generation_logprobs,
         token_mask, an all-ones sample_mask, the raw mask_sample and truncated
-        flags, prompt_ids_for_adv, total_reward, violation counts, and optional
+        flags, prompt_ids_for_adv, total_reward, episode_success, violation counts, and optional
         routed experts and message-violation masks.
     """
     # Lazy imports: grpo and llm_message_utils transitively pull
@@ -125,7 +126,11 @@ def record_to_train_batch(
     n = len(completions)
     assert n > 0, "PromptGroupRecord has no completions"
 
-    message_logs = [c.message_log for c in completions]
+    # Normalization adds logprobs and masks to messages. Keep the source record
+    # intact so packing it again cannot turn historical assistants into responses.
+    message_logs: list[LLMMessageLogType | VLMMessageLogType] = [
+        [dict(message) for message in c.message_log] for c in completions
+    ]
     violation_counts = [_violation_counts(message_log) for message_log in message_logs]
     prompt_token_count = sum(len(m["token_ids"]) for m in record.prompt)
     if include_message_violation_fields:
@@ -148,6 +153,9 @@ def record_to_train_batch(
         message_logs,  # type: ignore
         pad_value_dict=dict(pad_value_dict),  # type: ignore
     )
+    # Prompt history may already carry logprobs from an earlier rollout. The
+    # explicit prompt boundary is authoritative for which tokens are newly generated.
+    flat["token_loss_mask"][:, :prompt_token_count] = 0
 
     total_reward = torch.tensor(
         [float(c.reward) for c in completions], dtype=torch.float32
@@ -166,6 +174,17 @@ def record_to_train_batch(
         MASK_SAMPLE: mask_sample,
         TRUNCATED: truncated,
         "total_reward": total_reward,
+        # Missing outcomes remain visibly missing; ALP must never guess success
+        # from a format bonus, partial credit, or an accumulated multi-turn score.
+        EPISODE_SUCCESS: torch.tensor(
+            [
+                float(c.episode_success)
+                if c.episode_success is not None
+                else float("nan")
+                for c in completions
+            ],
+            dtype=torch.float32,
+        ),
         _VIOLATION_COUNTS_KEY: violation_counts,
     }
     if ROUTED_EXPERTS_FIELD in flat:

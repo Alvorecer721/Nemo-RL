@@ -101,6 +101,9 @@ def reduce_advantage_pump_metrics(
     num_invalid_tool_calls: list[int] | None = None,
     num_malformed_thinking: list[int] | None = None,
     num_assistant_messages: list[int] | None = None,
+    alp_shaped_rewards: list[torch.Tensor] | None = None,
+    alp_successes: list[torch.Tensor] | None = None,
+    alp_response_lengths: list[torch.Tensor] | None = None,
 ) -> dict[str, float]:
     """Reduce per-step accumulators from _advantage_stage into step scalars.
 
@@ -117,6 +120,9 @@ def reduce_advantage_pump_metrics(
         num_invalid_tool_calls: Per-sample invalid tool-call counts.
         num_malformed_thinking: Per-sample malformed-thinking counts.
         num_assistant_messages: Per-sample assistant message counts (rate denominator).
+        alp_shaped_rewards: ALP-adjusted rewards, one tensor per streaming chunk.
+        alp_successes: Binary episode outcomes before sample filtering.
+        alp_response_lengths: Newly generated assistant token counts across all turns.
 
     Returns:
         Step-level reward, advantage, token-count, optional sequence
@@ -127,6 +133,13 @@ def reduce_advantage_pump_metrics(
     out: dict[str, float] = {}
     if rewards:
         out["reward"] = float(torch.cat([r.flatten() for r in rewards]).mean())
+    if alp_shaped_rewards:
+        out["alp/shaped_reward"] = float(torch.cat(alp_shaped_rewards).mean())
+        out["alp/penalty"] = out["reward"] - out["alp/shaped_reward"]
+    if alp_successes:
+        out["alp/success_rate"] = float(torch.cat(alp_successes).mean())
+    if alp_response_lengths:
+        out["alp/response_tokens"] = float(torch.cat(alp_response_lengths).mean())
     if masked_advantages:
         cat = torch.cat([a.flatten() for a in masked_advantages])
         if cat.numel() > 0:

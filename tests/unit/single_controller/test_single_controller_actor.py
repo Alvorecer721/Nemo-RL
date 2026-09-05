@@ -25,12 +25,17 @@ from ray.exceptions import ActorDiedError
 from tensordict import TensorDict
 
 import nemo_rl.algorithms.single_controller as single_controller
+from nemo_rl.algorithms.advantage_estimator import (
+    AdvEstimatorConfig,
+    GRPOAdvantageEstimator,
+)
 from nemo_rl.algorithms.async_utils.replay_buffer import DataPlaneCheckpointBarrier
 from nemo_rl.algorithms.async_utils.staleness_sampler import BaseSampler
 from nemo_rl.algorithms.grpo import GRPOConfig, _initial_grpo_save_state
 from nemo_rl.algorithms.loss import ClippedPGLossConfig
 from nemo_rl.algorithms.metric_utils import SetupTimingMetrics
 from nemo_rl.algorithms.ppo import PPOConfig
+from nemo_rl.algorithms.reward_functions import RewardShapingConfig
 from nemo_rl.algorithms.single_controller import (
     SingleControllerActor,
     _pooled_opd_metrics,
@@ -39,6 +44,9 @@ from nemo_rl.algorithms.single_controller_utils.config import (
     AdvantageConfig,
     AsyncRLConfig,
     MasterConfig,
+)
+from nemo_rl.algorithms.single_controller_utils.utils import (
+    reduce_advantage_pump_metrics,
 )
 from nemo_rl.data_plane import KVBatchMeta
 from nemo_rl.data_plane.schema import ROLLOUT_METRICS
@@ -2261,7 +2269,7 @@ def test_advantage_stage_writes_gae_returns_alongside_advantages() -> None:
     ctrl._teacher_logprobs_required = False
     ctrl._is_ppo = True
     ctrl._master_config = SimpleNamespace(
-        ppo=SimpleNamespace(
+        ppo=PPOConfig.model_construct(
             seq_logprob_error_threshold=None,
             overlong_filtering=False,
         )
@@ -2296,3 +2304,114 @@ def test_advantage_stage_writes_gae_returns_alongside_advantages() -> None:
     )
     assert "returns" in (result_meta.fields or [])
     assert "advantages" in (result_meta.fields or [])
+
+
+@pytest.mark.parametrize("source", ["episode_success", "binary_reward"])
+@pytest.mark.parametrize(
+    "sample_filter", [None, "environment", "overlong", "sample_mask", "sequence_error"]
+)
+def test_alp_advantage_stage_preserves_raw_rewards_and_uses_occurrence_groups(
+    source, sample_filter
+):
+    raw = (
+        torch.tensor([1.1, -0.2, 0.1, 0.1])
+        if source == "episode_success"
+        else torch.tensor([1.0, 0.0, 0.0, 0.0])
+    )
+    data = TensorDict(
+        {
+            "prompt_ids_for_adv": torch.zeros(4, 5, dtype=torch.long),
+            "total_reward": raw.clone(),
+            "episode_success": torch.tensor([1.0, 0.0, 0.0, 0.0]),
+            "token_mask": torch.tensor(
+                [[0, 1, 0, 1, 0], [0, 1, 0, 1, 0], [0, 1, 1, 1, 1], [0, 1, 1, 1, 1]]
+            ),
+            "sample_mask": torch.ones(4),
+            "mask_sample": torch.zeros(4, dtype=torch.bool),
+            "truncated": torch.zeros(4, dtype=torch.bool),
+        },
+        batch_size=[4],
+    )
+    # The successful sibling must still contribute to p and length even when
+    # excluded from the loss; otherwise ALP silently becomes zero on this group.
+    if sample_filter == "environment":
+        data["mask_sample"][0] = True
+    elif sample_filter == "overlong":
+        data["truncated"][0] = True
+    elif sample_filter == "sample_mask":
+        data["sample_mask"][0] = 0
+    elif sample_filter == "sequence_error":
+        data["prev_logprobs"] = torch.zeros(4, 5)
+        data["generation_logprobs"] = torch.zeros(4, 5)
+        data["generation_logprobs"][0] = 1
+    ctrl = object.__new__(SingleControllerActor.__ray_metadata__.modified_class)
+    ctrl._dp_client = _AdvantageDataPlane(data)
+    ctrl._advantage_cfg = AdvantageConfig()
+    ctrl._advantage_estimator = GRPOAdvantageEstimator(
+        AdvEstimatorConfig(normalize_rewards=False, use_leave_one_out_baseline=False),
+        ClippedPGLossConfig(),
+    )
+    ctrl._algo_cfg = GRPOConfig(
+        num_generations_per_prompt=2,
+        overlong_filtering=sample_filter == "overlong",
+        seq_logprob_error_threshold=1.5 if sample_filter == "sequence_error" else None,
+        reward_shaping=RewardShapingConfig(
+            enabled=True,
+            alp_coef=0.5,
+            max_response_length=10,
+            alp_success_source=source,
+        ),
+    )
+    ctrl._policy_logprobs_required = sample_filter == "sequence_error"
+    ctrl._reference_logprobs_required = False
+    ctrl._teacher_logprobs_required = False
+    ctrl._is_ppo = False
+    ctrl._message_level_advantage_penalties_enabled = False
+    ctrl._step_log_dict = {
+        k: []
+        for k in (
+            "rewards",
+            "masked_advantages",
+            "sequence_lengths",
+            "num_mask_sample_filtered",
+            "seq_logprob_error_metrics",
+            "logprob_errors",
+            "alp_shaped_rewards",
+            "alp_successes",
+            "alp_response_lengths",
+        )
+    }
+    meta = KVBatchMeta(
+        partition_id="rollout_data",
+        task_name="train",
+        sample_ids=["a_g0", "b_g0", "a_g1", "b_g1"],
+        fields=list(data.keys()),
+    )
+    _, valid = asyncio.run(ctrl._advantage_stage(meta))
+    assert valid
+    shaped = raw - torch.tensor([0.05, 0.0, 0.1, 0.0])
+    expected = torch.tensor(
+        [
+            (shaped[0] - shaped[2]) / 2,
+            (shaped[1] - shaped[3]) / 2,
+            (shaped[2] - shaped[0]) / 2,
+            (shaped[3] - shaped[1]) / 2,
+        ]
+    )
+    torch.testing.assert_close(
+        ctrl._dp_client.written_fields["advantages"], expected[:, None].expand(4, 5)
+    )
+    torch.testing.assert_close(data["total_reward"], raw)
+    if sample_filter in {"environment", "overlong", "sequence_error"}:
+        assert ctrl._dp_client.written_fields["sample_mask"][0] == 0
+    assert (
+        "total_reward" not in ctrl._dp_client.written_fields
+    )  # retries cannot apply ALP twice
+    assert ("episode_success" in ctrl._dp_client.selected_fields) == (
+        source == "episode_success"
+    )
+    metrics = reduce_advantage_pump_metrics(**ctrl._step_log_dict)
+    assert metrics["reward"] == pytest.approx(raw.mean().item())
+    assert metrics["alp/shaped_reward"] == pytest.approx(shaped.mean().item())
+    assert metrics["alp/success_rate"] == 0.25
+    assert metrics["alp/response_tokens"] == 3.0

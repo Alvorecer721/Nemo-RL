@@ -30,6 +30,7 @@ TRTLLM_EXECUTABLE = (
     PY_EXECUTABLES.SYSTEM if USE_SYSTEM_EXECUTABLE else PY_EXECUTABLES.TRTLLM
 )
 ACTOR_ENVIRONMENT_REGISTRY: dict[str, str] = {
+    "nemo_rl.environments.bracket_math_environment.BracketMathEnvironment": PY_EXECUTABLES.SYSTEM,
     "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker": VLLM_EXECUTABLE,
     "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker": VLLM_EXECUTABLE,
     "nemo_rl.models.generation.sglang.sglang_worker.SGLangGenerationWorker": SGLANG_EXECUTABLE,

@@ -452,6 +452,7 @@ class AsyncRolloutImpl:
         task_name = input_sample["task_name"]
 
         total_reward = 0.0
+        episode_success = None
         turn_count = 0
         # token statistics
         total_token_count = 0
@@ -539,10 +540,24 @@ class AsyncRolloutImpl:
                 )
 
             # Update reward and termination statistics
-            # Multi-reward isn't supported in RolloutManager now, see
-            # https://github.com/NVIDIA-NeMo/RL/issues/2625 for more details.
-            assert isinstance(env_output.rewards, torch.Tensor)
-            total_reward += float(env_output.rewards[0].item())
+            # GRPO consumes the aggregate task reward, while ALP uses the
+            # separately graded episode outcome. Neither is inferred from the other.
+            step_reward = (
+                sum(
+                    float(component[0].item())
+                    for component in env_output.rewards.values()
+                )
+                if isinstance(env_output.rewards, dict)
+                else float(env_output.rewards[0].item())
+            )
+            total_reward += step_reward
+            # Keep only the latest graded state. In particular, do not carry a
+            # prior turn's success forward when the final grader omits it.
+            episode_success = (
+                float(env_output.episode_successes[0])
+                if env_output.episode_successes is not None
+                else None
+            )
             terminated = env_output.terminateds[0].item()
             env_obs_content = env_output.observations[0]["content"]
             tokenized_obs = self._tokenizer(
@@ -594,6 +609,7 @@ class AsyncRolloutImpl:
             env_extras=current_extra_env_info,
             truncated=truncated,
             reward=total_reward,
+            episode_success=episode_success,
         )
         sample_metrics = {
             "turn_count": turn_count,
@@ -1096,6 +1112,7 @@ class AsyncNemoGymRolloutImpl:
                     env_extras=result["full_result"],
                     truncated=truncated,
                     reward=float(result["full_result"]["reward"]),
+                    episode_success=result["full_result"].get("episode_success"),
                 )
             )
         return completions, penalty_counts

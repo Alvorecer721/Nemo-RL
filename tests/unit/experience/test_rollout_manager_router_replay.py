@@ -211,3 +211,86 @@ def test_second_turn_overwrites_prefix_fallback_routes() -> None:
         torch.cat((_routes(1, start=107), _fallback_routes(1))),
     )
     assert torch.equal(final_env["routed_experts"], _fallback_routes(2))
+
+
+def test_multiturn_composite_reward_keeps_only_final_success():
+    impl = _rollout_impl(
+        [
+            _generation_output(),
+            _generation_output((10, 11, 12, 20, 21, 31, 32, 40, 41)),
+        ],
+        max_rollout_turns=2,
+    )
+    sample = {
+        "idx": 0,
+        "message_log": [
+            {
+                "role": "user",
+                "content": "prompt",
+                "token_ids": torch.tensor([10, 11, 12]),
+            }
+        ],
+        "extra_env_info": None,
+        "task_name": "test",
+    }
+    feedback = [
+        EnvironmentReturn(
+            observations=[{"role": "user", "content": "feedback"}],
+            metadata=[None],
+            next_stop_strings=[None],
+            rewards={
+                "reward/correctness": torch.tensor([1.0]),
+                "reward/format": torch.tensor([0.1]),
+            },
+            terminateds=torch.tensor([last]),
+            answers=[None],
+            episode_successes=torch.tensor([0.0 if last else 1.0]),
+        )
+        for last in [False, True]
+    ]
+    with patch(
+        "nemo_rl.experience.rollout_manager.calculate_rewards", side_effect=feedback
+    ):
+        completion, metrics = asyncio.run(impl._run_single_rollout(sample, traj_idx=0))
+    torch.testing.assert_close(torch.tensor(completion.reward), torch.tensor(2.2))
+    assert completion.episode_success == 0.0
+    assert metrics["assistant_tokens"] == 4
+
+
+def test_missing_final_success_does_not_reuse_prior_turn():
+    impl = _rollout_impl(
+        [
+            _generation_output(),
+            _generation_output((10, 11, 12, 20, 21, 31, 32, 40, 41)),
+        ],
+        max_rollout_turns=2,
+    )
+    sample = {
+        "idx": 0,
+        "message_log": [
+            {
+                "role": "user",
+                "content": "prompt",
+                "token_ids": torch.tensor([10, 11, 12]),
+            }
+        ],
+        "extra_env_info": None,
+        "task_name": "test",
+    }
+    feedback = [
+        EnvironmentReturn(
+            observations=[{"role": "user", "content": "feedback"}],
+            metadata=[None],
+            next_stop_strings=[None],
+            rewards=torch.tensor([1.0]),
+            terminateds=torch.tensor([last]),
+            answers=[None],
+            episode_successes=None if last else torch.tensor([1.0]),
+        )
+        for last in [False, True]
+    ]
+    with patch(
+        "nemo_rl.experience.rollout_manager.calculate_rewards", side_effect=feedback
+    ):
+        completion, _ = asyncio.run(impl._run_single_rollout(sample, traj_idx=0))
+    assert completion.episode_success is None

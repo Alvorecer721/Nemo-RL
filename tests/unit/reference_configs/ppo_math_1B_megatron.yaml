@@ -35,6 +35,8 @@ ppo:
 
   reward_shaping:
     enabled: true
+    alp_coef: null
+    alp_success_source: episode_success
     overlong_buffer_length: 2048
     overlong_buffer_penalty: 1
     max_response_length: 14336

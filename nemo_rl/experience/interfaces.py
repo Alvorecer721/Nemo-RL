@@ -46,6 +46,9 @@ class Completion:
     env_extras: Optional[dict[str, Any]]
     truncated: bool
     reward: float
+    # Optional for existing producers; ALP requires this unless the run explicitly
+    # declares its scalar episode reward to be binary.
+    episode_success: float | None = None
 
 
 @dataclass

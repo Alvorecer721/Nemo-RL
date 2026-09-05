@@ -304,6 +304,7 @@ class SingleTurnVerifierEnvironment(EnvironmentInterface[SingleTurnVerifierMetad
             rewards=rewards,
             terminateds=done,
             answers=extracted_answers,
+            episode_successes=rewards.clone(),
         )
 
     def global_post_process_and_metrics(

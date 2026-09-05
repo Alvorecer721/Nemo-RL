@@ -49,6 +49,10 @@ class EnvironmentReturn(NamedTuple, Generic[MetadataT]):
     )  ## Tensor[B] for single-reward, dict of {name: Tensor[B]} for multi-reward (e.g. GDPO)
     terminateds: Tensor
     answers: list[str | None] | None
+    # Binary task success at the state graded by this step, separate from shaped
+    # or accumulated rewards. The rollout uses the last graded outcome, not a sum.
+    # None means this environment does not provide an episode-success signal.
+    episode_successes: Tensor | None = None
 
 
 class EnvironmentInterface(abc.ABC, Generic[MetadataT]):
