@@ -52,7 +52,7 @@ policy:
     chat_template_kwargs:
       enable_thinking: false
   train_global_batch_size: 768
-  train_micro_batch_size: 2
+  train_micro_batch_size: 1
   logprob_batch_size: 2
   max_total_sequence_length: 2048
   max_grad_norm: 1.0
