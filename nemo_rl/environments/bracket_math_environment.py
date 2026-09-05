@@ -1,6 +1,6 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Single-turn benchmark reward with independent binary episode success."""
+"""Apertus single-turn benchmark reward with independent binary episode success."""
 
 from __future__ import annotations
 

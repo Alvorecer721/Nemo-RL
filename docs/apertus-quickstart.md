@@ -66,6 +66,44 @@ Submitting from *inside* a compute-node container (e.g. a coding agent that can'
 - `policy.generation.vllm_cfg.sleep_level: 2` — **the colocation memory fix.** vLLM discards generation weights on offload instead of backing them up to host (~17 GiB/worker), because refit repopulates them every step. Without it the host-RAM peak crosses Ray's 95% threshold at the step-2 refit and a worker is OOM-killed. See the OOM-fix commit for the full accounting.
 - `gpu_memory_utilization` — the launcher overrides it to 0.40 for the colocated case.
 
+## Apertus benchmark rewards
+
+The `bracket_math` environment is this fork's Apertus benchmark adapter. Its
+historical name refers to the original answer marker. The adapter owns the boxed
+answer reward, format bonus, word penalty, and native Apertus thinking-mode check
+in [bracket_math_reward.py](../nemo_rl/environments/bracket_math_reward.py) and
+[bracket_math_environment.py](../nemo_rl/environments/bracket_math_environment.py).
+
+Reward composition uses NeMo's existing `EnvironmentReturn.rewards` mapping:
+`reward/correctness`, `reward/format`, `reward/length_penalty`, and optionally
+`reward/thinking_mode_penalty`. The unified rollout manager sums these components
+for GRPO. Our separate `episode_successes` field remains binary task correctness.
+Adding this penalty requires no controller or loss changes.
+
+The [70B thinking-mode recipe](../examples/configs/recipes/llm/grpo-apertus1p5-70b-16n4g-tp2pp4-gsm8k-2k-thinking-mode.yaml)
+enables the optional penalty through:
+
+```yaml
+env:
+  bracket_math:
+    enable_thinking: ${policy.tokenizer.chat_template_kwargs.enable_thinking}
+    thinking_mode_penalty: 0.1
+```
+
+The coefficient defaults to zero (disabled) and must be finite and nonnegative.
+An active penalty requires composite reward and an explicit boolean mode.
+Thinking off forbids either native delimiter; thinking on requires exactly one
+nonempty, closed block followed by a final response. The penalty is per response,
+independent of thinking length. The example coefficient is untuned; a uniform
+penalty across a prompt group cancels under GRPO centering, so learning requires
+variation in compliance within groups.
+
+For an adapter maintained outside this repository, NeMo also exposes
+[`register_env`](guides/environments.md#registering-custom-environments).
+Register the importable environment class and its actor Python runtime before
+training setup. Our existing registered adapter already provides the required
+boundary; all Apertus token rules stay there.
+
 ## Why the stock-release base
 
 The tree is rooted on the `v0.7.0` release whose stock NGC image supplies the host runtime (CUDA, drivers, system libraries); the Megatron-Bridge submodule points at the Apertus fork rebased onto the same bridge pin the release ships.
