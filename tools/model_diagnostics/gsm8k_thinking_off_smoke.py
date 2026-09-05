@@ -218,7 +218,7 @@ def run(cfg: SmokeConfig, output_dir: Path, *, preflight_only: bool) -> None:
 
     metadata["versions"] = {
         name: importlib.metadata.version(name)
-        for name in ["vllm", "transformers", "torch", "transformer_engine"]
+        for name in ["vllm", "transformers", "torch", "openai"]
     }
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     generation_config = json.loads((model / "generation_config.json").read_text())
