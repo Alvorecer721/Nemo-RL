@@ -187,16 +187,17 @@ def _make_tq_policy() -> tuple[TQPolicy, MagicMock]:
 
 
 class TestTQPolicySplitFanout:
-    def test_stamp_pad_seqlen_uses_current_policy_topology(self):
+    def test_isolated_meta_uses_current_policy_topology(self):
         p, _ = _make_tq_policy()
         meta = _meta()
         meta.sequence_lengths = [2827, 1536]
         meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] = 2827
 
         with patch.object(TQPolicy, "_packing_args", return_value=(None, None)):
-            p._stamp_pad_seqlen(meta)
+            isolated = p._isolated_meta(meta, fields=[], task_name="train")
 
-        assert meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2828
+        assert isolated.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2828
+        assert meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2827
 
     def test_begin_consumes_single_data_futures_with_ray_get(self):
         """run_all_workers_single_data returns plain ObjectRefs, not a
@@ -298,6 +299,31 @@ class TestTQPolicySplitFanout:
         assert out["all_mb_metrics"]["loss"] == [0.1, 0.1]  # twins dropped
         # _aggregate_train_results surfaces global_loss under "loss"
         assert out["loss"] == 1.0
+
+    def test_finish_propagates_mtp_metrics(self):
+        """Worker-reduced MTP metrics survive the TQPolicy aggregation layer."""
+        p, _ = _make_tq_policy()
+        with patch("nemo_rl.models.policy.tq_policy.ray") as mock_ray:
+            mock_ray.get.return_value = [
+                {
+                    "global_loss": 1.0,
+                    "grad_norm": 0.5,
+                    "all_mb_metrics": {"loss": [0.1]},
+                    "mtp_metrics": {
+                        "mtp_1_loss": 0.25,
+                        "mtp_1_acceptance_rate": 75.0,
+                        "grad_norm": 1.25,
+                    },
+                    "is_replica_leader": True,
+                }
+            ]
+            out = p.finish_train_step()
+
+        assert out["mtp_metrics"] == {
+            "mtp_1_loss": 0.25,
+            "mtp_1_acceptance_rate": 75.0,
+            "grad_norm": 1.25,
+        }
 
     def test_abort_consumes_single_data_futures_with_ray_get(self):
         p, wg = _make_tq_policy()
