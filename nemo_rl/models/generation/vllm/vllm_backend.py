@@ -244,6 +244,30 @@ def _read_mtp_layer_weights_from_checkpoint(
     return weights
 
 
+def _check_direct_local_shape(
+    hf_name: str, vllm_param: torch.Tensor, param_info: dict, refit_info: dict
+) -> None:
+    from nemo_rl.weight_sync.nccl_reshard_utils import (
+        get_tp_shard_dim,
+        is_expert_param,
+    )
+
+    if is_expert_param(hf_name):
+        return
+    expected = list(param_info["global_shape"])
+    gen_tp = int(refit_info.get("gen_tp_size", 1))
+    tp_dim = get_tp_shard_dim(hf_name)
+    if tp_dim is not None and len(expected) > 1:
+        expected[tp_dim] //= gen_tp
+    if tuple(vllm_param.shape) != tuple(expected):
+        raise ValueError(
+            f"build_hf_to_local_param_map: {hf_name!r} has local shape "
+            f"{tuple(vllm_param.shape)} but the wire shape "
+            f"{tuple(param_info['global_shape'])} sharded by gen TP {gen_tp} "
+            f"expects {tuple(expected)}"
+        )
+
+
 class VllmInternalWorkerExtension:
     # Per-PP-stage refit groups, None until init_nccl_reshard_comm_group builds them.
     # Declared rather than sprung into existence so a rebuild can release the previous
@@ -1119,6 +1143,11 @@ class VllmInternalWorkerExtension:
     def build_hf_to_local_param_map(self, refit_info: dict) -> HFToLocalParamMap:
         """Build the vLLM-backend ``hf_to_local_param_map`` (HFToLocalParamMap).
 
+        Direct (1:1) targets are checked against the wire shape sharded by gen
+        TP before they are handed to xferdtensor: a vocab shard vLLM padded, or
+        a layout the train side did not anticipate, must fail here rather than
+        scatter into a tensor of the wrong shape.
+
         Wraps the ``(vllm_param, merged_slice)`` resolution from
         ``_build_hf_to_gen_backend_mapping`` into ``LocalParamSpec``s:
         - direct (slice ``None``): ``base`` is the live vLLM param; receive in place.
@@ -1248,12 +1277,13 @@ class VllmInternalWorkerExtension:
                     f"build_hf_to_local_param_map: wire dtype {wire_dtype} does not "
                     f"match target dtype {vllm_param.dtype} for {hf_name!r}"
                 )
-            else:
-                specs[hf_name] = (
-                    LocalParamSpec(base=vllm_param.data)
-                    if merged_slice is None
-                    else _merged_param_spec(vllm_param, merged_slice)
+            elif merged_slice is None:
+                _check_direct_local_shape(
+                    hf_name, vllm_param, param_info_by_name[hf_name], refit_info
                 )
+                specs[hf_name] = LocalParamSpec(base=vllm_param.data)
+            else:
+                specs[hf_name] = _merged_param_spec(vllm_param, merged_slice)
         return HFToLocalParamMap(specs=specs)
 
     def _build_hf_to_gen_backend_mapping(self, refit_info):

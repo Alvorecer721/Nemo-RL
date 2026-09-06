@@ -15,7 +15,7 @@ import os
 import warnings
 from collections import defaultdict
 from contextlib import nullcontext
-from typing import Any, Iterable, Optional, Union
+from typing import Any, Callable, Iterable, Optional, Union
 
 import numpy as np
 import ray
@@ -63,6 +63,86 @@ from nemo_rl.utils.multimodal_payload_metrics import (
 from nemo_rl.utils.timer import Timer
 
 PathLike = Union[str, "os.PathLike[Any]"]
+
+
+class RefitManifestMismatchError(RuntimeError):
+    """Training workers disagree about the logical weights sent by refit."""
+
+
+def _nccl_reshard_refit_manifest(
+    refit_info: dict[str, Any],
+) -> dict[str, tuple[tuple[int, ...], str]]:
+    """Canonicalize bulk and misc NCCL-reshard entries into one HF manifest."""
+    manifest: dict[str, tuple[tuple[int, ...], str]] = {}
+    per_layer_params = refit_info.get("per_layer_params", {})
+    for layer_name in refit_info.get("layer_names", []):
+        for param_info in per_layer_params.get(layer_name, []):
+            name = param_info["name"]
+            if name in manifest:
+                raise RefitManifestMismatchError(
+                    f"NCCL-reshard metadata contains duplicate key {name!r}"
+                )
+            manifest[name] = (
+                tuple(param_info["global_shape"]),
+                str(param_info["dtype"]),
+            )
+
+    for name, meta in refit_info.get("misc_meta", {}).items():
+        if name in manifest:
+            raise RefitManifestMismatchError(
+                f"NCCL-reshard key {name!r} appears in both bulk and misc paths"
+            )
+        manifest[name] = (tuple(meta["shape"]), str(meta["dtype"]))
+    return manifest
+
+
+def _format_manifest_keys(keys: set[str], *, limit: int = 8) -> str:
+    ordered = sorted(keys)
+    rendered = ", ".join(repr(key) for key in ordered[:limit])
+    if len(ordered) > limit:
+        rendered += f", ... ({len(ordered) - limit} more)"
+    return rendered
+
+
+def _require_consistent_refit_manifests(
+    manifests: list[Any], *, transfer_name: str
+) -> None:
+    """Fail before transfer when policy ranks expose different HF manifests."""
+    if not manifests:
+        raise RefitManifestMismatchError(
+            f"{transfer_name} setup returned no policy-worker manifests"
+        )
+
+    expected = manifests[0]
+    for worker_idx, actual in enumerate(manifests[1:], start=1):
+        if actual == expected:
+            continue
+        if expected is None or actual is None:
+            raise RefitManifestMismatchError(
+                f"{transfer_name} manifest differs between policy worker 0 "
+                f"({expected is not None}) and worker {worker_idx} "
+                f"({actual is not None}); values indicate whether a manifest "
+                "was returned"
+            )
+
+        expected_keys = set(expected)
+        actual_keys = set(actual)
+        missing = expected_keys - actual_keys
+        unexpected = actual_keys - expected_keys
+        changed = {
+            key for key in expected_keys & actual_keys if expected[key] != actual[key]
+        }
+        details = []
+        if missing:
+            details.append(f"missing: {_format_manifest_keys(missing)}")
+        if unexpected:
+            details.append(f"unexpected: {_format_manifest_keys(unexpected)}")
+        if changed:
+            details.append(f"shape/dtype changed: {_format_manifest_keys(changed)}")
+        raise RefitManifestMismatchError(
+            f"{transfer_name} manifest differs between policy worker 0 and "
+            f"worker {worker_idx}: {'; '.join(details)}"
+        )
 
 
 def _aggregate_megatron_flops_metrics(
@@ -1034,7 +1114,11 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         """
         futures = self.worker_group.run_all_workers_single_data("prepare_refit_info")
         results = ray.get(futures)
-        # Only get the first worker's info since all workers will have the same result
+        _require_consistent_refit_manifests(
+            results,
+            transfer_name="HF-schema refit",
+        )
+        # The equality check above makes returning one copy safe.
         return results[0]
 
     def finish_inference(self) -> None:
@@ -1259,6 +1343,10 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             gen_world_size=gen_world_size,
         )
         results = ray.get(futures)
+        _require_consistent_refit_manifests(
+            [_nccl_reshard_refit_manifest(result) for result in results],
+            transfer_name="NCCL-reshard refit",
+        )
         return results[0]
 
     def nccl_reshard_refit(
@@ -1325,14 +1413,24 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             )
         ray.get(futures)
 
-    def finalize_async_save(self) -> None:
-        """Block until all workers' in-flight async checkpoint writes complete.
+    def submit_async_save_finalization(self) -> Callable[[], None]:
+        """Submit finalization to every worker and return a blocking waiter.
 
-        No-op when async_save is disabled. Must be called before the checkpoint
-        directory is renamed from tmp_step_N/ to step_N/.
+        Submitting every rank from the caller thread preserves collective order
+        relative to the next training RPC. The returned callable only waits for
+        the already-submitted work, so it is safe to run in the checkpoint
+        manager's background finalization thread.
         """
         futures = self.worker_group.run_all_workers_single_data("finalize_async_save")
-        ray.get(futures)
+
+        def wait_for_finalization() -> None:
+            ray.get(futures)
+
+        return wait_for_finalization
+
+    def finalize_async_save(self) -> None:
+        """Synchronously finalize every worker's in-flight checkpoint write."""
+        self.submit_async_save_finalization()()
 
     def shutdown(self) -> bool:
         """Shut down all HF workers and clean up resources."""

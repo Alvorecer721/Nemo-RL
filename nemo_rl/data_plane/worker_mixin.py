@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import numpy as np
 import torch
+from torch.utils._pytree import tree_map
 
 FetchPolicy = Literal["auto", "independent", "leader_broadcast"]
 
@@ -53,6 +54,14 @@ if TYPE_CHECKING:
     from nemo_rl.data_plane.interfaces import DataPlaneClient
 
 
+def _metric_tensor_to_python(value: Any) -> Any:
+    """Keep training results independent of backend tensor pickle loaders."""
+    if isinstance(value, torch.Tensor):
+        detached = value.detach()
+        return detached.item() if detached.numel() == 1 else detached.cpu().tolist()
+    return value
+
+
 def _broadcast_batched_data_dict(
     data: Optional[BatchedDataDict[Any]],
     *,
@@ -65,8 +74,10 @@ def _broadcast_batched_data_dict(
     Two-phase to avoid pickling tensor payloads on the hot path: a small
     descriptor (per-key dtype/shape) ships via ``broadcast_object_list``
     first, then each tensor's data ships via ``broadcast`` on its
-    current device. The leader supplies ``data``; non-leaders pass
-    ``None`` and get an empty BatchedDataDict filled in-place.
+    transport device. Gloo and NCCL do not support ``torch.int16``, so those
+    tensors are widened losslessly to int32 and narrowed after receipt. The leader
+    supplies ``data``; non-leaders pass ``None`` and get an empty
+    BatchedDataDict filled in-place.
     """
     # NCCL groups can only broadcast CUDA tensors; pick the broadcast
     # device from the group backend so CPU TQ outputs are moved to GPU
@@ -153,23 +164,23 @@ def _broadcast_batched_data_dict(
         kind = entry[1]
         if kind == "tensor":
             dtype_str, shape, src_device = entry[2], entry[3], entry[4]
+            dtype = getattr(torch, dtype_str.split(".")[-1])
+            # NCCL has no int16 ("Short") type; ship as int32 and narrow back
+            # (routed_experts rides TQ as int16).
+            wire_dtype = torch.int32 if dtype == torch.int16 else dtype
             if is_leader:
-                tensor = out[key]
-                if tensor.device.type != torch.device(bcast_device).type:
-                    tensor = tensor.to(bcast_device)
-                    out[key] = tensor
+                # Collectives send storage order, so normalize strided inputs.
+                # Keep the leader's original tensor and device in ``out``.
+                tensor = out[key].to(device=bcast_device, dtype=wire_dtype).contiguous()
             else:
-                dtype = getattr(torch, dtype_str.split(".")[-1])
-                tensor = torch.empty(shape, dtype=dtype, device=bcast_device)
-                out[key] = tensor
+                tensor = torch.empty(shape, dtype=wire_dtype, device=bcast_device)
             torch.distributed.broadcast(tensor, src=src, group=group)
-            # Restore non-leader tensors to the leader's source device
-            # so downstream code sees the same layout pre-broadcast.
-            if (
-                not is_leader
-                and torch.device(src_device).type != torch.device(bcast_device).type
-            ):
-                out[key] = tensor.to(src_device)
+            if not is_leader:
+                if tensor.dtype != dtype:
+                    tensor = tensor.to(dtype)
+                if torch.device(src_device).type != torch.device(bcast_device).type:
+                    tensor = tensor.to(src_device)
+                out[key] = tensor
         elif kind == "packed_wire":
             dtype_str, src_device, offsets, shapes, pad_to_max_shape = entry[2:]
             if is_leader:
@@ -233,8 +244,8 @@ class TQWorkerMixin:
         # that carry the flag into ``models/megatron/data.py``.
         #
         # ``train_microbatch_presharded`` is the exception: it lands in
-        # ``_train_microbatch_body``, which passes none of the capability flags
-        # and never attaches the media-token validity mask. That path is
+        # ``_train_microbatch_body``, which forwards the capability flags but
+        # never attaches the media-token validity mask. That path is
         # SingleController-only, so ``train_microbatch`` raises for a
         # multimodal model rather than training on rows it mis-describes.
         if self._dp_client is not None:
@@ -753,7 +764,10 @@ class TQWorkerMixin:
         """
         result = self.finish_train_step()  # type: ignore[attr-defined]
         result["is_replica_leader"] = bool(self._is_replica_leader())
-        return result
+        # Megatron patches Tensor's storage unpickler to a Megatron function.
+        # The controller has no Megatron dependency; only scalar/list metrics
+        # need to cross this boundary, after the optimizer has already stepped.
+        return tree_map(_metric_tensor_to_python, result)
 
     @wrap_with_nvtx_name("policy_worker/abort_train_step_presharded")
     def abort_train_step_presharded(self) -> None:

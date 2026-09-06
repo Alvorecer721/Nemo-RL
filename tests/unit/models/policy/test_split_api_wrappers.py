@@ -29,10 +29,22 @@ contracts cheaply:
 
 from __future__ import annotations
 
+import io
+import pickle
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
+import pytest
+import torch
+
+from nemo_rl.algorithms.single_controller_utils.utils import aggregate_step_metrics
 from nemo_rl.data_plane import KVBatchMeta
-from nemo_rl.data_plane.schema import DP_TRAIN_FIELDS, ROUTED_EXPERTS_FIELD
+from nemo_rl.data_plane.schema import (
+    DP_TRAIN_FIELDS,
+    GLOBAL_FORWARD_PAD_SEQLEN,
+    ROUTED_EXPERTS_FIELD,
+)
 from nemo_rl.data_plane.worker_mixin import TQWorkerMixin
 from nemo_rl.models.policy.tq_policy import TQPolicy
 
@@ -83,6 +95,50 @@ def _meta() -> KVBatchMeta:
 
 
 class TestPreshardedWrappers:
+    def test_finish_metrics_unpickle_without_backend_and_preserve_reduction(
+        self, monkeypatch
+    ):
+        backend = types.ModuleType("test_backend_storage_loader")
+
+        def load_storage(data):
+            return torch.load(io.BytesIO(data), weights_only=True)
+
+        load_storage.__module__ = backend.__name__
+        load_storage.__qualname__ = "load_storage"
+        backend.load_storage = load_storage
+        monkeypatch.setitem(sys.modules, backend.__name__, backend)
+        monkeypatch.setattr(torch.storage, "_load_from_bytes", load_storage)
+        raw = {
+            "global_loss": torch.tensor([0.25]),
+            "grad_norm": torch.tensor([0.5]),
+            "model_dtype": torch.bfloat16,
+            "all_mb_metrics": {
+                "loss": [torch.tensor(0.125), torch.tensor(0.125)],
+                "sampling_importance_ratio": [torch.tensor(0.5), torch.tensor(0.5)],
+                "is_oob_ratio": [torch.tensor(0.125), torch.tensor(0.0)],
+            },
+        }
+        raw_payload = pickle.dumps(raw)
+        worker = _SplitStubWorker()
+        with patch.object(worker, "finish_train_step", return_value=raw):
+            encoded = pickle.dumps(worker.finish_train_step_presharded())
+        monkeypatch.delitem(sys.modules, backend.__name__)
+        with pytest.raises(ModuleNotFoundError, match=backend.__name__):
+            pickle.loads(raw_payload)
+        received = pickle.loads(encoded)
+        assert received["model_dtype"] == torch.bfloat16
+        assert isinstance(raw["global_loss"], torch.Tensor)
+        policy, _ = _make_tq_policy()
+        with patch("nemo_rl.models.policy.tq_policy.ray") as mock_ray:
+            mock_ray.get.return_value = [received]
+            reduced = aggregate_step_metrics(policy.finish_train_step())
+        assert reduced == {
+            "loss": 0.25,
+            "grad_norm": 0.5,
+            "sampling_importance_ratio": 1.0,
+            "is_oob_ratio": 0.125,
+        }
+
     def test_begin_forwards_args(self):
         w = _SplitStubWorker()
         loss_fn = object()
@@ -115,7 +171,11 @@ class TestPreshardedWrappers:
 def _make_tq_policy() -> tuple[TQPolicy, MagicMock]:
     """Bare TQPolicy with the attributes the split fan-out touches."""
     p = object.__new__(TQPolicy)
-    p.cfg = {"train_global_batch_size": 8, "train_micro_batch_size": 2}
+    p.cfg = {
+        "train_global_batch_size": 8,
+        "train_micro_batch_size": 2,
+        "make_sequence_length_divisible_by": 2,
+    }
     p._router_replay_enabled = False
     p.flops_tracker = None
     wg = MagicMock()
@@ -127,6 +187,18 @@ def _make_tq_policy() -> tuple[TQPolicy, MagicMock]:
 
 
 class TestTQPolicySplitFanout:
+    def test_isolated_meta_uses_current_policy_topology(self):
+        p, _ = _make_tq_policy()
+        meta = _meta()
+        meta.sequence_lengths = [2827, 1536]
+        meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] = 2827
+
+        with patch.object(TQPolicy, "_packing_args", return_value=(None, None)):
+            isolated = p._isolated_meta(meta, fields=[], task_name="train")
+
+        assert isolated.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2828
+        assert meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2827
+
     def test_begin_consumes_single_data_futures_with_ray_get(self):
         """run_all_workers_single_data returns plain ObjectRefs, not a
         MultiWorkerFuture — the fan-out must ray.get them (PR #2683

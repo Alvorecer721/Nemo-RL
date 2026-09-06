@@ -216,6 +216,9 @@ class SequencePackingConfig(TypedDict):
     # Preserve the packer's order (or omit for backward compatibility), or
     # execute each DP rank's assigned bins largest-first for allocator reuse.
     microbatch_order: NotRequired[Literal["packer", "largest_first"]]
+    # Fused packed loss (SequencePackingFusionLossWrapper) instead of the
+    # per-sequence unpacking wrapper; read in megatron/train.py.
+    fuse_loss: NotRequired[bool]
 
 
 class RewardModelConfig(TypedDict):
@@ -316,12 +319,18 @@ class MegatronConfigDisabled(TypedDict):
 class MegatronCheckpointConfig(TypedDict, total=False):
     """Checkpoint knobs passed through to Megatron Bridge CheckpointConfig."""
 
+    # Distribute replicated checkpoint shards across data-parallel ranks before
+    # saving. Large-model probes may disable this to keep each rank's save path
+    # independent while diagnosing collective or writer failures.
+    fully_parallel_save: bool
     # Offload disk writes to a persistent background worker so save_checkpoint
     # returns after D2H staging.
     async_save: bool
     # Skip metadata recomputation after the first two saves when the sharded
     # state structure is constant across steps.
     ckpt_assume_constant_structure: bool
+    # Validate the distributed sharding plan before loading a checkpoint.
+    ckpt_load_validate_sharding_integrity: bool
     # Field names match megatron.bridge CheckpointConfig (ckpt_ prefix).
     ckpt_fully_parallel_save_process_group: str  # "dp" | "ep_dp"
     ckpt_fully_parallel_load_process_group: str  # "dp" | "ep_dp"

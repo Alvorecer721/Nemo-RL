@@ -26,6 +26,7 @@ from typing import Any, Callable, Optional, TypeVar
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.model_provider import ModelProviderMixin, get_model
+from megatron.bridge.models.transformer_config import _enable_safe_hybridep_dispatch
 from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.training import fault_tolerance
 from megatron.bridge.training.checkpointing import (
@@ -746,6 +747,16 @@ def setup_model_config(
     # Apply performance settings
     _apply_performance_config(model_cfg, config)
 
+    # Bridge infers THD from its dataset, but NeMo-RL supplies packed batches
+    # itself and leaves ConfigContainer.dataset unset. Apply the same safeguard
+    # after graph settings so eager HybridEP pads unequal expert-rank inputs.
+    sequence_packing = config.get("sequence_packing")
+    if sequence_packing is not None:
+        _enable_safe_hybridep_dispatch(
+            getattr(model_cfg, "transformer", model_cfg),
+            uses_thd=sequence_packing["enabled"],
+        )
+
     # Validate optimizer configuration
     _validate_optimizer_config(config)
 
@@ -947,6 +958,17 @@ def _apply_parallelism_config(model_cfg: Any, config: PolicyConfig) -> None:
         )
         assert not config["megatron_cfg"].get("use_fused_linear_logprobs", False), (
             "Context Parallelism is not supported with linear CE fusion loss, please set use_fused_linear_logprobs to false"
+        )
+
+    if config["megatron_cfg"].get("use_fused_linear_logprobs", False):
+        # The fused hidden->logprob path has no cu_seqlens plumbing: get_logprobs
+        # returns one row per packed microbatch instead of per sequence, and the
+        # packed training wrappers expect vocab-parallel logits, not fused
+        # logprobs. Packed runs have their own fused-loss knob
+        # (sequence_packing.fuse_loss).
+        assert not config["sequence_packing"]["enabled"], (
+            "Sequence packing is not supported with linear CE fusion loss; "
+            "disable one of them (packed runs can use sequence_packing.fuse_loss instead)."
         )
 
 
@@ -1418,11 +1440,10 @@ def _create_checkpoint_config(
         optimizer_path: Path to the optimizer state (None if not resuming optimizer).
         load_main_params_from_ckpt: Load optimizer main params from the checkpoint.
         ckpt_cfg: MegatronCheckpointConfig dict from YAML (``megatron_cfg.checkpoint``).
-            Every knob (``async_save``, ``ckpt_assume_constant_structure``, and the
-            parallel-IO fields) is forwarded only when explicitly set in YAML — no
-            call-site default. When a field (or the whole block) is absent, Megatron
-            Bridge's own ``CheckpointConfig`` default applies, so ``async_save``
-            falls back to synchronous save for configs that don't set it.
+            Every knob is forwarded only when explicitly set in YAML — no call-site
+            default. When a field (or the whole block) is absent, Megatron Bridge's
+            own ``CheckpointConfig`` default applies, so ``async_save`` falls back to
+            synchronous save for configs that don't set it.
     """
     cfg = ckpt_cfg or {}
 
@@ -1443,8 +1464,10 @@ def _create_checkpoint_config(
     # — no call-site default — so a config that omits the block keeps Bridge's
     # default (synchronous save).
     _optional_ckpt_fields = (
+        "fully_parallel_save",
         "async_save",
         "ckpt_assume_constant_structure",
+        "ckpt_load_validate_sharding_integrity",
         "ckpt_fully_parallel_save_process_group",
         "ckpt_fully_parallel_load_process_group",
         "ckpt_fully_parallel_load_exchange_algo",
