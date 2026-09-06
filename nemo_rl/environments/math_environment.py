@@ -546,6 +546,7 @@ class MathEnvironment(BaseMathEnvironment):
             rewards=rewards,
             terminateds=done,
             answers=extracted_answers,
+            episode_successes=rewards.clone(),
         )
 
 
@@ -661,4 +662,5 @@ class MathMultiRewardEnvironment(BaseMathEnvironment):
             rewards=rewards,
             terminateds=done,
             answers=extracted_answers,
+            episode_successes=rewards[correctness_key].clone(),
         )

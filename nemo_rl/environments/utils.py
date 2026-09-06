@@ -29,6 +29,9 @@ class EnvRegistryEntry(TypedDict, total=False):
 
 # Environment registry. Key is the env name, value is a dictionary with the actor class FQN and optional default processor.
 ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
+    "bracket_math": {
+        "actor_class_fqn": "nemo_rl.environments.bracket_math_environment.BracketMathEnvironment",
+    },
     "math_default": {
         "actor_class_fqn": "nemo_rl.environments.math_environment.MathEnvironment",
     },
@@ -49,6 +52,9 @@ ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
     },
     "vlm": {
         "actor_class_fqn": "nemo_rl.environments.vlm_environment.VLMEnvironment",
+    },
+    "single_turn_verifier": {
+        "actor_class_fqn": "nemo_rl.environments.single_turn_verifier_environment.SingleTurnVerifierEnvironment",
     },
     "nemo_gym": {
         "actor_class_fqn": "nemo_rl.environments.nemo_gym.NemoGym",
