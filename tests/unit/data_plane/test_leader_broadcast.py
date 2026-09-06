@@ -20,7 +20,9 @@ Runs on CPU (gloo) so it stays in the no-GPU Tier 1 lane.
 from __future__ import annotations
 
 import os
+from functools import partial
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -32,7 +34,7 @@ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
 def _noncontiguous_int16_routes() -> torch.Tensor:
     routes = torch.tensor(
-        [[[-1, -1], [127, 128]], [[255, 256], [1024, 32767]]],
+        [[[-32768, -1], [127, 128]], [[255, 256], [1024, 32767]]],
         dtype=torch.int16,
     ).transpose(0, 1)
     assert not routes.is_contiguous()
@@ -173,6 +175,62 @@ def test_leader_broadcast_round_trip(tmp_path):
     _run_two_ranks(_round_trip_body, str(tmp_path / "init"))
 
 
+def _tensor_payload(device: str) -> dict[str, torch.Tensor]:
+    payload = {}
+    for dtype in (
+        torch.bool,
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+        torch.float64,
+    ):
+        values = torch.arange(6, device=device).reshape(2, 3).to(dtype)
+        payload[f"{dtype}_matrix"] = values
+        payload[f"{dtype}_transposed"] = values.T
+        payload[f"{dtype}_sliced"] = values[:, 1:]
+        payload[f"{dtype}_scalar"] = torch.tensor(1, dtype=dtype, device=device)
+        payload[f"{dtype}_empty"] = torch.empty(2, 0, 3, dtype=dtype, device=device)
+    # Exhaust the signed int16 domain so a wrong wire dtype cannot silently
+    # truncate negative sentinels or large expert indices.
+    payload["int16_domain"] = torch.arange(
+        -32768, 32768, dtype=torch.int32, device=device
+    ).to(torch.int16)
+    return payload
+
+
+def _tensor_round_trip_body(rank: int, *, source_device: str = "cpu") -> None:
+    expected = _tensor_payload(source_device)
+    original_values = {key: tensor.clone() for key, tensor in expected.items()}
+    data = BatchedDataDict(expected) if rank == 0 else None
+    original_strides = {key: tensor.stride() for key, tensor in expected.items()}
+
+    out = _broadcast_batched_data_dict(
+        data, is_leader=(rank == 0), src=0, group=dist.group.WORLD
+    )
+
+    assert out.keys() == expected.keys()
+    for key, tensor in expected.items():
+        actual = out[key]
+        assert actual.dtype == tensor.dtype, key
+        assert actual.shape == tensor.shape, key
+        assert actual.device == tensor.device, key
+        assert torch.equal(actual, original_values[key]), key
+        if rank == 0:
+            assert out is data
+            assert actual is tensor, key
+            assert actual.stride() == original_strides[key], key
+
+
+def test_leader_broadcast_preserves_tensor_values_layout_and_dtype(tmp_path):
+    """Collectives preserve scalars, empty fields and strided tensor values."""
+    _run_two_ranks(_tensor_round_trip_body, str(tmp_path / "init_tensors"))
+
+
 def test_leader_broadcast_keeps_media_free_packed_key(tmp_path):
     """An all-empty packed field keeps its key on both sides of the broadcast.
 
@@ -218,5 +276,21 @@ def _nccl_int16_worker(rank: int, world_size: int) -> None:
 
 
 def test_leader_broadcast_int16_round_trip_nccl(distributed_test_runner):
-    """NCCL byte transport handles non-contiguous Router Replay routes."""
+    """NCCL transport handles non-contiguous Router Replay routes."""
     distributed_test_runner(_nccl_int16_worker, world_size=2, backend="nccl")
+
+
+def _nccl_tensor_worker(rank: int, world_size: int, *, source_device: str) -> None:
+    _tensor_round_trip_body(rank, source_device=source_device)
+
+
+@pytest.mark.parametrize("source_device", ["cpu", "cuda"])
+def test_leader_broadcast_preserves_tensor_devices_nccl(
+    distributed_test_runner, source_device
+):
+    """NCCL preserves the source device type and the leader's original views."""
+    distributed_test_runner(
+        partial(_nccl_tensor_worker, source_device=source_device),
+        world_size=2,
+        backend="nccl",
+    )

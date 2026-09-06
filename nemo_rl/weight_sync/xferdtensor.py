@@ -17,6 +17,7 @@
 import logging
 import os
 from contextlib import nullcontext
+from typing import TypedDict
 
 import torch
 from torch.distributed._tensor import Shard
@@ -34,6 +35,10 @@ except ImportError:
 
 # Log the selected reshard path once per process (real op / python / golden).
 _XFERDTENSOR_PATH_LOGGED = False
+
+
+class _ReshardKwargs(TypedDict, total=False):
+    stream: int
 
 
 class DTensorRef:
@@ -180,7 +185,7 @@ def xferdtensor(
     src_local = src_tensor._local_tensor if src_tensor is not None else None
     dst_local = dst_tensor._local_tensor if dst_tensor is not None else None
 
-    reshard_kwargs = {}
+    reshard_kwargs: _ReshardKwargs = {}
     if stream is not None:
         reshard_kwargs["stream"] = int(stream.cuda_stream)
     _reshard(  # pyrefly: ignore[not-callable]
