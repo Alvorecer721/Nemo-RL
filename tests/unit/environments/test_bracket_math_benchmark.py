@@ -40,6 +40,20 @@ def test_boxed_outcome(text, target, outcome):
     assert score_marked_answer(text, target, "boxed").outcome == outcome
 
 
+@pytest.mark.parametrize("wrapper", ["text", "textbf", "mathrm", "mathbf"])
+@pytest.mark.parametrize(
+    "content,target",
+    [("42", "42"), ("-2.5", "-2.5"), ("1,234.0", "1234"), (r"\$1,234.0", "1234")],
+)
+def test_boxed_numeric_wrappers_preserve_answer(wrapper, content, target):
+    response = rf"\boxed{{\{wrapper}{{{content}}}}}"
+    score = score_marked_answer(response, target, "boxed")
+    assert score.extracted_answer == target
+    assert score.outcome == 1.0
+    assert score.reward == pytest.approx(1.1)
+    assert score_marked_answer(response, "999", "boxed").outcome == 0.0
+
+
 def test_environment_preserves_success_when_composite_reward_is_below_one():
     good = score_marked_answer("work " * 4100 + r"\boxed{42}", "42", "boxed")
     bad = score_marked_answer(r"\boxed{41}", "42", "boxed")

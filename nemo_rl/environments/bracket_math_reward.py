@@ -39,7 +39,7 @@ LENGTH_PENALTY_SPAN_WORDS = 2000
 
 _BRACKET_ANSWER = re.compile(r"\[\[\[(.*?)\]\]\]", re.DOTALL)
 _BOXED = "\\boxed"
-_LATEX_WRAPPERS = re.compile(r"\\(?:text|textbf|mathrm|mathbf)\{[^{}]*\}")
+_LATEX_WRAPPERS = re.compile(r"\\(?:text|textbf|mathrm|mathbf)\{([^{}]*)\}")
 _LATEX_NOISE = re.compile(r"\\left|\\right|\\[$%,;!]|[$~]")
 
 
@@ -86,12 +86,22 @@ def _last_boxed_content(response: str) -> str | None:
     return None
 
 
+def _unwrap_numeric_latex(match: re.Match[str]) -> str:
+    """Keep wrapped numbers while dropping textual unit suffixes."""
+    content = match.group(1)
+    try:
+        float(content.replace(",", ""))
+    except ValueError:
+        return ""
+    return content
+
+
 def extract_boxed_answer(response: str) -> str | None:
     content = _last_boxed_content(response)
     if content is None:
         return None
-    content = _LATEX_WRAPPERS.sub("", content)
     content = _LATEX_NOISE.sub("", content)
+    content = _LATEX_WRAPPERS.sub(_unwrap_numeric_latex, content)
     return normalize_number(content)
 
 

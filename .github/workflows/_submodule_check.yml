@@ -50,7 +50,9 @@ jobs:
 
       - name: Fetch target branch reference
         run: |
-          git fetch origin ${{ inputs.base_ref }}
+          # Ancestry checks below need the target tree, not every historical
+          # nested submodule pin (some old pins are no longer available).
+          git fetch --no-recurse-submodules origin ${{ inputs.base_ref }}
 
       - name: Check submodule fast-forward status
         id: check
