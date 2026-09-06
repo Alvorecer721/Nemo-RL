@@ -28,7 +28,7 @@ checkpointing:
   keep_top_k: null
   save_period: ${oc.decode:${oc.env:AP_SAVE_PERIOD,100000}}
   save_optimizer: false
-  save_data_plane: false
+  save_data_plane: true
 policy:
   model_name: ${oc.env:AP_CKPT}
   tokenizer:
