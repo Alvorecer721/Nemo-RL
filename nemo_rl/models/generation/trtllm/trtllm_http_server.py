@@ -216,6 +216,7 @@ def create_app(
             model_prefix_token_ids=required_prefix_ids,
             template_prefix_token_ids=template_prefix_ids,
             template_token_ids=prompt_token_ids,
+            eos_token_ids=_eos_token_ids,
         )
 
         max_tokens_requested = (

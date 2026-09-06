@@ -246,6 +246,69 @@ def _patch_vllm_tool_parser_namespace_tool(logger) -> None:
     logger.info("Successfully patched vLLM NamespaceTool import for openai compat.")
 
 
+def _patch_vllm_invalid_mnnvl_workspace(logger) -> None:
+    """Reject FlashInfer MNNVL workspaces without multicast support."""
+    try:
+        file_to_patch = _get_vllm_file(
+            "distributed/device_communicators/flashinfer_all_reduce.py"
+        )
+    except RuntimeError:
+        logger.warning(
+            "Could not locate flashinfer_all_reduce.py; invalid MNNVL workspace "
+            "patch was not applied."
+        )
+        return
+
+    marker = 'backend == "mnnvl" and not getattr(workspace, "mc_ptr", 0)'
+    old_snippet = (
+        "        workspace = flashinfer_comm.create_allreduce_fusion_workspace(\n"
+        "            backend=backend,\n"
+        "            world_size=world_size,\n"
+        "            rank=rank,\n"
+        "            max_token_num=max_token_num,\n"
+        "            hidden_dim=hidden_dim,\n"
+        "            dtype=dtype,\n"
+        "            comm_backend=comm_backend,\n"
+        "            group=group,\n"
+        "        )\n"
+        "    except Exception as e:\n"
+    )
+    new_snippet = (
+        "        workspace = flashinfer_comm.create_allreduce_fusion_workspace(\n"
+        "            backend=backend,\n"
+        "            world_size=world_size,\n"
+        "            rank=rank,\n"
+        "            max_token_num=max_token_num,\n"
+        "            hidden_dim=hidden_dim,\n"
+        "            dtype=dtype,\n"
+        "            comm_backend=comm_backend,\n"
+        "            group=group,\n"
+        "        )\n"
+        '        if backend == "mnnvl" and not getattr(workspace, "mc_ptr", 0):\n'
+        "            workspace.destroy()\n"
+        "            logger.warning_once(\n"
+        '                "FlashInfer MNNVL multicast is unavailable on the current topology."\n'
+        "            )\n"
+        "            return None\n"
+        "    except Exception as e:\n"
+    )
+
+    with _locked_file_patch(file_to_patch) as (content, write_back):
+        if marker in content:
+            logger.info("vLLM invalid MNNVL workspace patch already applied.")
+            return
+        if old_snippet not in content:
+            logger.warning(
+                "Could not apply invalid MNNVL workspace patch: expected "
+                "snippet not found in %s.",
+                file_to_patch,
+            )
+            return
+        write_back(content.replace(old_snippet, new_snippet, 1))
+
+    logger.info("Successfully patched vLLM invalid MNNVL workspace handling.")
+
+
 def _patch_vllm_ray_executor_v2_tcpstore_port(logger) -> None:
     """Keep RayExecutorV2's TCPStore port out of the MessageQueue's scan range.
 
@@ -566,6 +629,107 @@ def _patch_vllm_radio_layerscale_loader(logger) -> None:
     logger.info("Successfully patched vLLM RADIO LayerScale loading.")
 
 
+def _patch_vllm_xielu_static_constants(logger) -> None:
+    """Keep xIELU architecture constants out of vLLM's weight state dict."""
+    try:
+        file_to_patch = _get_vllm_file("model_executor/layers/activation.py")
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Required vLLM xIELU static-constant patch could not locate "
+            "model_executor/layers/activation.py."
+        ) from exc
+
+    old_snippet = (
+        '        self.register_buffer("beta", torch.tensor(beta, dtype=dtype))\n'
+        '        self.register_buffer("eps", torch.tensor(eps, dtype=dtype))\n'
+    )
+    new_snippet = (
+        "        self.register_buffer(\n"
+        '            "beta", torch.tensor(beta, dtype=dtype), persistent=False\n'
+        "        )\n"
+        "        self.register_buffer(\n"
+        '            "eps", torch.tensor(eps, dtype=dtype), persistent=False\n'
+        "        )\n"
+        '        if "beta" in self.state_dict() or "eps" in self.state_dict():\n'
+        "            raise RuntimeError(\n"
+        '                "xIELU architecture constants must not enter weight state"\n'
+        "            )\n"
+    )
+
+    with _locked_file_patch(file_to_patch) as (content, write_back):
+        if new_snippet in content:
+            logger.info("vLLM xIELU static-constant patch already applied.")
+            return
+        if old_snippet not in content:
+            raise RuntimeError(
+                "Required vLLM xIELU static-constant patch did not find the "
+                f"expected vLLM 0.25.1 source shape in {file_to_patch}."
+            )
+        write_back(content.replace(old_snippet, new_snippet, 1))
+
+    logger.info("Successfully kept vLLM xIELU constants out of state_dict().")
+
+
+def _patch_vllm_apertus_static_xielu_loader(logger) -> None:
+    """Validate legacy Apertus xIELU constants without loading them."""
+    try:
+        file_to_patch = _get_vllm_file("model_executor/models/apertus.py")
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Required Apertus xIELU loader patch could not locate "
+            "model_executor/models/apertus.py."
+        ) from exc
+
+    old_snippet = """    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+"""
+    new_snippet = """    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        static_buffers = getattr(self, "_nrl_xielu_static_buffers", None)
+        if static_buffers is None:
+            static_buffers = {
+                name: buffer
+                for name, buffer in self.named_buffers()
+                if name.endswith((".beta", ".eps"))
+            }
+            self._nrl_xielu_static_buffers = static_buffers
+
+        def validate_static_xielu_constants(weights):
+            for name, loaded_weight in weights:
+                if name.endswith((".beta", ".eps")) and name in static_buffers:
+                    expected = static_buffers[name].detach()
+                    received = loaded_weight.detach().to(
+                        device=expected.device, dtype=expected.dtype
+                    )
+                    if not torch.equal(expected, received):
+                        raise ValueError(
+                            f"Apertus xIELU architecture constant {name!r} "
+                            f"does not match the engine value: checkpoint="
+                            f"{received.float().item()}, engine="
+                            f"{expected.float().item()}. Configure the "
+                            "architecture constant when constructing the model "
+                            "instead of refitting it as trained state."
+                        )
+                    continue
+                yield name, loaded_weight
+
+        weights = validate_static_xielu_constants(weights)
+        loader = AutoWeightsLoader(
+"""
+
+    with _locked_file_patch(file_to_patch) as (content, write_back):
+        if new_snippet in content:
+            logger.info("vLLM Apertus static xIELU loader patch already applied.")
+            return
+        if old_snippet not in content:
+            raise RuntimeError(
+                "Required vLLM Apertus static xIELU loader patch did not find "
+                f"the expected vLLM 0.25.1 source shape in {file_to_patch}."
+            )
+        write_back(content.replace(old_snippet, new_snippet, 1))
+
+    logger.info("Successfully patched vLLM Apertus static xIELU loading.")
+
+
 def _patch_vllm_glm_decoder_sequence_parallel_moe(logger) -> None:
     """Restore the vLLM 0.24 decoder boundary for GLM DSA models.
 
@@ -635,8 +799,11 @@ def ensure_vllm_source_compat() -> None:
 
     patch_logger = init_logger("vllm_patch")
     _patch_vllm_tool_parser_namespace_tool(patch_logger)
+    _patch_vllm_xielu_static_constants(patch_logger)
+    _patch_vllm_apertus_static_xielu_loader(patch_logger)
     _patch_vllm_radio_layerscale_loader(patch_logger)
     _patch_vllm_glm_decoder_sequence_parallel_moe(patch_logger)
+    _patch_vllm_invalid_mnnvl_workspace(patch_logger)
 
 
 def _apply_vllm_patches(
@@ -688,7 +855,10 @@ def _apply_vllm_patches(
 
     _patch_vllm_llama_eagle3_own_lm_head(patch_logger)
     _patch_vllm_tool_parser_namespace_tool(patch_logger)
+    _patch_vllm_invalid_mnnvl_workspace(patch_logger)
     _patch_vllm_ray_executor_v2_tcpstore_port(patch_logger)
     _patch_vllm_shm_broadcast_bind_retry(patch_logger)
+    _patch_vllm_xielu_static_constants(patch_logger)
+    _patch_vllm_apertus_static_xielu_loader(patch_logger)
     _patch_vllm_radio_layerscale_loader(patch_logger)
     _patch_vllm_glm_decoder_sequence_parallel_moe(patch_logger)
