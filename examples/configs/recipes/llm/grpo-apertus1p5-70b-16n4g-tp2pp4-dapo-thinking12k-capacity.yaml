@@ -22,7 +22,7 @@ loss_fn:
   truncated_importance_sampling_ratio: 2.0
   truncated_importance_sampling_ratio_min: 0.0
 checkpointing:
-  enabled: false
+  enabled: true
   checkpoint_dir: ${oc.env:AP_RUN_DIR}/checkpoints
   metric_name: null
   keep_top_k: null
