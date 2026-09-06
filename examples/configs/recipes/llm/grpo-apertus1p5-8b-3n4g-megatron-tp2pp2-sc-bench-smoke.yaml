@@ -1,0 +1,31 @@
+defaults: grpo-apertus1p5-70b-16n4g-megatron-tp2pp4-sc-bench.yaml
+
+# Plumbing smoke on the 8B step-4200 SFT: one TP2/PP2 trainer replica on two
+# nodes, one TP2 vLLM engine on the third, two tiny steps. Exercises the PP>1
+# Apertus refit path (xIELU manifest) before the 70B is committed to it.
+grpo:
+  num_prompts_per_step: 4
+  num_generations_per_prompt: 4
+  max_num_steps: 2
+policy:
+  train_global_batch_size: 16
+  megatron_cfg:
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 2
+  generation:
+    colocated:
+      resources:
+        num_nodes: 1
+        gpus_per_node: 4
+    vllm_cfg:
+      tensor_parallel_size: 2
+      gpu_memory_utilization: 0.6
+env:
+  bracket_math:
+    num_workers: 4
+async_rl:
+  min_groups_for_streaming_train: 4
+  max_inflight_prompts: 8
+  max_buffered_rollouts: 64
+cluster:
+  num_nodes: 3

@@ -1,0 +1,147 @@
+# Requested 92-update GSM8K baseline: thinking off, boxed answers, 2048 total tokens.
+# Composite reward, windowed age1, native one-update logprob shortcut with TIS2.
+# The shortcut is an experimental70B configuration, not a proven backend parity result.
+defaults: ../../grpo_math_8B_megatron.yaml
+grpo:
+  num_prompts_per_step: 48
+  num_generations_per_prompt: 16
+  max_num_steps: 92
+  use_leave_one_out_baseline: false
+  val_period: 0
+  seed: ${oc.decode:${oc.env:AP_SEED,42}}
+  skip_reference_policy_logprobs_calculation: true
+  async_grpo: null
+  cot_think_token_ids:
+  - 32
+  - 33
+loss_fn:
+  reference_policy_kl_penalty: 0.0
+  ratio_clip_c: 3.0
+  use_importance_sampling_correction: true
+  force_on_policy_ratio: true
+  truncated_importance_sampling_type: tis
+  truncated_importance_sampling_ratio: 2.0
+  truncated_importance_sampling_ratio_min: 0.0
+checkpointing:
+  enabled: true
+  checkpoint_dir: ${oc.env:AP_RUN_DIR}/checkpoints
+  metric_name: null
+  keep_top_k: null
+  save_period: ${oc.decode:${oc.env:AP_SAVE_PERIOD,100000}}
+  save_optimizer: false
+  save_data_plane: true
+policy:
+  model_name: ${oc.env:AP_CKPT}
+  tokenizer:
+    name: ${oc.env:AP_TOKENIZER}
+    chat_template_kwargs:
+      enable_thinking: false
+  train_global_batch_size: 768
+  logprob_batch_size: 2
+  logprob_chunk_size: 256
+  max_total_sequence_length: 2048
+  sequence_packing:
+    enabled: false
+  megatron_cfg:
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 4
+    sequence_parallel: true
+    activation_checkpointing: true
+    recompute_granularity: selective
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    bias_activation_fusion: false
+    defer_fp32_logits: true
+    optimizer:
+      lr: 1.0e-06
+      min_lr: 1.0e-06
+      use_precision_aware_optimizer: false
+    scheduler:
+      lr_warmup_iters: 0
+      lr_warmup_init: 1.0e-06
+  generation:
+    max_new_tokens: 2048
+    stop_token_ids:
+    - 2
+    - 68
+    - 72
+    refit_transport: nccl_reshard
+    colocated:
+      enabled: false
+      resources:
+        num_nodes: 4
+        gpus_per_node: 4
+    vllm_cfg:
+      env_vars:
+        PYTHONPATH: ${oc.env:AP_EXPERIMENT_DIR}
+      tensor_parallel_size: 4
+      gpu_memory_utilization: 0.75
+      max_model_len: 2048
+      async_engine: true
+      use_tqdm: false
+      load_format: dummy
+data:
+  max_input_seq_length: 512
+  shuffle: false
+  train:
+    dataset_name: GSM8K
+    split: train
+    split_validation_size: 0.0
+  default:
+    prompt_file: null
+    system_prompt_file: examples/prompts/apertus_bench_gsm8k_system_${oc.env:AP_ANSWER_MARKER,boxed}.txt
+    env_name: bracket_math
+env:
+  bracket_math:
+    num_workers: 16
+    reward: composite
+    answer_marker: ${oc.env:AP_ANSWER_MARKER,boxed}
+data_plane:
+  enabled: true
+async_rl:
+  sampler:
+    name: windowed
+    max_staleness_versions: 1
+    sample_freshest_first: false
+  weight_sync_period: 1
+  recompute_kv_cache_after_weight_updates: false
+  min_groups_for_streaming_train: 48
+  max_inflight_prompts: 96
+  max_buffered_rollouts: 96
+  diagnostics: false
+  rollout_failure:
+    max_infra_attempts_per_prompt: 5
+    max_data_attempts_per_prompt: 2
+    backoff_base_s: 1.0
+    max_backoff_s: 30.0
+    max_skipped_prompts: 0
+    max_consecutive_dropped_prompts: 0
+    min_step_batch_fraction: 1.0
+    on_dropped_prompt: shrink
+    native:
+      generation_timeout_s: 600
+      env_timeout_s: 120
+  stall_watchdog:
+    interval_s: 30
+    stall_timeout_s: 900
+    stall_action: abort
+    gym_subprocess_check: false
+  generation_fleet_health:
+    enabled: false
+  generation_router:
+    enabled: false
+logger:
+  log_dir: ${oc.env:AP_RUN_DIR}/tb
+  wandb_enabled: true
+  wandb:
+    project: apertus-benchmarks
+    entity: ml-team-cscs
+    name: nemo-rl-70b-gsm8k-2k-windowed1-tis2-force-on-policy-seed${oc.env:AP_SEED,42}
+  tensorboard_enabled: true
+  monitor_gpus: true
+  gpu_monitoring:
+    collection_interval: 2
+    flush_interval: 2
+cluster:
+  gpus_per_node: 4
+  num_nodes: 16

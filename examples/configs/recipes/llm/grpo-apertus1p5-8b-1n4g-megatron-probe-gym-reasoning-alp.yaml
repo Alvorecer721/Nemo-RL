@@ -1,0 +1,9 @@
+# GRPO + Adaptive Length Penalty (Xiang et al. 2025) — difficulty-aware length penalty:
+# reward -= alp_coef * pass_rate * (response_len / max_response_length). Harder prompts penalized less.
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe-gym-reasoning.yaml
+
+grpo:
+  reward_shaping:
+    enabled: true
+    alp_coef: 1.0
+    max_response_length: 7680
