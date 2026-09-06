@@ -42,6 +42,15 @@ checkpointing:
   save_data_plane: true
 policy:
   model_name: ${oc.env:AP_CKPT}
+  hf_config_overrides:
+    rope_parameters:
+      rope_type: llama3
+      type: llama3
+      factor: 32.0
+      rope_theta: 4000000
+      low_freq_factor: 1.0
+      high_freq_factor: 4.0
+      original_max_position_embeddings: 8192
   tokenizer:
     name: ${oc.env:AP_TOKENIZER}
     chat_template_kwargs:
@@ -87,20 +96,11 @@ policy:
       resources:
         num_nodes: 16
         gpus_per_node: 4
-    vllm_kwargs:
-      hf_overrides:
-        rope_parameters:
-          rope_type: llama3
-          type: llama3
-          factor: 32.0
-          rope_theta: 4000000
-          low_freq_factor: 1.0
-          high_freq_factor: 4.0
-          original_max_position_embeddings: 8192
     vllm_cfg:
       env_vars:
         PYTHONPATH: ${oc.env:AP_EXPERIMENT_DIR}
         NRL_ROPE_AUDIT_DIR: ${oc.env:AP_RUN_DIR}/rope_audit
+        NRL_ROPE_AUDIT_FACTOR: '32'
       tensor_parallel_size: 4
       gpu_memory_utilization: 0.75
       max_model_len: 16384
