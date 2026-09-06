@@ -11,16 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 from unittest.mock import patch
 
 import pytest
 
 import nemo_rl.utils.prefetch_venvs as prefetch_venvs_module
-
-# When NRL_CONTAINER is set, create_frozen_environment_symlinks also calls
-# create_local_venv for each actor, effectively doubling the call count
-CALL_MULTIPLIER = 2 if os.environ.get("NRL_CONTAINER") else 1
 
 
 @pytest.fixture
@@ -56,7 +51,7 @@ class TestPrefetchVenvs:
 
             prefetch_venvs_func(filters=None)
 
-            assert mock_create_venv.call_count == 3 * CALL_MULTIPLIER
+            assert mock_create_venv.call_count == 3
 
             # Verify the actors that were called
             call_args = [call[0] for call in mock_create_venv.call_args_list]
@@ -85,7 +80,7 @@ class TestPrefetchVenvs:
             prefetch_venvs_func(filters=["vllm"])
 
             # Should only create venvs for actors containing "vllm" (1 actor)
-            assert mock_create_venv.call_count == 1 * CALL_MULTIPLIER
+            assert mock_create_venv.call_count == 1
 
             call_args = mock_create_venv.call_args[0]
             assert (
@@ -103,7 +98,7 @@ class TestPrefetchVenvs:
             prefetch_venvs_func(filters=["vllm", "megatron"])
 
             # Should create venvs for actors containing "vllm" OR "megatron" (2 actors)
-            assert mock_create_venv.call_count == 2 * CALL_MULTIPLIER
+            assert mock_create_venv.call_count == 2
 
             call_args = [call[0] for call in mock_create_venv.call_args_list]
             actor_fqns = [args[1] for args in call_args]
@@ -152,7 +147,7 @@ class TestPrefetchVenvs:
             # "policy" should match both dtensor_policy_worker and megatron_policy_worker
             prefetch_venvs_func(filters=["policy"])
 
-            assert mock_create_venv.call_count == 2 * CALL_MULTIPLIER
+            assert mock_create_venv.call_count == 2
 
             call_args = [call[0] for call in mock_create_venv.call_args_list]
             actor_fqns = [args[1] for args in call_args]
@@ -177,25 +172,45 @@ class TestPrefetchVenvs:
             prefetch_venvs_func(filters=[])
 
             # Should create venvs for all uv-based actors (3 total)
-            assert mock_create_venv.call_count == 3 * CALL_MULTIPLIER
+            assert mock_create_venv.call_count == 3
 
-    def test_prefetch_venvs_continues_on_error(self, prefetch_venvs_func):
-        """Test that prefetching continues even if one venv creation fails."""
+    def test_prefetch_venvs_retries_transient_error(
+        self, prefetch_venvs_func, monkeypatch
+    ):
+        """Test that a transient venv creation failure is retried."""
+        monkeypatch.setattr(prefetch_venvs_module.time, "sleep", lambda _delay: None)
         with patch(
             "nemo_rl.utils.prefetch_venvs.create_local_venv"
         ) as mock_create_venv:
-            # Provide enough return values for both prefetch and frozen env symlinks
             mock_create_venv.side_effect = [
                 Exception("Test error"),
                 "/path/to/venv/bin/python",
                 "/path/to/venv/bin/python",
-            ] * CALL_MULTIPLIER
+                "/path/to/venv/bin/python",
+            ]
 
-            # Should not raise, should continue with other venvs
             prefetch_venvs_func(filters=None)
 
-            # All 3 uv-based actors should have been attempted
-            assert mock_create_venv.call_count == 3 * CALL_MULTIPLIER
+            assert mock_create_venv.call_count == 4
+
+    def test_prefetch_venvs_raises_after_final_failure(
+        self, prefetch_venvs_func, monkeypatch
+    ):
+        """A release image must not silently omit an unready worker."""
+        monkeypatch.setenv("NRL_VENV_PREFETCH_MAX_ATTEMPTS", "1")
+        with patch(
+            "nemo_rl.utils.prefetch_venvs.create_local_venv"
+        ) as mock_create_venv:
+            mock_create_venv.side_effect = [
+                Exception("Test error"),
+                "/path/to/venv/bin/python",
+                "/path/to/venv/bin/python",
+            ]
+
+            with pytest.raises(RuntimeError, match="VllmGenerationWorker"):
+                prefetch_venvs_func(filters=None)
+
+            assert mock_create_venv.call_count == 3
 
     def test_prefetch_venvs_case_sensitive_filter(self, prefetch_venvs_func):
         """Test that filters are case-sensitive."""
@@ -252,19 +267,22 @@ class TestPrefetchVenvs:
             assert "DTensorPolicyWorker" in captured.out
             assert "MegatronPolicyWorker" in captured.out
 
-    def test_prefetch_venvs_summary_with_failures(self, prefetch_venvs_func, capsys):
+    def test_prefetch_venvs_summary_with_failures(
+        self, prefetch_venvs_func, capsys, monkeypatch
+    ):
         """Test that summary includes failed actor names when errors occur."""
+        monkeypatch.setenv("NRL_VENV_PREFETCH_MAX_ATTEMPTS", "1")
         with patch(
             "nemo_rl.utils.prefetch_venvs.create_local_venv"
         ) as mock_create_venv:
-            # Provide enough return values for both prefetch and frozen env symlinks
             mock_create_venv.side_effect = [
                 Exception("Test error"),
                 "/path/to/venv/bin/python",
                 "/path/to/venv/bin/python",
-            ] * CALL_MULTIPLIER
+            ]
 
-            prefetch_venvs_func(filters=None)
+            with pytest.raises(RuntimeError, match="VllmGenerationWorker"):
+                prefetch_venvs_func(filters=None)
 
             captured = capsys.readouterr()
             assert "Venv prefetching complete! Summary:" in captured.out
