@@ -287,6 +287,11 @@ class VllmInternalWorkerExtension:
     # previous group without probing for the attribute's existence.
     model_update_group: Any = None
 
+    def verify_rope_runtime(self, factor: float) -> dict[str, Any]:
+        from nemo_rl.models.rope_runtime_audit import verify_vllm
+
+        return verify_vllm(self, factor)
+
     def _get_named_parameters(self) -> dict[str, torch.nn.Parameter]:
         params = getattr(self, "_nrl_named_parameters", None)
         if params is None:

@@ -582,6 +582,13 @@ class MegatronPolicyWorkerImpl(
 
         self.mcore_state = model_and_optimizer_state.state
         self.model = model_and_optimizer_state.model
+        rope_factor = config["megatron_cfg"]["model_overrides"].get(
+            "rope_scaling_factor"
+        )
+        if rope_factor is not None:
+            from nemo_rl.models.rope_runtime_audit import verify_megatron
+
+            verify_megatron(self.model, rope_factor)
         self.optimizer = model_and_optimizer_state.optimizer
         self.scheduler = model_and_optimizer_state.scheduler
         self.checkpointing_context = model_and_optimizer_state.checkpointing_context

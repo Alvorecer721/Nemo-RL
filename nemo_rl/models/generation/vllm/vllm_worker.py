@@ -934,6 +934,11 @@ class VllmGenerationWorkerImpl(VllmCheckpointEngineRpcMixin, BaseVllmGenerationW
         if self.llm is not None:
             self.llm.collective_rpc("bind_numa", args=tuple())
         self.vllm_device_ids = self.report_device_id()
+        rope_parameters = self.cfg["vllm_kwargs"]["hf_overrides"].get("rope_parameters")
+        if rope_parameters is not None:
+            self.llm.collective_rpc(
+                "verify_rope_runtime", args=(rope_parameters["factor"],)
+            )
         if self._mtp_load_from_disk:
             self.llm.collective_rpc(
                 "load_mtp_weights_from_disk", args=(self.model_name,)

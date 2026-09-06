@@ -395,6 +395,11 @@ class VllmAsyncGenerationWorkerImpl(
         if self.llm is not None:
             await self.llm.collective_rpc("bind_numa", args=tuple())
         self.vllm_device_ids = await self.report_device_id_async()
+        rope_parameters = self.cfg["vllm_kwargs"]["hf_overrides"].get("rope_parameters")
+        if rope_parameters is not None:
+            await self.llm.collective_rpc(
+                "verify_rope_runtime", args=(rope_parameters["factor"],)
+            )
         if self._mtp_load_from_disk:
             await self.llm.collective_rpc(
                 "load_mtp_weights_from_disk", args=(self.model_name,)
