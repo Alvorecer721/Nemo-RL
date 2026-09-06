@@ -304,6 +304,9 @@ guides/sft-openmathinstruct2.md
 :caption: Guides
 
 adding-new-models.md
+apertus-quickstart.md
+apertus-traps-and-invariants.md
+apertus-xielu.md
 guides/sft.md
 guides/dpo.md
 guides/dapo.md
@@ -354,6 +357,8 @@ debugging.md
 nsys-profiling.md
 fp8.md
 guides/use-custom-vllm.md
+guides/pp-foundation-activation.md
+superpowers/plans/2026-09-05-pp-foundation.md
 ```
 
 ```{toctree}
@@ -385,6 +390,8 @@ design-docs/nemo-gym-integration.md
 design-docs/modelopt-real-quant-architecture.md
 design-docs/nccl-reshard-refit.md
 design-docs/media-token-validity-mask.md
+design-docs/apertus-mm-onpolicy-dpo-data.md
+design-docs/apertus-omni-grpo-rl.md
 design-docs/automodel-context-parallel.md
 ```
 
