@@ -150,7 +150,7 @@ async_rl:
     enabled: false
 logger:
   log_dir: ${oc.env:AP_RUN_DIR}/tb
-  wandb_enabled: true
+  wandb_enabled: false
   wandb:
     project: apertus-benchmarks
     entity: ml-team-cscs
