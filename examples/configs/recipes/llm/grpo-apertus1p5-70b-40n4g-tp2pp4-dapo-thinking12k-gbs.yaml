@@ -119,7 +119,7 @@ data_plane:
 async_rl:
   sampler:
     name: windowed
-    max_staleness_versions: 1
+    max_staleness_versions: 2
     sample_freshest_first: false
   weight_sync_period: 1
   recompute_kv_cache_after_weight_updates: false
@@ -154,7 +154,7 @@ logger:
   wandb:
     project: apertus-benchmarks
     entity: ml-team-cscs
-    name: nemo70b-dapo-thinking12k-gbs768-seed42
+    name: nemo70b-dapo-thinking12k-gbs768-w2-seed42
   tensorboard_enabled: true
   monitor_gpus: true
   gpu_monitoring:
