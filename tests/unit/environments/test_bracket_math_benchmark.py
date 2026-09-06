@@ -45,7 +45,9 @@ def test_boxed_outcome(text, target, outcome):
     "content,target",
     [("42", "42"), ("-2.5", "-2.5"), ("1,234.0", "1234"), (r"\$1,234.0", "1234")],
 )
-def test_boxed_numeric_wrappers_preserve_answer(wrapper, content, target):
+def test_boxed_numeric_wrappers_preserve_answer(
+    *, wrapper: str, content: str, target: str
+) -> None:
     response = rf"\boxed{{\{wrapper}{{{content}}}}}"
     score = score_marked_answer(response, target, "boxed")
     assert score.extracted_answer == target
