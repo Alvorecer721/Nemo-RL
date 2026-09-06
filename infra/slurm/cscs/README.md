@@ -86,6 +86,35 @@ so every later Ray actor inherits the same VNI. The mode rejects interactive
 and sandbox-sidecar launches until those lifecycles can also preserve the
 single-step invariant.
 
+## NCCL extension overlay on the foundation image
+
+`build_nemo_rl_overlay_image.slurm` adds the locked `nccl-extensions`
+dependency to an existing release image and verifies the refit worker imports,
+API signature and loaded NCCL library. Set `BASE_SQSH` to the release SquashFS;
+its corresponding image must also exist in the persistent local registry.
+The build checks that inherited submodule pins match before regenerating the
+dependency fingerprint and synchronizing worker environments. Retain the source/image fingerprint checks when running
+the resulting image with a checkout overlay.
+
+`docker/nemo_rl_vllm026_ncclext.toml` selects the built overlay. The bounded
+probe is `AP_VARIANT=8b-smoke bash infra/slurm/cscs/autoresearch/submit_apertus_bench.sh`: three nodes, two updates,
+trainer TP2/PP2 and rollout TP2/PP1. The wrapper also provides `70b-bench`;
+it accepts only variants whose recipes are present. These recipes are separate
+from the DAPO thinking 12k experiments.
+
+The import probe does not certify the network. On the tested CSCS CXI/OFI
+communicators, cross-node `device_api_support` is false. The refit dispatcher
+therefore selects the existing exact-transfer Python implementation even when
+the native M2N operator is installed. Intra-node native M2N passed a content
+probe; cross-node native M2N failed and remains unqualified. NCCL-EP remains
+disabled in the TE build. See [the platform tracking issue](https://github.com/Alvorecer721/Nemo-RL/issues/31).
+
+Validation of the original overlay source: job 3304739 completed the two-update
+8B probe on automatic fallback; job 3306921 completed six 70B DAPO updates with
+the same fallback. Warm full-step means were 344.76 s for the overlay and 335.22 s
+for the reference on different sampled batches. These runs establish an
+operational fallback, not a speedup or native cross-node qualification.
+
 ## Custom vLLM 0.25.1 GH200 image
 
 The machine-local `docker/nemo_rl_vllm0251.toml` EDF selects the custom arm64
