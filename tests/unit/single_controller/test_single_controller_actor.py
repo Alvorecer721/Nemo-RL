@@ -2393,14 +2393,19 @@ def test_alp_advantage_stage_preserves_raw_rewards_and_uses_occurrence_groups(
     assert (
         "total_reward" not in ctrl._dp_client.written_fields
     )  # retries cannot apply ALP twice
-    assert ("episode_success" in ctrl._dp_client.selected_fields) == (
-        source == "episode_success"
-    )
+    assert "episode_success" in ctrl._dp_client.selected_fields
     metrics = reduce_advantage_pump_metrics(**ctrl._step_log_dict)
     assert metrics["reward"] == pytest.approx(raw.mean().item())
     assert metrics["alp/shaped_reward"] == pytest.approx(shaped.mean().item())
     assert metrics["alp/success_rate"] == 0.25
     assert metrics["alp/response_tokens"] == 3.0
+    assert metrics["prompt_groups/total"] == 2
+    assert metrics["prompt_groups/all_wrong"] == 1
+    assert metrics["prompt_groups/all_correct"] == 0
+    assert metrics["prompt_groups/mixed_correctness"] == 1
+    assert metrics["prompt_groups/zero_policy_advantage"] == (
+        1 if source == "binary_reward" else 0
+    )
 
 
 class _GroupRecordingGRPOEstimator(GRPOAdvantageEstimator):
@@ -2516,6 +2521,11 @@ def test_alp_zero_coefficient_matches_control_for_duplicate_prompt_occurrences(
         assert torch.equal(final_mask[:, 1:], expected_mask[:, 1:])
         assert "total_reward" not in ctrl._dp_client.written_fields
         torch.testing.assert_close(ctrl._dp_client._data["total_reward"], raw)
+        metrics = reduce_advantage_pump_metrics(**ctrl._step_log_dict)
+        assert metrics["prompt_groups/total"] == 2
+        assert metrics["prompt_groups/all_correct"] == 1
+        assert metrics["prompt_groups/all_wrong"] == 1
+        assert metrics["prompt_groups/zero_policy_advantage"] == 2
 
 
 @pytest.mark.parametrize("group_size", [2, 16])
