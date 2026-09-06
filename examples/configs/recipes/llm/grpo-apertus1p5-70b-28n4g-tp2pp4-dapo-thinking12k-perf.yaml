@@ -1,0 +1,12 @@
+# Six-update performance screen, paired with stream24 and selective recompute.
+defaults: grpo-apertus1p5-70b-28n4g-tp2pp4-dapo-thinking12k-control.yaml
+grpo:
+  max_num_steps: 6
+checkpointing:
+  enabled: false
+policy:
+  megatron_cfg:
+    env_vars:
+      NRL_LOG_LEVEL: DEBUG
+logger:
+  wandb_enabled: false
