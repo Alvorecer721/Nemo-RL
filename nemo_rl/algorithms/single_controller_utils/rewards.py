@@ -14,13 +14,13 @@
 """ALP on complete SingleController prompt-occurrence groups."""
 
 import math
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import Sequence
 
 import torch
 
 from nemo_rl.algorithms.reward_functions import RewardShapingConfig
+from nemo_rl.algorithms.utils import build_rollout_group_ids_from_sample_ids
 
 
 def validate_alp_config(cfg: RewardShapingConfig) -> None:
@@ -96,24 +96,14 @@ def apply_grouped_alp(
     ):
         raise ValueError("ALP requires a binary generated-token mask [samples, tokens]")
 
-    groups: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    for row, sample_id in enumerate(sample_ids):
-        group, separator, generation = sample_id.rpartition("_g")
-        if not group or not separator or not generation.isdecimal():
-            raise ValueError(f"Invalid ALP rollout sample ID: {sample_id!r}")
-        groups[group].append((row, int(generation)))
-
+    group_ids = build_rollout_group_ids_from_sample_ids(
+        sample_ids, expected_group_size=group_size, device=rewards.device
+    )
     successes = successes.to(device=rewards.device, dtype=rewards.dtype)
     pass_rates = torch.empty_like(rewards)
-    group_ids = torch.empty((n, 1), device=rewards.device, dtype=torch.long)
-    for group_number, (group, rows) in enumerate(groups.items()):
-        if sorted(generation for _, generation in rows) != list(range(group_size)):
-            raise ValueError(
-                f"ALP requires all {group_size} unique rollouts for {group!r}"
-            )
-        indices = [row for row, _ in rows]
-        pass_rates[indices] = successes[indices].mean()
-        group_ids[indices, 0] = group_number
+    for group_number in range(n // group_size):
+        rows = group_ids[:, 0] == group_number
+        pass_rates[rows] = successes[rows].mean()
 
     lengths = token_mask.sum(dim=-1).to(device=rewards.device, dtype=rewards.dtype)
     assert cfg.alp_coef is not None and cfg.max_response_length is not None

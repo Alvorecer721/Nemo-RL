@@ -94,8 +94,8 @@ from nemo_rl.algorithms.single_controller_utils.config import (
     validate_sampler_buffer_capacity,
     validate_single_controller_config,
 )
-from nemo_rl.algorithms.single_controller_utils.setup import SingleControllerActorArgs
 from nemo_rl.algorithms.single_controller_utils.rewards import apply_grouped_alp
+from nemo_rl.algorithms.single_controller_utils.setup import SingleControllerActorArgs
 from nemo_rl.algorithms.single_controller_utils.utils import (
     aggregate_step_metrics,
     apply_message_level_advantage_penalties,
@@ -104,6 +104,7 @@ from nemo_rl.algorithms.single_controller_utils.utils import (
     squeeze_trailing_unit_dim,
     tensor_field,
 )
+from nemo_rl.algorithms.utils import build_rollout_group_ids_from_sample_ids
 from nemo_rl.data.interfaces import DatumSpec
 from nemo_rl.data.multimodal_utils import present_multimodal_fields
 from nemo_rl.data_plane import DATA_PLANE_CHECKPOINT_SCHEMA_VERSION, KVBatchMeta
@@ -3251,10 +3252,16 @@ class SingleControllerActor:
             select_fields=self._advantage_input_fields(),
         )
 
-        prompt_ids = tensor_field(data, adv_cfg.prompt_ids_field)
         rewards = squeeze_trailing_unit_dim(
             tensor_field(data, adv_cfg.reward_field)
         ).float()
+        # Control, ALP solve rates, and GRPO baselines share occurrence identity.
+        # Equal prompt text from separate admissions must not merge outcomes.
+        prompt_ids = build_rollout_group_ids_from_sample_ids(
+            meta.sample_ids,
+            expected_group_size=self._algo_cfg.num_generations_per_prompt,
+            device=rewards.device,
+        )
         token_mask = tensor_field(data, adv_cfg.token_mask_field).float()
         sample_mask = squeeze_trailing_unit_dim(
             tensor_field(data, adv_cfg.sample_mask_field)
@@ -3345,9 +3352,6 @@ class SingleControllerActor:
                 cfg=shaping,
             )
             rewards = alp.rewards
-            # Use the same occurrence groups for ALP and GRPO baselines. Equal
-            # prompt text from separate admissions must not merge their outcomes.
-            prompt_ids = alp.group_ids
             self._step_log_dict["alp_shaped_rewards"].append(rewards.detach().cpu())
             self._step_log_dict["alp_successes"].append(alp.successes.detach().cpu())
             self._step_log_dict["alp_response_lengths"].append(
@@ -3472,7 +3476,6 @@ class SingleControllerActor:
     def _advantage_input_fields(self) -> list[str]:
         adv_cfg = self._advantage_cfg
         fields = [
-            adv_cfg.prompt_ids_field,
             adv_cfg.reward_field,
             adv_cfg.token_mask_field,
             adv_cfg.sample_mask_field,

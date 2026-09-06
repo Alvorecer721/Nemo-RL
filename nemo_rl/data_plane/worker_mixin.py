@@ -47,10 +47,6 @@ from nemo_rl.data_plane.schema import (
 )
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict, SequencePackingArgs
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
-from nemo_rl.utils.packed_tensor import (
-    restore_tensor_from_bytes,
-    tensor_to_contiguous_bytes,
-)
 from nemo_rl.utils.r3_trace import trace_tq_fetch_payload
 
 if TYPE_CHECKING:
@@ -78,9 +74,8 @@ def _broadcast_batched_data_dict(
     Two-phase to avoid pickling tensor payloads on the hot path: a small
     descriptor (per-key dtype/shape) ships via ``broadcast_object_list``
     first, then each tensor's data ships via ``broadcast`` on its
-    current device. The Torch 2.11 Gloo and NCCL process groups do not support
-    ``torch.int16``, so those tensors ride the collective as an exact byte view
-    and are reconstructed without changing their logical dtype. The leader
+    transport device. Gloo and NCCL do not support ``torch.int16``, so those
+    tensors are widened losslessly to int32 and narrowed after receipt. The leader
     supplies ``data``; non-leaders pass ``None`` and get an empty
     BatchedDataDict filled in-place.
     """
@@ -100,21 +95,8 @@ def _broadcast_batched_data_dict(
         descriptor: list[Any] = []
         for k, v in data.items():
             if isinstance(v, torch.Tensor):
-                byte_wire = v.dtype == torch.int16
-                wire_dtype = torch.uint8 if byte_wire else v.dtype
-                wire_shape = (
-                    (v.numel() * v.element_size(),) if byte_wire else tuple(v.shape)
-                )
                 descriptor.append(
-                    (
-                        k,
-                        "tensor",
-                        str(v.dtype),
-                        tuple(v.shape),
-                        str(v.device),
-                        str(wire_dtype),
-                        wire_shape,
-                    )
+                    (k, "tensor", str(v.dtype), tuple(v.shape), str(v.device))
                 )
             elif isinstance(v, PackedTensor):
                 # A PackedTensor on the ``raw`` branch would be pickled by
@@ -182,24 +164,20 @@ def _broadcast_batched_data_dict(
         kind = entry[1]
         if kind == "tensor":
             dtype_str, shape, src_device = entry[2], entry[3], entry[4]
-            wire_dtype_str, wire_shape = entry[5], entry[6]
             dtype = getattr(torch, dtype_str.split(".")[-1])
-            wire_dtype = getattr(torch, wire_dtype_str.split(".")[-1])
+            # NCCL has no int16 ("Short") type; ship as int32 and narrow back
+            # (routed_experts rides TQ as int16).
+            wire_dtype = torch.int32 if dtype == torch.int16 else dtype
             if is_leader:
-                source_tensor = out[key]
-                tensor = source_tensor
-                if tensor.dtype != wire_dtype:
-                    tensor = tensor_to_contiguous_bytes(
-                        tensor, device=bcast_device
-                    ).reshape(wire_shape)
-                elif tensor.device.type != torch.device(bcast_device).type:
-                    tensor = tensor.to(bcast_device)
+                # Collectives send storage order, so normalize strided inputs.
+                # Keep the leader's original tensor and device in ``out``.
+                tensor = out[key].to(device=bcast_device, dtype=wire_dtype).contiguous()
             else:
-                tensor = torch.empty(wire_shape, dtype=wire_dtype, device=bcast_device)
+                tensor = torch.empty(shape, dtype=wire_dtype, device=bcast_device)
             torch.distributed.broadcast(tensor, src=src, group=group)
             if not is_leader:
                 if tensor.dtype != dtype:
-                    tensor = restore_tensor_from_bytes(tensor, shape, dtype)
+                    tensor = tensor.to(dtype)
                 if torch.device(src_device).type != torch.device(bcast_device).type:
                     tensor = tensor.to(src_device)
                 out[key] = tensor

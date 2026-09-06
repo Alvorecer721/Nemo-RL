@@ -107,14 +107,13 @@ def record_to_train_batch(
     Returns:
         BatchedDataDict with input_ids, input_lengths, generation_logprobs,
         token_mask, an all-ones sample_mask, the raw mask_sample and truncated
-        flags, prompt_ids_for_adv, total_reward, episode_success, violation counts, and optional
+        flags, total_reward, episode_success, violation counts, and optional
         routed experts and message-violation masks.
     """
     # Lazy imports: grpo and llm_message_utils transitively pull
     # experience.rollouts, so importing at module top risks a cycle.
     from nemo_rl.algorithms.grpo import (
         add_grpo_token_loss_masks_and_generation_logprobs,
-        extract_initial_prompt_messages,
     )
     from nemo_rl.data.llm_message_utils import batched_message_log_to_flat_message
     from nemo_rl.experience.rollouts import (
@@ -135,18 +134,7 @@ def record_to_train_batch(
     prompt_token_count = sum(len(m["token_ids"]) for m in record.prompt)
     if include_message_violation_fields:
         _add_message_violation_masks(message_logs)
-    prompt_lengths = torch.full((n,), prompt_token_count, dtype=torch.long)
-
-    # Must precede the prompt extraction: it reuses the same message dicts, so
-    # backfilling here also covers the prompt flatten below. Doing it only inside
-    # add_grpo_token_loss_masks_and_generation_logprobs would be too late.
     backfill_missing_routed_experts(message_logs)
-
-    prompt_message_logs = extract_initial_prompt_messages(message_logs, prompt_lengths)
-    prompt_flat, _ = batched_message_log_to_flat_message(
-        prompt_message_logs,
-        pad_value_dict=dict(pad_value_dict),  # type: ignore
-    )
 
     add_grpo_token_loss_masks_and_generation_logprobs(message_logs)
     flat, input_lengths = batched_message_log_to_flat_message(
@@ -170,7 +158,6 @@ def record_to_train_batch(
         "generation_logprobs": flat["generation_logprobs"],
         "token_mask": flat["token_loss_mask"],
         "sample_mask": sample_mask,
-        "prompt_ids_for_adv": prompt_flat["token_ids"],
         MASK_SAMPLE: mask_sample,
         TRUNCATED: truncated,
         "total_reward": total_reward,
