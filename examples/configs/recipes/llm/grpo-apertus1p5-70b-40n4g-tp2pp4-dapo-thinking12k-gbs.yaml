@@ -64,12 +64,12 @@ policy:
     bias_activation_fusion: false
     defer_fp32_logits: true
     optimizer:
-      lr: 1.0e-06
-      min_lr: 1.0e-06
+      lr: 2.0e-06
+      min_lr: 2.0e-06
       use_precision_aware_optimizer: false
     scheduler:
       lr_warmup_iters: 0
-      lr_warmup_init: 1.0e-06
+      lr_warmup_init: 2.0e-06
       use_checkpoint_opt_param_scheduler: true
       override_opt_param_scheduler: false
   generation:
@@ -154,7 +154,7 @@ logger:
   wandb:
     project: apertus-benchmarks
     entity: ml-team-cscs
-    name: nemo70b-dapo-thinking12k-gbs768-seed42
+    name: nemo70b-dapo-thinking12k-gbs768-lr2-seed42
   tensorboard_enabled: true
   monitor_gpus: true
   gpu_monitoring:
