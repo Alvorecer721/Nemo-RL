@@ -95,6 +95,28 @@ def _use_python_api() -> bool:
     )
 
 
+_DEVICE_API_SUPPORT_BY_COMMUNICATOR: dict[int, bool] = {}
+
+
+def _communicator_supports_device_api(process_group) -> bool:
+    """Whether the refit communicator can host the native op's device kernels.
+
+    ``nccl.m2n.reshard`` creates a NCCL device communicator, which NCCL only
+    grants when every rank pair is reachable over NVLink or GPU-initiated
+    networking; a multi-node communicator on a fabric without GIN reports no
+    device-API support and ``ncclDevCommCreate`` fails.
+    """
+    communicator = getattr(process_group, "nccl_communicator", None)
+    if communicator is None:
+        return False
+    key = id(communicator)
+    supported = _DEVICE_API_SUPPORT_BY_COMMUNICATOR.get(key)
+    if supported is None:
+        supported = bool(getattr(communicator, "device_api_support", False))
+        _DEVICE_API_SUPPORT_BY_COMMUNICATOR[key] = supported
+    return supported
+
+
 def xferdtensor(
     src_tensor,
     src_mesh,
@@ -109,22 +131,27 @@ def xferdtensor(
     global _XFERDTENSOR_PATH_LOGGED
     use_golden = _use_golden_api()
     use_python = _use_python_api()
+    device_api_support = None
+    if not use_golden and not use_python and _reshard is not None:
+        device_api_support = _communicator_supports_device_api(process_group)
+    use_native = bool(device_api_support)
     if not _XFERDTENSOR_PATH_LOGGED:
         if use_golden:
             path = "golden (broadcast)"
-        elif use_python or _reshard is None:
-            path = "xferdtensor_python (exact-transfer)"
-        else:
+        elif use_native:
             path = "real nccl.m2n.reshard"
+        else:
+            path = "xferdtensor_python (exact-transfer)"
         print(
             f"[xferdtensor] reshard path: {path} "
             f"(real_op_available={_reshard is not None}, "
+            f"device_api_support={device_api_support}, "
             f"force_golden={use_golden}, force_python={use_python})",
             flush=True,
         )
         _XFERDTENSOR_PATH_LOGGED = True
 
-    if not use_golden and (use_python or _reshard is None):
+    if not use_golden and not use_native:
         # Default when the real op is absent: Python exact-transfer reshard
         # (per-overlap P2P + cached split-comm replica broadcast); same
         # 7-arg contract.
