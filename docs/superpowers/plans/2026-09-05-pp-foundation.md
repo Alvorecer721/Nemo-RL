@@ -73,3 +73,5 @@
 ## Completed qualification
 
 The image, focused CPU/GPU/static checks and bounded 70B save/resume gates passed. See the root `integration-ledger.md` and [activation audit](../../guides/pp-foundation-activation.md) for evidence and limitations. Runtime source `b6a7903ae` uses the certified `b339b0aba` dependency image through a clean checkout overlay. Initial postflight and scheduler-horizon failures are retained alongside their verified corrections. Final Adam counters advance 2 to 4 and scheduler samples 1536 to 3072. The authorized handoff is a PR to the user fork main; main remains unchanged.
+
+The subsequent requested microbatch 2 trial failed with OOM before an optimizer update; the four-update MB1 control passed. Retain MB1 and preserve both results in the ledger. After creating the PR, perform the requested fresh local `/review`, report its findings, and stop without merging.

@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The approved source integration, dependency rebuild, focused checks and bounded 70B optimizer-resume qualification are complete. Publish the dependency branches and create a PR to `Alvorecer721/Nemo-RL:main`, then stop. Do not merge main or implement rollout PP in this change.
+The approved source integration, dependency rebuild, focused checks and bounded 70B optimizer-resume qualification are complete. The requested microbatch 2 trial is also complete and failed with OOM; the qualified recipe retains microbatch 1. Publish the dependency branches, create a PR to `Alvorecer721/Nemo-RL:main`, and perform the requested fresh local review, then stop. Do not merge main or implement rollout PP in this change.
 
 The original dirty checkout, other worktrees, historical checkpoints and user allocations were preserved. All source work uses the isolated `integrate/2026-09-05-pp-foundation` branch and independent Bridge/MCore integration clones.
 
@@ -48,7 +48,7 @@ lock MD5: e266ae4f7b43eefdaf328f5387dfc309
 release input SHA256: 27896e220d80e03909227595e934987366bb339647c8364bdf22b952e8b4df11
 ```
 
-The later source/config/launcher corrections run from a clean, explicit checkout overlay. They are not baked into this image; dependency inputs and fingerprints are unchanged. Exact runtime checks reported TE `2.18.0+27486e03`, torch `2.11.0+cu130`, and NCCL **2.28.9** on GH200 120GB. `NVTE_WITH_NCCL_EP=0` remains set.
+The later source/config/launcher corrections run from a clean, explicit checkout overlay. They are not baked into this image; dependency inputs and fingerprints are unchanged. The focused worker probe reported TE `2.18.0+27486e03`, torch `2.11.0+cu130`, and PyTorch NCCL **2.28.9** on GH200 120GB. The 70B refit logs also contain native NCCL **2.30.7** banners; the PyTorch probe must not be generalized to every communicator in the process. `NVTE_WITH_NCCL_EP=0` remains set.
 
 ## Validation
 
@@ -69,7 +69,7 @@ The RNG harness correction detaches peer `TempNamedDir` deletion finalizers whil
 
 ### 70B setup and artifact checks
 
-The bounded check uses 16 nodes / 64 GPUs: 12 trainer nodes at TP2/PP4/DP6 and four rollout nodes at TP4/PP1. Model/tokenizer are the existing `ap1p5-70b-sft-262k-2700_corr` checkpoint. Dataset identities are unchanged: cached GSM8K with 7473 training and 1319 test examples. Inputs are unpacked with a 2048-total-token limit, thinking disabled in the template, 48 prompts × 16 responses, global batch768 and train microbatch1. Sampling is windowed age1, TIS2, `force_on_policy_ratio=true`, LR1e-6 and weight decay0.01. W&B is disabled; TensorBoard is enabled.
+The bounded check uses 16 nodes / 64 GPUs: 12 trainer nodes at TP2/PP4/DP6 and four rollout nodes at TP4/PP1. Model/tokenizer are the existing `ap1p5-70b-sft-262k-2700_corr` checkpoint. Dataset identities are unchanged: cached GSM8K with 7473 training and 1319 test examples. Inputs are unpacked with a 2048-total-token limit, thinking disabled in the template, 48 prompts × 16 responses, global batch 768 and train microbatch1. Sampling is windowed age1, TIS2, `force_on_policy_ratio=true`, LR1e-6 and weight decay0.01. W&B is disabled; TensorBoard is enabled.
 
 The first two updates took 116.30 and 56.34 seconds inside the step timers; policy training took 62.05 and 40.69 seconds. These reflect startup/async scheduling differences and are not a matched performance comparison. Both had finite loss, gradient norm and generation-KL diagnostics.
 
@@ -80,6 +80,15 @@ The first fresh resume attempt,3304367, failed before updates because extending 
 Fresh resume **3304396** completed `0:0` in **10:55**. All 48 trainer workers loaded the saved checkpoint; 87 replay groups were restored. Updates 3–4 took 88.57 and 53.90 seconds, with policy training taking 60.50 and 41.36 seconds. All 274 logged scalar metrics were finite, both updates used 768 valid samples, and final training state reports step/version4 and 192 consumed prompts. The final checkpoint again contains all 48 expected shards.
 
 An independent metadata comparison found all 16 saved Adam group counters advanced **2 → 4**, and the scheduler counter advanced **1536 → 3072**. Every other saved optimizer-group and scheduler setting remained unchanged. This rules out a full optimizer-counter reset in the tested resume; it does not assert bitwise equality of all moment tensors or RNG state.
+
+## Microbatch 2 trial
+
+Both arms used source `9eba46778d01ed79a121160f78a7ff5c76ebd185`, the same dependency image, model/data/seed and global batch 768, with checkpoint writes disabled. The only independent configuration change was `policy.train_micro_batch_size: 1` versus `2`; disabled packing/dynamic-batching token budgets inherit this value. Both enabled existing per-rank allocator logging. These allocations exposed 95 GiB per GPU; the isolated logprob benchmark used a GH200 120GB device.
+
+- **MB1 control 3304520:** completed `0:0` in 12:01; all four updates used 128 microbatches and 768 valid samples. All 273 scalar metric series were finite, and all 48 training ranks logged four completed steps. Warm policy times (steps 2–4) were 40.84/40.48/41.28 seconds, mean 40.87; full-step times 45.06/58.15/46.44 seconds, mean 49.88. Step 3 includes 13.14 seconds of exposed generation. Maximum recorded allocated/reserved memory was 78.20/87.80 GiB.
+- **MB2 candidate 3304521:** failed `1:0` in 9:21 before its first optimizer update. Rank 10 exhausted memory in TE Linear weight-gradient GEMM: a 336 MiB allocation failed with 326.81 MiB free on a 95 GiB device; 89.79 GiB was allocated by PyTorch at the failing site. Other ranks recorded allocation peaks up to 90.12 GiB before termination. Partial interval logs are not a complete all-rank peak measurement.
+
+Retain MB1. The trial establishes that chunked logprobs alone do not make this MB2 configuration fit. It provides no MB2 throughput or convergence comparison. A later MB2 attempt needs an additional measured activation-memory reduction; reduced recomputation would increase memory pressure. Raw logs, terminal states, resolved inputs and the analysis are in `session/20260905_114410/pp_foundation/microbatch-ab/`.
 
 ## Qualification limits and records
 
