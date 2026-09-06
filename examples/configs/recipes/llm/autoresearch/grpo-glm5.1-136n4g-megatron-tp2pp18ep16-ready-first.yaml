@@ -1,0 +1,76 @@
+defaults: ./grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-r3-10step.yaml
+
+# Scaling follow-up to the completed 104-node SingleController run. Keep the
+# 72-node TP2/PP18/EP16 trainer, ready-first sampler, response envelope, Router
+# Replay, and quality gates fixed. Change only the rollout fleet from four to
+# eight TP32 replicas (32 -> 64 inference nodes) and run the full ten-step
+# correctness and throughput gate.
+grpo:
+  max_num_steps: 10
+  async_grpo: null
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  use_dynamic_sampling: false
+
+policy:
+  max_total_sequence_length: 4096
+  generation:
+    max_new_tokens: 3584
+    colocated:
+      resources:
+        num_nodes: 64
+        gpus_per_node: 4
+    vllm_cfg:
+      gpu_memory_utilization: 0.60
+      max_model_len: 4096
+
+checkpointing:
+  enabled: false
+  metric_name: null
+
+data_plane:
+  enabled: true
+  impl: transfer_queue
+  backend: simple
+
+async_rl:
+  sampler:
+    name: ready_first
+    max_staleness_versions: 1
+  recompute_kv_cache_after_weight_updates: false
+  min_groups_for_streaming_train: 16
+  max_inflight_prompts: 32
+  max_buffered_rollouts: 128
+  diagnostics: false
+  rollout_failure:
+    max_infra_attempts_per_prompt: 5
+    max_data_attempts_per_prompt: 2
+    backoff_base_s: 1.0
+    max_backoff_s: 30.0
+    max_skipped_prompts: 0
+    max_consecutive_dropped_prompts: 0
+    min_step_batch_fraction: 0.9
+    on_dropped_prompt: shrink
+    native:
+      generation_timeout_s: 3600
+      env_timeout_s: 600
+  stall_watchdog:
+    interval_s: 30
+    stall_timeout_s: 4200
+    stall_action: abort
+    gym_subprocess_check: false
+  generation_fleet_health:
+    enabled: false
+  generation_router:
+    enabled: false
+
+cluster:
+  num_nodes: 136
+  gpus_per_node: 4
+  segment_size: 4
+
+logger:
+  log_dir: ${oc.env:GLM_RUN_DIR}/tb
+  wandb:
+    name: glm51-r3-ready-first-136n-tp2-vllm-dp8

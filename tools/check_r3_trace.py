@@ -22,12 +22,9 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-FETCH_STAGE_TO_REPLAY_STAGE = {
-    "prev_lp": "prev-logprob",
-    "train": "train",
-}
 REQUIRED_FETCH_STAGES = ("prev_lp", "train")
 REQUIRED_REPLAY_STAGES = ("prev-logprob", "train")
+TRACE_CONTRACTS = ("transfer-queue", "legacy-async")
 
 
 def _iter_records(trace_dir: Path) -> list[dict[str, Any]]:
@@ -68,7 +65,14 @@ def _failures_for_fetch_matches(
                 continue
             for fetch_record in fetch_records:
                 fetch_input_hash, fetch_routed_hash = _hashes(fetch_record)
-                if fetch_input_hash and producer_input_hash != fetch_input_hash:
+                if bool(producer_input_hash) != bool(fetch_input_hash):
+                    failures.append(
+                        "input_ids hash presence mismatch "
+                        f"stage={stage} key={key} rank={fetch_record.get('rank')}: "
+                        f"producer_present={bool(producer_input_hash)} "
+                        f"fetch_present={bool(fetch_input_hash)}"
+                    )
+                elif fetch_input_hash and producer_input_hash != fetch_input_hash:
                     failures.append(
                         "input_ids hash mismatch "
                         f"stage={stage} key={key} rank={fetch_record.get('rank')}: "
@@ -80,12 +84,25 @@ def _failures_for_fetch_matches(
                         f"stage={stage} key={key} rank={fetch_record.get('rank')}: "
                         f"producer={producer_routed_hash} fetch={fetch_routed_hash}"
                     )
+                if producer.get("valid_length") != fetch_record.get("valid_length"):
+                    failures.append(
+                        "valid_length mismatch "
+                        f"stage={stage} key={key} rank={fetch_record.get('rank')}: "
+                        f"producer={producer.get('valid_length')} "
+                        f"fetch={fetch_record.get('valid_length')}"
+                    )
+
+    # Trace-step counters are process-local. The rollout producer and each
+    # policy consumer can therefore sample different calls from an async
+    # stream. Require complete consumer coverage for every sampled producer,
+    # but do not treat additional consumer samples as orphaned payloads.
     return failures
 
 
 def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     events = Counter(record.get("event", "<missing>") for record in records)
     producer_by_key: dict[str, dict[str, Any]] = {}
+    producer_counts_by_key = Counter()
     fetch_by_stage_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     replay_assignments_by_stage = Counter()
     replay_actions_by_stage_action = Counter()
@@ -100,6 +117,7 @@ def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             ranks_by_event[event].add(rank)
         if event == "rollout_payload_sample":
             key = record["key"]
+            producer_counts_by_key[key] += 1
             producer_by_key.setdefault(key, record)
         elif event == "tq_fetch_sample":
             fetch_by_stage_key[(record["stage"], record["key"])].append(record)
@@ -119,6 +137,7 @@ def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "events": events,
         "producer_by_key": producer_by_key,
+        "producer_counts_by_key": producer_counts_by_key,
         "fetch_by_stage_key": fetch_by_stage_key,
         "replay_assignments_by_stage": replay_assignments_by_stage,
         "replay_actions_by_stage_action": replay_actions_by_stage_action,
@@ -131,23 +150,41 @@ def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
 def check_trace(
     trace_dir: Path,
     *,
+    transport_contract: str = "transfer-queue",
     require_forward_verify: bool = False,
     require_cp_identity: bool = False,
 ) -> int:
+    if transport_contract not in TRACE_CONTRACTS:
+        raise ValueError(
+            f"Unknown transport contract {transport_contract!r}; "
+            f"expected one of {TRACE_CONTRACTS}"
+        )
+
     records = _iter_records(trace_dir)
     summary = _summarize(records)
     failures: list[str] = []
 
     producer_by_key = summary["producer_by_key"]
-    if not producer_by_key:
-        failures.append("no rollout_payload_sample records found")
-
-    failures.extend(
-        _failures_for_fetch_matches(
-            producer_by_key,
-            summary["fetch_by_stage_key"],
+    fetch_by_stage_key = summary["fetch_by_stage_key"]
+    if transport_contract == "transfer-queue":
+        if not producer_by_key:
+            failures.append("no rollout_payload_sample records found")
+        for key, count in summary["producer_counts_by_key"].items():
+            if count != 1:
+                failures.append(
+                    f"expected one rollout producer record for key={key}; got {count}"
+                )
+        failures.extend(
+            _failures_for_fetch_matches(
+                producer_by_key,
+                fetch_by_stage_key,
+            )
         )
-    )
+    elif producer_by_key or fetch_by_stage_key:
+        failures.append(
+            "legacy-async trace unexpectedly contains TransferQueue producer/fetch "
+            "records; the selected trace contract does not match the runtime path"
+        )
 
     replay_assignments_by_stage = summary["replay_assignments_by_stage"]
     for stage in REQUIRED_REPLAY_STAGES:
@@ -166,8 +203,18 @@ def check_trace(
         for record in records
         if record.get("event") == "router_replay_forward_verify"
     ]
-    if require_forward_verify and not replay_forward_verify_records:
-        failures.append("no router_replay_forward_verify records found")
+    if require_forward_verify:
+        for stage in REQUIRED_REPLAY_STAGES:
+            if (
+                summary["replay_forward_verify_by_stage_action"][
+                    (stage, "replay_forward")
+                ]
+                == 0
+            ):
+                failures.append(
+                    "no router_replay_forward_verify records for "
+                    f"stage={stage} action=replay_forward"
+                )
     for record in replay_forward_verify_records:
         if not record.get("matches_expected"):
             failures.append(
@@ -176,11 +223,28 @@ def check_trace(
                 f"layer={record.get('layer_number')} rank={record.get('rank')}"
             )
 
+    cp_records = [
+        record for record in records if record.get("event") == "cp_routed_experts"
+    ]
     cp_identity_verified_counts = summary["cp_identity_verified_counts"]
-    if require_cp_identity and not cp_identity_verified_counts:
-        failures.append("no CP token-identity verification records found")
+    if require_cp_identity:
+        if not cp_records:
+            failures.append("no CP routed-expert records found")
+        missing_cp_identity = [
+            record
+            for record in cp_records
+            if record.get("cp_token_identity_verified_count") is None
+        ]
+        if missing_cp_identity:
+            failures.append(
+                "CP token identity was not verified for "
+                f"{len(missing_cp_identity)}/{len(cp_records)} routed-expert records"
+            )
+        if cp_records and sum(cp_identity_verified_counts) <= 0:
+            failures.append("CP token-identity verifier checked zero token rows")
 
     print(f"Trace dir: {trace_dir}")
+    print(f"Transport contract: {transport_contract}")
     print(f"Records: {len(records)}")
     print("Events:")
     for event, count in sorted(summary["events"].items()):
@@ -224,7 +288,11 @@ def check_trace(
             print(f"  - {failure}")
         return 1
 
-    print("\nPASS: producer routed_experts matched TQ fetches, and replay was set.")
+    if transport_contract == "transfer-queue":
+        transport_result = "producer routed_experts matched TQ fetches"
+    else:
+        transport_result = "legacy async emitted no TransferQueue records"
+    print(f"\nPASS: {transport_result}, and replay was set.")
     return 0
 
 
@@ -234,6 +302,15 @@ def main() -> int:
     )
     parser.add_argument(
         "trace_dir", type=Path, help="Directory containing r3_trace_*.jsonl"
+    )
+    parser.add_argument(
+        "--transport-contract",
+        choices=TRACE_CONTRACTS,
+        default="transfer-queue",
+        help=(
+            "Transport whose trace schema must be present. TransferQueue requires "
+            "producer/fetch identity records; legacy async requires they be absent."
+        ),
     )
     parser.add_argument(
         "--require-forward-verify",
@@ -251,6 +328,7 @@ def main() -> int:
         return 2
     return check_trace(
         args.trace_dir,
+        transport_contract=args.transport_contract,
         require_forward_verify=args.require_forward_verify,
         require_cp_identity=args.require_cp_identity,
     )

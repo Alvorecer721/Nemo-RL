@@ -1,0 +1,16 @@
+defaults: grpo-glm5.1-80n4g-megatron-async-vllm-tp32-checkpoint-save.yaml
+
+# Capacity diagnostic without the Megatron CPU-placeholder fix. The 72-node
+# trainer remains 288 ranks, with dense DP8 and expert DP1. TP2 halves the
+# dense shard on the heavy final PP stage while preserving PP18/ETP1/EP16.
+policy:
+  megatron_cfg:
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 18
+    expert_tensor_parallel_size: 1
+    expert_model_parallel_size: 16
+    sequence_parallel: true
+
+logger:
+  wandb:
+    name: glm51-cross-allocation-checkpoint-save-tp2

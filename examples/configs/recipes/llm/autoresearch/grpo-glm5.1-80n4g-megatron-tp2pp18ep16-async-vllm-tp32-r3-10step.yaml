@@ -1,0 +1,33 @@
+defaults: grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-checkpoint-save.yaml
+
+# Ten-step GLM-5.1 production characterization on CSCS GH200. This keeps the
+# runtime-proven TP2/PP18/EP16 trainer and TP32/EP32 vLLM topology, but records
+# and replays vLLM's MoE expert choices in Megatron so backend routing drift is
+# not mistaken for policy drift.
+grpo:
+  max_num_steps: 10
+
+policy:
+  # The 1024-token response envelope truncated 94.5-100% of the first
+  # characterization run's trajectories, leaving only five learning-signal
+  # steps. Upstream's GLM recipe uses a 2048-token total envelope; retain 512
+  # tokens for the prompt and give generation the remaining 1536.
+  max_total_sequence_length: 2048
+  router_replay:
+    enabled: true
+  generation:
+    max_new_tokens: 1536
+
+# This is an endurance and numerical-parity run. The complete 8.946-TB
+# cross-allocation checkpoint is preserved separately and no new checkpoint is
+# written here.
+checkpointing:
+  enabled: false
+  checkpoint_dir: ${oc.env:GLM_RUN_DIR}/disabled_checkpoints
+  checkpoint_must_save_by: null
+  save_optimizer: false
+
+logger:
+  log_dir: ${oc.env:GLM_RUN_DIR}/tb
+  wandb:
+    name: glm51-r3-10step-tp2
