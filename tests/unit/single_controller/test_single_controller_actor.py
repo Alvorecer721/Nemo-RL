@@ -31,7 +31,10 @@ from nemo_rl.algorithms.advantage_estimator import (
     GRPOAdvantageEstimator,
 )
 from nemo_rl.algorithms.async_utils.replay_buffer import DataPlaneCheckpointBarrier
-from nemo_rl.algorithms.async_utils.staleness_sampler import BaseSampler
+from nemo_rl.algorithms.async_utils.staleness_sampler import (
+    BaseSampler,
+    WindowedSampler,
+)
 from nemo_rl.algorithms.grpo import GRPOConfig, _initial_grpo_save_state
 from nemo_rl.algorithms.loss import ClippedPGLossConfig
 from nemo_rl.algorithms.metric_utils import SetupTimingMetrics
@@ -50,9 +53,11 @@ from nemo_rl.algorithms.single_controller_utils.utils import (
     reduce_advantage_pump_metrics,
 )
 from nemo_rl.data_plane import KVBatchMeta
+from nemo_rl.data_plane.adapters.noop import NoOpDataPlaneClient
 from nemo_rl.data_plane.schema import ROLLOUT_METRICS
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.utils.timer import TimeoutChecker, Timer
+from tests.unit.single_controller.test_sampler_interface import FakeBuffer
 
 
 class FakeWeightSynchronizer:
@@ -2464,6 +2469,73 @@ def _occurrence_advantage_controller(
         )
     }
     return ctrl
+
+
+@pytest.mark.parametrize("legacy_first", [False, True])
+@pytest.mark.parametrize("legacy_missing_success", [False, True])
+@pytest.mark.parametrize("coefficient", [None, 0.1])
+def test_selected_mixed_legacy_metadata_keeps_optional_success_fetch_safe(
+    legacy_first: bool, legacy_missing_success: bool, coefficient: float | None
+) -> None:
+    """Optional logging must not turn mixed restored schemas into a failed fetch."""
+    client = NoOpDataPlaneClient()
+    common = TensorDict(
+        {
+            "total_reward": torch.tensor([1.0, 0.0]),
+            "episode_success": torch.tensor([1.0, 0.0]),
+            "token_mask": torch.tensor([[0, 1, 1], [0, 1, 1]]),
+            "sample_mask": torch.ones(2),
+            "mask_sample": torch.zeros(2, dtype=torch.bool),
+            "truncated": torch.zeros(2, dtype=torch.bool),
+        },
+        batch_size=[2],
+    )
+    client.register_partition("rollout_data", list(common.keys()), 4, ["train"])
+    buffer = FakeBuffer()
+    original_metas = []
+    for name in ["old", "new"] if legacy_first else ["new", "old"]:
+        fields = common.clone()
+        if name == "old" and legacy_missing_success:
+            del fields["episode_success"]
+        meta = client.put_samples(
+            [f"{name}_g0", f"{name}_g1"], "rollout_data", fields=fields
+        )
+        original_metas.append(meta)
+        buffer.add(name, 2)
+        buffer.meta_list[-1] = meta
+    sampler = WindowedSampler(
+        buffer, max_staleness_versions=1, sample_freshest_first=True
+    )
+    meta, count = asyncio.run(
+        sampler.select(current_train_weight=2, min_prompt_groups=2, max_prompt_groups=2)
+    )
+    assert meta is not None and count == 2
+    ctrl = _occurrence_advantage_controller(
+        common, group_size=2, coefficient=coefficient
+    )
+    ctrl._dp_client = client
+    if legacy_missing_success and coefficient is not None:
+        # ALP requires true episode outcomes even when optional logging cannot
+        # read them. Removing optional metadata must not weaken that requirement.
+        with pytest.raises(KeyError, match="episode_success"):
+            asyncio.run(ctrl._advantage_stage(meta))
+        return
+    _, valid = asyncio.run(ctrl._advantage_stage(meta))
+    assert valid
+    metrics = reduce_advantage_pump_metrics(**ctrl._step_log_dict)
+    assert metrics["prompt_groups/total"] == 2
+    assert metrics["prompt_groups/unknown_correctness"] == (
+        2 if legacy_missing_success else 0
+    )
+    assert metrics["prompt_groups/mixed_correctness"] == (
+        0 if legacy_missing_success else 2
+    )
+    # Concat must not alter field availability on any original occurrence.
+    for original in original_metas:
+        expected_success = not (
+            original.sample_ids[0].startswith("old_") and legacy_missing_success
+        )
+        assert ("episode_success" in original.fields) == expected_success
 
 
 @pytest.mark.parametrize("group_size", [2, 16])
