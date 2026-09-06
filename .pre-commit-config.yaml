@@ -37,7 +37,9 @@ repos:
             exit 1
           '
         files: '.*\/[^\/]*_[^\/]*\.md$'
-        exclude: '^\.github/'
+        # Session-memory filenames are a repository contract (for example,
+        # session_state.md), so the docs naming rule does not apply there.
+        exclude: '^(\.github/|session/)'
         types: [file]
 
   - repo: local

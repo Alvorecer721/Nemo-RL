@@ -21,6 +21,14 @@ jobs:
 
   submodule-check-comment:
     name: Post submodule check comment
+    # Reusable workflows cannot elevate the token permissions supplied by
+    # their caller. Keep this pull_request_target job least-privileged while
+    # allowing it to discover the check artifact and post the resulting PR
+    # comment.
+    permissions:
+      actions: read
+      contents: read
+      issues: write
     uses: ./.github/workflows/_pr_comment.yml
     with:
       pr_number: "${{ github.event.number }}"
