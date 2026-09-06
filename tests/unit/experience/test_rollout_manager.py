@@ -1310,3 +1310,12 @@ def test_async_nemo_gym_rollout_manager_matches_original(
         assert orig_val == pytest.approx(new_val), (
             f"rollout_metrics[{key!r}] mismatch — original {orig_val}, manager {new_val}"
         )
+
+
+def test_gym_completion_carries_explicit_episode_success():
+    result = _mask_gate_result()
+    result["full_result"]["reward"] = 0.1
+    result["full_result"]["episode_success"] = 0.0
+    completion = _nemo_gym_impl(True)._results_to_completions([result])[0][0]
+    assert completion.reward == 0.1
+    assert completion.episode_success == 0.0

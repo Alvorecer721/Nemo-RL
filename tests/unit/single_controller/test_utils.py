@@ -207,6 +207,49 @@ class TestReduceAdvantagePumpMetrics:
         assert out["num_masked_seqs_by_logprob_error"] == 3
         assert out["masked_correct_pct"] == pytest.approx(1.0 / 3)
 
+    def test_token_logprob_error_tails_are_reduced_across_chunks(self) -> None:
+        out = reduce_advantage_pump_metrics(
+            rewards=[],
+            masked_advantages=[],
+            sequence_lengths=[],
+            logprob_errors=[torch.tensor([0.0, 0.1]), torch.tensor([0.6, 1.1])],
+        )
+
+        assert out["logprob_tails/valid_tokens"] == 4
+        assert out["logprob_tails/mean_abs"] == pytest.approx(0.45)
+        assert out["logprob_tails/p95_abs"] == pytest.approx(1.025)
+        assert out["logprob_tails/p99_abs"] == pytest.approx(1.085)
+        assert out["logprob_tails/max_abs"] == pytest.approx(1.1)
+        assert out["logprob_tails/count_gt_0_5"] == 2
+        assert out["logprob_tails/count_gt_1_0"] == 1
+        assert out["logprob_tails/count_nonfinite"] == 0
+
+    def test_token_logprob_error_tails_count_nonfinite_deltas(self) -> None:
+        out = reduce_advantage_pump_metrics(
+            rewards=[],
+            masked_advantages=[],
+            sequence_lengths=[],
+            logprob_errors=[torch.tensor([0.1, math.nan, math.inf, 0.3])],
+        )
+
+        assert out["logprob_tails/valid_tokens"] == 2
+        assert out["logprob_tails/count_nonfinite"] == 2
+        assert out["logprob_tails/max_abs"] == pytest.approx(0.3)
+
+    @pytest.mark.parametrize("errors", [torch.empty(0), torch.tensor([math.nan])])
+    def test_token_logprob_error_tails_report_empty_evidence(
+        self, errors: torch.Tensor
+    ) -> None:
+        out = reduce_advantage_pump_metrics(
+            rewards=[],
+            masked_advantages=[],
+            sequence_lengths=[],
+            logprob_errors=[errors],
+        )
+
+        assert out["logprob_tails/valid_tokens"] == 0
+        assert out["logprob_tails/count_nonfinite"] == errors.numel()
+
     def test_violation_rates_from_per_sample_counts(self) -> None:
         out = reduce_advantage_pump_metrics(
             rewards=[],

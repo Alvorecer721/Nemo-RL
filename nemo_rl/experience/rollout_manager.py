@@ -17,7 +17,7 @@ import copy
 import enum
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import ray.exceptions
 import torch
@@ -52,6 +52,7 @@ from nemo_rl.experience.rollouts import (
     EffortLevelsConfig,
     _apply_effort_shaping,
     _attach_routed_experts_to_message_log_prefix,
+    _compute_generation_quality_metrics,
     _dummy_routed_experts_for_tokens,
     _effort_shaping_metrics,
     _find_routed_experts_template,
@@ -389,6 +390,7 @@ class AsyncRolloutImpl:
         max_rollout_turns: int,
         policy_generation: GenerationInterface,
         timeouts: RolloutTimeouts = RolloutTimeouts(),
+        cot_token_ids: Optional[tuple[int, int]] = None,
         **kwargs: Any,
     ) -> None:
         self._tokenizer = tokenizer
@@ -398,6 +400,7 @@ class AsyncRolloutImpl:
         self._max_rollout_turns = max_rollout_turns
         self._policy_generation = policy_generation
         self._timeouts = timeouts
+        self._cot_token_ids = cot_token_ids
 
     async def run_rollout(self, input_sample: DatumSpec) -> PromptGroupRecord:
         """Run num_generations_per_prompt rollouts for one prompt.
@@ -449,6 +452,7 @@ class AsyncRolloutImpl:
         task_name = input_sample["task_name"]
 
         total_reward = 0.0
+        episode_success = None
         turn_count = 0
         # token statistics
         total_token_count = 0
@@ -536,10 +540,24 @@ class AsyncRolloutImpl:
                 )
 
             # Update reward and termination statistics
-            # Multi-reward isn't supported in RolloutManager now, see
-            # https://github.com/NVIDIA-NeMo/RL/issues/2625 for more details.
-            assert isinstance(env_output.rewards, torch.Tensor)
-            total_reward += float(env_output.rewards[0].item())
+            # GRPO consumes the aggregate task reward, while ALP uses the
+            # separately graded episode outcome. Neither is inferred from the other.
+            step_reward = (
+                sum(
+                    float(component[0].item())
+                    for component in env_output.rewards.values()
+                )
+                if isinstance(env_output.rewards, dict)
+                else float(env_output.rewards[0].item())
+            )
+            total_reward += step_reward
+            # Keep only the latest graded state. In particular, do not carry a
+            # prior turn's success forward when the final grader omits it.
+            episode_success = (
+                float(env_output.episode_successes[0])
+                if env_output.episode_successes is not None
+                else None
+            )
             terminated = env_output.terminateds[0].item()
             env_obs_content = env_output.observations[0]["content"]
             tokenized_obs = self._tokenizer(
@@ -591,6 +609,7 @@ class AsyncRolloutImpl:
             env_extras=current_extra_env_info,
             truncated=truncated,
             reward=total_reward,
+            episode_success=episode_success,
         )
         sample_metrics = {
             "turn_count": turn_count,
@@ -744,6 +763,21 @@ class AsyncRolloutImpl:
             t for m in all_sample_metrics for t in m["turn_total_tokens"]
         ]
 
+        rollout_metrics.update(
+            _compute_generation_quality_metrics(
+                [
+                    [
+                        cast(torch.Tensor, message["token_ids"])
+                        for message in completion.message_log
+                        if message["role"] == "assistant"
+                    ]
+                    for completion in completions
+                ],
+                truncated,
+                self._cot_token_ids,
+            )
+        )
+
         # Necessary for downstream nemo rl logging/printing.
         rollout_metrics["mean_gen_tokens_per_sample"] = rollout_metrics[
             "gen_tokens_per_sample/mean"
@@ -777,6 +811,7 @@ class AsyncNemoGymRolloutImpl:
         stats: Optional[RolloutStats] = None,
         # Length-based reward shaping for low-effort prompts; None disables it.
         effort_config: Optional[EffortLevelsConfig] = None,
+        cot_token_ids: Optional[tuple[int, int]] = None,
         log_full_result_tables: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -797,6 +832,7 @@ class AsyncNemoGymRolloutImpl:
         ).max_gym_row_attempts
         self._stats = stats
         self._effort_config = effort_config
+        self._cot_token_ids = cot_token_ids
 
         self._validate_init_params()
 
@@ -1078,6 +1114,7 @@ class AsyncNemoGymRolloutImpl:
                     env_extras=result["full_result"],
                     truncated=truncated,
                     reward=float(result["full_result"]["reward"]),
+                    episode_success=result["full_result"].get("episode_success"),
                 )
             )
         return completions, penalty_counts
@@ -1146,6 +1183,21 @@ class AsyncNemoGymRolloutImpl:
             "truncation_rate": sum(truncated) / n,
         }
 
+        rollout_metrics.update(
+            _compute_generation_quality_metrics(
+                [
+                    [
+                        cast(torch.Tensor, message["token_ids"])
+                        for message in completion.message_log
+                        if message["role"] == "assistant"
+                    ]
+                    for completion in completions
+                ],
+                truncated,
+                self._cot_token_ids,
+            )
+        )
+
         # Agent-level metrics.
         agent_extras = [c.env_extras for c in completions]
         for key in agent_extras[0].keys():
@@ -1190,6 +1242,7 @@ class RolloutManager:
         timeouts: Optional[RolloutTimeouts] = None,
         retry_policy: Optional[RolloutRetryPolicy] = None,
         effort_config: Optional[EffortLevelsConfig] = None,
+        cot_token_ids: Optional[tuple[int, int]] = None,
         log_full_result_tables: bool = False,
     ) -> None:
         assert num_generations_per_prompt >= 1, (
@@ -1235,6 +1288,7 @@ class RolloutManager:
             retry_policy=self._retry_policy,
             stats=self._stats,
             effort_config=effort_config,
+            cot_token_ids=cot_token_ids,
         )
         self._tokenizer = tokenizer
         self._num_generations_per_prompt = num_generations_per_prompt

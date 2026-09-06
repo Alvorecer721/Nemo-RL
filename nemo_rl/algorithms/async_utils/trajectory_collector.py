@@ -212,6 +212,7 @@ class AsyncTrajectoryCollector:
         self.data_exhausted = False
         self.collection_failed = False
         self.collection_error: Optional[str] = None
+        self.collection_error_traceback: Optional[str] = None
         self._failure_lock: _threading.Lock = _threading.Lock()
 
         self._pg_lock: _threading.Lock = _threading.Lock()
@@ -438,6 +439,11 @@ class AsyncTrajectoryCollector:
     ) -> None:
         """Start collecting trajectories from dataloader."""
         self.running = True
+        self.data_exhausted = False
+        with self._failure_lock:
+            self.collection_failed = False
+            self.collection_error = None
+            self.collection_error_traceback = None
         self.dataloader = dataloader
 
         print("Started continuous trajectory collection")
@@ -461,6 +467,7 @@ class AsyncTrajectoryCollector:
         with self._failure_lock:
             collection_failed = self.collection_failed
             collection_error = self.collection_error
+            collection_error_traceback = self.collection_error_traceback
         with self._generation_check_lock:
             generating_targets = sorted(self._generating_targets)
         return {
@@ -468,16 +475,21 @@ class AsyncTrajectoryCollector:
             "data_exhausted": self.data_exhausted,
             "errored": collection_failed,
             "error": collection_error,
+            "error_traceback": collection_error_traceback,
             "inflight_workers": inflight_workers,
             "generating_targets": generating_targets,
         }
 
     def _mark_collection_failed(self, error: Exception) -> None:
-        """Record the first collection-loop failure."""
+        """Record the first collection-loop failure with its traceback."""
+        import traceback
+
+        failure_traceback = "".join(traceback.format_exception(error))
         with self._failure_lock:
             if not self.collection_failed:
                 self.collection_failed = True
                 self.collection_error = f"{type(error).__name__}: {error}"
+                self.collection_error_traceback = failure_traceback
 
     def _collection_loop(self):
         """Run the collection loop in background thread.
@@ -519,10 +531,10 @@ class AsyncTrajectoryCollector:
                         self._refit_pause_cleared.wait()
                     print("▶️ Refit completed, resuming collection")
 
-                # Check if generation limits require pausing collection
+                # Clear before checking the predicate so a worker wakeup cannot
+                # land between the check and clear and then be lost.
+                self._generation_limit_cleared.clear()
                 if self._should_pause_for_generation_limits() and self.running:
-                    self._generation_limit_cleared.clear()
-
                     # Only log warning once per weight version
                     if self._last_limit_warning_version != self.current_weight_version:
                         target_weights = self._calculate_target_weights(
@@ -546,6 +558,8 @@ class AsyncTrajectoryCollector:
                     # Double-check we're still running after being woken up
                     if not self.running:
                         break
+                else:
+                    self._generation_limit_cleared.set()
 
                 if not self.running:
                     break
@@ -591,6 +605,11 @@ class AsyncTrajectoryCollector:
             traceback.print_exc()
             self._mark_collection_failed(e)
         finally:
+            if dataloader_exhausted:
+                # Keep running=True while workers publish the last batches. Setting
+                # it false first makes their enqueue loop exit and silently drops
+                # every prompt group that was still in flight at natural EOF.
+                self.wait_for_pending_generations()
             self.running = False
             if dataloader_exhausted:
                 self.data_exhausted = True
@@ -1023,7 +1042,7 @@ class AsyncTrajectoryCollector:
         every time once one is.
         """
         with self._failure_lock:
-            error_message = self._fatal_error_message
+            error_message = self._fatal_error_message or self.collection_error
         if error_message is not None:
             raise RuntimeError(error_message)
 
@@ -1598,9 +1617,6 @@ class AsyncTrajectoryCollector:
                 if self._fatal_error_message is None:
                     self._failure_count = 0
         except Exception as error:
-            if not self.running:
-                return
-
             self._efficiency_timer.record(
                 "wasted/failed_trajectory", time.perf_counter() - worker_start
             )

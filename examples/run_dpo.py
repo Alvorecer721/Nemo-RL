@@ -18,13 +18,15 @@ import pprint
 
 from omegaconf import OmegaConf
 
-from nemo_rl.algorithms.dpo import MasterConfig, dpo_train, setup
+from nemo_rl.algorithms.dpo import DPOTrainStatus, MasterConfig, dpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_preference_data
 from nemo_rl.distributed.virtual_cluster import init_ray
 from nemo_rl.telemetry.setup import init_telemetry_driver, shutdown_telemetry
 from nemo_rl.utils.config import load_config, parse_hydra_overrides
 from nemo_rl.utils.logger import get_next_experiment_dir
+
+DPO_TIMEOUT_EXIT_CODE = os.EX_TEMPFAIL
 
 
 def parse_args():
@@ -40,7 +42,7 @@ def parse_args():
     return args, overrides
 
 
-def main():
+def main() -> int:
     """Main entry point."""
     args, overrides = parse_args()
 
@@ -98,7 +100,7 @@ def main():
         # The checkpointer owns background async-checkpoint finalization threads;
         # the context manager guarantees they are flushed (rename + delete) on exit.
         with checkpointer:
-            dpo_train(
+            train_status = dpo_train(
                 policy,
                 train_dataloader,
                 val_dataloader,
@@ -114,7 +116,10 @@ def main():
         # SDK's own atexit hook is registered ahead of Ray's and so runs after
         # it. No-op when telemetry is inactive.
         shutdown_telemetry()
+    if train_status is DPOTrainStatus.TIMED_OUT:
+        return DPO_TIMEOUT_EXIT_CODE
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

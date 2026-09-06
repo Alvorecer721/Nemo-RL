@@ -227,6 +227,7 @@ policy:
     stop_token_ids: null
     stop_strings: null
     vllm_cfg:
+      sleep_level: 1
       enable_prefix_caching: true
       async_engine: true
       precision: ${policy.precision}

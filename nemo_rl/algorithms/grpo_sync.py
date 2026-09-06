@@ -56,6 +56,7 @@ from nemo_rl.algorithms.grpo import (
     _log_mixed_rewards_and_advantages_information,
     _placeholder_seq_logprob_error_metrics,
     _policy_dtype,
+    _raise_if_grpo_batch_has_no_valid_tokens,
     _resolve_logprob_skip_flags,
     _should_log_nemo_gym_responses,
     _validation_early_stop_message,
@@ -69,6 +70,7 @@ from nemo_rl.algorithms.loss import (
 from nemo_rl.algorithms.loss.interfaces import LossFunction
 from nemo_rl.algorithms.reward_functions import apply_reward_shaping
 from nemo_rl.algorithms.utils import (
+    alp_pass_rate,
     calculate_baseline_and_std_per_prompt,
     get_gdpo_reward_component_keys,
     log_generation_metrics,
@@ -720,14 +722,23 @@ def grpo_train_sync(
                 # now back on the driver where they belong (no bulk
                 # touched by any of these ops).
                 with timer.time("reward_calculation"):
+                    reward_shaping_cfg = master_config.grpo.reward_shaping
+                    pass_rate = None
+                    if reward_shaping_cfg.enabled:
+                        pass_rate = alp_pass_rate(
+                            driver_carry["prompt_ids_for_adv"],
+                            driver_carry["total_reward"],
+                            reward_shaping_cfg,
+                        )
                     driver_carry = scale_rewards(
                         driver_carry,
                         master_config.grpo.reward_scaling,
                     )
-                    if master_config.grpo.reward_shaping.enabled:
+                    if reward_shaping_cfg.enabled:
                         driver_carry = apply_reward_shaping(
                             driver_carry,
-                            master_config.grpo.reward_shaping,
+                            reward_shaping_cfg,
+                            pass_rate=pass_rate,
                         )
                     driver_carry["baseline"], driver_carry["std"] = (
                         calculate_baseline_and_std_per_prompt(
@@ -902,6 +913,15 @@ def grpo_train_sync(
                             seq_logprob_error_threshold=seq_logprob_error_threshold,
                         )
                     )
+
+                _raise_if_grpo_batch_has_no_valid_tokens(
+                    BatchedDataDict(
+                        {
+                            "sample_mask": sample_mask,
+                            "token_mask": token_mask,
+                        }
+                    )
+                )
 
                 with timer.time("advantage_calculation"):
                     print("▶ Computing advantages...", flush=True)
@@ -1250,7 +1270,7 @@ def grpo_train_sync(
                             )
                         checkpointer.begin_finalization(
                             checkpoint_path,
-                            wait_fn=policy.finalize_async_save,
+                            wait_fn=policy.submit_async_save_finalization(),
                         )
 
             memory_tracker.snapshot_start_of_stage("Logging", dir())

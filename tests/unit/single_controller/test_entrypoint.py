@@ -21,7 +21,10 @@ import pytest
 from examples import run_grpo_single_controller
 from nemo_rl.algorithms.grpo import GRPOConfig
 from nemo_rl.algorithms.metric_utils import SetupTimingMetrics
-from nemo_rl.algorithms.single_controller_utils.config import MasterConfig
+from nemo_rl.algorithms.single_controller_utils.config import (
+    AsyncRLConfig,
+    MasterConfig,
+)
 
 
 @pytest.fixture
@@ -33,18 +36,26 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             "generation": generation_config,
             "draft": {"enabled": False},
             "megatron_cfg": {"mtp_num_layers": 2},
+            "train_global_batch_size": 128,
         },
         env={},
         data_plane={"enabled": True, "impl": "transfer_queue", "backend": "simple"},
         logger={"log_dir": "/tmp/logs"},
-        checkpointing={"enabled": False},
-        async_rl=SimpleNamespace(
-            stall_watchdog=SimpleNamespace(interval_s=30.0, stall_timeout_s=600.0)
+        checkpointing={"enabled": False, "metric_name": None},
+        loss_fn=SimpleNamespace(
+            reference_policy_kl_penalty=0,
+            use_importance_sampling_correction=True,
+            force_on_policy_ratio=False,
         ),
-        grpo=GRPOConfig(async_grpo=None),
+        async_rl=AsyncRLConfig(
+            min_groups_for_streaming_train=32,
+            max_buffered_rollouts=64,
+        ),
+        grpo=GRPOConfig(async_grpo=None, num_generations_per_prompt=4),
     )
     configured_generation = {"backend": "vllm", "_mtp_weights_from_refit": True}
     configure_generation = MagicMock(return_value=configured_generation)
+    validate_config = MagicMock()
     actor = SimpleNamespace(run=SimpleNamespace(remote=MagicMock(return_value="run")))
     actor_args = SimpleNamespace(
         env_handles={},
@@ -88,6 +99,11 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
     monkeypatch.setattr(
         run_grpo_single_controller,
+        "validate_single_controller_config",
+        validate_config,
+    )
+    monkeypatch.setattr(
+        run_grpo_single_controller,
         "setup_single_controller",
         lambda *_args: (actor_args, SetupTimingMetrics()),
     )
@@ -104,6 +120,7 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         actor_args=actor_args,
         config=config,
         configure_generation=configure_generation,
+        validate_config=validate_config,
         configured_generation=configured_generation,
         generation_config=generation_config,
         ray_get=ray_get,
@@ -161,6 +178,7 @@ def test_main_configures_generation_for_trained_mtp(
 ) -> None:
     run_grpo_single_controller.main()
 
+    main_context.validate_config.assert_called_once_with(main_context.config)
     main_context.configure_generation.assert_called_once_with(
         main_context.generation_config,
         "tokenizer",

@@ -48,6 +48,7 @@ from nemo_rl.algorithms.async_utils.staleness_sampler import (
     sampler_supports_buffer_checkpoint,
 )
 from nemo_rl.algorithms.grpo import (
+    GRPOConfig,
     GRPOSaveState,
     _get_effort_config,
     _get_grpo_save_state,
@@ -65,6 +66,7 @@ from nemo_rl.algorithms.single_controller_utils.config import (
     MasterConfig,
     algo_config,
     is_ppo_run,
+    resolve_fused_linear_logprobs,
     validate_single_controller_config,
 )
 from nemo_rl.algorithms.utils import set_seed
@@ -1392,7 +1394,11 @@ def setup_single_controller(
     # Setup Algorithm + Rollout Wiring
     # ==========================
     advantage_estimator = _build_advantage_estimator(master_config)
-    loss_fn: LossFunction = ClippedPGLossFn(master_config.loss_fn)
+    use_fused_linear_logprobs = resolve_fused_linear_logprobs(policy_config)
+    loss_fn: LossFunction = ClippedPGLossFn(
+        master_config.loss_fn,
+        use_fused_linear_logprobs=use_fused_linear_logprobs,
+    )
     value_loss_fn: Optional[LossFunction] = (
         MseValueLossFn(master_config.value_loss_fn)  # type: ignore
         if is_ppo_run(master_config)
@@ -1409,6 +1415,9 @@ def setup_single_controller(
             or algo_cfg.malformed_thinking_advantage is not None
         ),
         require_routed_experts=router_replay_enabled(policy_config),
+    )
+    cot_think_token_ids = (
+        algo_cfg.cot_think_token_ids if isinstance(algo_cfg, GRPOConfig) else None
     )
     rollout_manager = RolloutManager(
         tokenizer=tokenizer,
@@ -1433,6 +1442,7 @@ def setup_single_controller(
         ),
         retry_policy=_build_retry_policy(master_config),
         effort_config=_get_effort_config(cast(GRPOMasterConfig, master_config)),
+        cot_token_ids=tuple(cot_think_token_ids) if cot_think_token_ids else None,
     )
 
     # Print setup timing metrics

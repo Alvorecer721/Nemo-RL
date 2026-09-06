@@ -39,6 +39,7 @@ from nemo_rl.algorithms.single_controller_utils.config import (
 from nemo_rl.algorithms.single_controller_utils.setup import SingleControllerActorArgs
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data_plane import KVBatchMeta
+from nemo_rl.data_plane.schema import SC_ROLLOUT_SCHEMA_FIELDS
 from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.models.policy.tq_policy import TQPolicy
@@ -46,23 +47,7 @@ from tests.unit.models.policy.test_megatron_worker import create_megatron_test_c
 from tests.unit.single_controller._dp_fakes import _PARTITION_ID
 from tests.unit.test_utils import SimpleLossFn
 
-# Union of DP_TRAIN_FIELDS (TQPolicy) + rollout extras (total_reward,
-# prompt_ids_for_adv) — the partition schema must cover every field any
-# producer/consumer touches.
-_REGISTERED_FIELDS = [
-    "input_ids",
-    "input_lengths",
-    "generation_logprobs",
-    "prev_logprobs",
-    "reference_policy_logprobs",
-    "advantages",
-    "token_mask",
-    "sample_mask",
-    "mask_sample",
-    "truncated",
-    "total_reward",
-    "prompt_ids_for_adv",
-]
+_REGISTERED_FIELDS = list(SC_ROLLOUT_SCHEMA_FIELDS)
 
 
 def _simple_tq_cfg() -> dict:
@@ -109,7 +94,6 @@ def _populate_group(
                 group_size, seq_len, dtype=torch.float32
             ),
             "total_reward": torch.arange(group_size, dtype=torch.float32) * 0.5 + 1.0,
-            "prompt_ids_for_adv": torch.zeros(group_size, seq_len, dtype=torch.long),
         },
         batch_size=(group_size,),
     )

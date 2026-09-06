@@ -36,6 +36,7 @@ INPUT_LENGTHS = "input_lengths"
 SAMPLE_MASK = "sample_mask"
 MASK_SAMPLE = "mask_sample"
 TRUNCATED = "truncated"
+EPISODE_SUCCESS = "episode_success"
 META_IDX = "meta_idx"
 
 # Token-aligned message-violation fields consumed by SingleController advantages.
@@ -65,8 +66,8 @@ SC_ROLLOUT_SCHEMA_FIELDS = (
     *DP_TRAIN_FIELDS,
     MASK_SAMPLE,
     TRUNCATED,
-    "prompt_ids_for_adv",
     "total_reward",
+    EPISODE_SUCCESS,
     "values",
     "returns",
     "teacher_reference_logprobs",

@@ -94,6 +94,7 @@ from nemo_rl.algorithms.single_controller_utils.config import (
     validate_sampler_buffer_capacity,
     validate_single_controller_config,
 )
+from nemo_rl.algorithms.single_controller_utils.rewards import apply_grouped_alp
 from nemo_rl.algorithms.single_controller_utils.setup import SingleControllerActorArgs
 from nemo_rl.algorithms.single_controller_utils.utils import (
     aggregate_step_metrics,
@@ -103,6 +104,7 @@ from nemo_rl.algorithms.single_controller_utils.utils import (
     squeeze_trailing_unit_dim,
     tensor_field,
 )
+from nemo_rl.algorithms.utils import build_rollout_group_ids_from_sample_ids
 from nemo_rl.data.interfaces import DatumSpec
 from nemo_rl.data.multimodal_utils import present_multimodal_fields
 from nemo_rl.data_plane import DATA_PLANE_CHECKPOINT_SCHEMA_VERSION, KVBatchMeta
@@ -110,6 +112,7 @@ from nemo_rl.data_plane.async_utils import call_data_plane
 from nemo_rl.data_plane.schema import (
     DP_CALIB_INPUT_FIELDS,
     DP_TRAIN_FIELDS,
+    EPISODE_SUCCESS,
     ROLLOUT_METRICS,
 )
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
@@ -442,9 +445,13 @@ class SingleControllerActor:
         self._step_log_dict: dict[str, list] = {
             "rewards": [],
             "masked_advantages": [],
+            "alp_shaped_rewards": [],
+            "alp_successes": [],
+            "alp_response_lengths": [],
             "num_mask_sample_filtered": [],
             "sequence_lengths": [],
             "seq_logprob_error_metrics": [],
+            "logprob_errors": [],
             **{key: [] for key in VIOLATION_TAG_KEYS},
         }
         self._opd_stat_sum = 0.0
@@ -3245,10 +3252,16 @@ class SingleControllerActor:
             select_fields=self._advantage_input_fields(),
         )
 
-        prompt_ids = tensor_field(data, adv_cfg.prompt_ids_field)
         rewards = squeeze_trailing_unit_dim(
             tensor_field(data, adv_cfg.reward_field)
         ).float()
+        # Control, ALP solve rates, and GRPO baselines share occurrence identity.
+        # Equal prompt text from separate admissions must not merge outcomes.
+        prompt_ids = build_rollout_group_ids_from_sample_ids(
+            meta.sample_ids,
+            expected_group_size=self._algo_cfg.num_generations_per_prompt,
+            device=rewards.device,
+        )
         token_mask = tensor_field(data, adv_cfg.token_mask_field).float()
         sample_mask = squeeze_trailing_unit_dim(
             tensor_field(data, adv_cfg.sample_mask_field)
@@ -3263,6 +3276,7 @@ class SingleControllerActor:
         num_mask_sample_filtered = int(mask_sample.sum().item())
         self._step_log_dict["num_mask_sample_filtered"].append(num_mask_sample_filtered)
         final_sample_mask = sample_mask * (~mask_sample).to(sample_mask.dtype)
+        env_sample_mask = final_sample_mask
         if self._algo_cfg.overlong_filtering:
             final_sample_mask = final_sample_mask * (~truncated).to(sample_mask.dtype)
 
@@ -3308,7 +3322,41 @@ class SingleControllerActor:
             seq_error_metrics["_num_valid_seqs_after"] = num_valid_seqs_after
             self._step_log_dict["seq_logprob_error_metrics"].append(seq_error_metrics)
 
+            # Overlong and sequence-error rows stay in the tail evidence; only
+            # environment-masked samples drop out.
+            valid_token_mask = (
+                token_mask[:, 1:] * env_sample_mask.unsqueeze(-1)
+            ).bool()
+            logprob_errors = torch.abs(
+                masking_data["generation_logprobs"][:, 1:]
+                - masking_data["prev_logprobs"][:, 1:]
+            ).masked_select(valid_token_mask)
+            self._step_log_dict["logprob_errors"].append(logprob_errors.detach().cpu())
+
         mask = token_mask * final_sample_mask.unsqueeze(-1)
+
+        raw_rewards = rewards
+        shaping = self._algo_cfg.reward_shaping
+        if shaping.enabled and shaping.alp_coef is not None:
+            successes = (
+                squeeze_trailing_unit_dim(tensor_field(data, EPISODE_SUCCESS)).float()
+                if shaping.alp_success_source == "episode_success"
+                else raw_rewards
+            )
+            alp = apply_grouped_alp(
+                raw_rewards,
+                successes=successes,
+                token_mask=token_mask,
+                sample_ids=meta.sample_ids,
+                group_size=self._algo_cfg.num_generations_per_prompt,
+                cfg=shaping,
+            )
+            rewards = alp.rewards
+            self._step_log_dict["alp_shaped_rewards"].append(rewards.detach().cpu())
+            self._step_log_dict["alp_successes"].append(alp.successes.detach().cpu())
+            self._step_log_dict["alp_response_lengths"].append(
+                alp.response_lengths.detach().cpu()
+            )
 
         repeated_batch: dict[str, torch.Tensor] = {
             "total_reward": rewards,
@@ -3383,7 +3431,7 @@ class SingleControllerActor:
             )
 
         response_advantages = torch.masked_select(advantages, mask.bool())
-        self._step_log_dict["rewards"].append(rewards.detach().cpu())
+        self._step_log_dict["rewards"].append(raw_rewards.detach().cpu())
         if self._teacher_logprobs_required:
             valid = response_advantages.detach().double()
             self._opd_stat_sum += float(valid.sum())
@@ -3428,7 +3476,6 @@ class SingleControllerActor:
     def _advantage_input_fields(self) -> list[str]:
         adv_cfg = self._advantage_cfg
         fields = [
-            adv_cfg.prompt_ids_field,
             adv_cfg.reward_field,
             adv_cfg.token_mask_field,
             adv_cfg.sample_mask_field,
@@ -3436,6 +3483,13 @@ class SingleControllerActor:
             adv_cfg.mask_sample_field,
             adv_cfg.truncated_field,
         ]
+        shaping = self._algo_cfg.reward_shaping
+        if (
+            shaping.enabled
+            and shaping.alp_coef is not None
+            and shaping.alp_success_source == "episode_success"
+        ):
+            fields.append(EPISODE_SUCCESS)
         if self._message_level_advantage_penalties_enabled:
             fields.extend(
                 [

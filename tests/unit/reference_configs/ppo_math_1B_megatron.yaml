@@ -35,6 +35,8 @@ ppo:
 
   reward_shaping:
     enabled: true
+    alp_coef: null
+    alp_success_source: episode_success
     overlong_buffer_length: 2048
     overlong_buffer_penalty: 1
     max_response_length: 14336
@@ -265,6 +267,7 @@ policy:
       pipeline_parallel_size: 1
       expert_parallel_size: 1
       gpu_memory_utilization: 0.6
+      sleep_level: 1  # vLLM sleep mode used between generation phases.
       max_model_len: ${policy.max_total_sequence_length}
       enforce_eager: False
       use_deep_gemm: False

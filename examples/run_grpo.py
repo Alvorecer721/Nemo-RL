@@ -33,6 +33,7 @@ from nemo_rl.data_plane.factory import (
 )
 from nemo_rl.distributed.virtual_cluster import init_ray
 from nemo_rl.models.generation import configure_generation_config
+from nemo_rl.models.generation.interfaces import should_use_async_rollouts
 from nemo_rl.telemetry.setup import init_telemetry_driver, shutdown_telemetry
 from nemo_rl.utils.config import (
     load_config,
@@ -41,6 +42,53 @@ from nemo_rl.utils.config import (
 )
 from nemo_rl.utils.logger import get_next_experiment_dir, log_container_init_timing
 from nemo_rl.utils.timer import Timer
+
+
+def _validate_entrypoint_contract(master_config: MasterConfig) -> None:
+    """Reject configs that select a training path this entrypoint cannot run."""
+    async_config = master_config.grpo.async_grpo
+    if async_config is None:
+        raise ValueError(
+            "examples/run_grpo.py requires grpo.async_grpo to be present. "
+            "A null block selects the SingleController config schema; launch it "
+            "with examples/run_grpo_single_controller.py instead."
+        )
+    if getattr(master_config, "async_rl", None) is not None:
+        raise ValueError(
+            "async_rl.* is consumed only by examples/run_grpo_single_controller.py; "
+            "examples/run_grpo.py would ignore it. Remove async_rl or use the "
+            "SingleController entrypoint with grpo.async_grpo: null."
+        )
+    if not async_config.enabled:
+        return
+    if (master_config.data_plane or {}).get("enabled", False):
+        raise ValueError(
+            "Legacy async GRPO does not support data_plane.enabled=true. It uses "
+            "the in-memory ReplayBuffer, while TransferQueue async training is "
+            "owned by SingleController. Set data_plane.enabled=false, or use "
+            "examples/run_grpo_single_controller.py."
+        )
+    generation_config = master_config.policy.get("generation")
+    backend = generation_config.get("backend", "") if generation_config else ""
+    if backend not in ("vllm", "megatron", "trtllm", "dynamo"):
+        raise ValueError(f"Unsupported legacy async generation backend: {backend!r}")
+    if not should_use_async_rollouts(generation_config):
+        raise ValueError("Legacy async GRPO requires an async generation engine.")
+
+    unsupported = []
+    if master_config.grpo.use_dynamic_sampling:
+        unsupported.append("grpo.use_dynamic_sampling")
+    if master_config.grpo.reward_scaling.enabled:
+        unsupported.append("grpo.reward_scaling.enabled")
+    if master_config.grpo.reward_shaping.enabled:
+        unsupported.append("grpo.reward_shaping.enabled")
+    if master_config.data["use_multiple_dataloader"]:
+        unsupported.append("data.use_multiple_dataloader")
+    if unsupported:
+        raise NotImplementedError(
+            "Legacy async GRPO does not consume these enabled settings: "
+            + ", ".join(unsupported)
+        )
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -82,6 +130,7 @@ def main() -> None:
 
         config = OmegaConf.to_container(config, resolve=True)
         config = MasterConfig(**config)
+        _validate_entrypoint_contract(config)
         print("Applied CLI overrides")
 
     # Print config

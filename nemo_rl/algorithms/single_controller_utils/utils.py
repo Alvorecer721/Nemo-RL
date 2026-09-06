@@ -97,9 +97,13 @@ def reduce_advantage_pump_metrics(
     *,
     seq_logprob_error_metrics: list[dict[str, float]] | None = None,
     num_mask_sample_filtered: list[int] | None = None,
+    logprob_errors: list[torch.Tensor] | None = None,
     num_invalid_tool_calls: list[int] | None = None,
     num_malformed_thinking: list[int] | None = None,
     num_assistant_messages: list[int] | None = None,
+    alp_shaped_rewards: list[torch.Tensor] | None = None,
+    alp_successes: list[torch.Tensor] | None = None,
+    alp_response_lengths: list[torch.Tensor] | None = None,
 ) -> dict[str, float]:
     """Reduce per-step accumulators from _advantage_stage into step scalars.
 
@@ -111,9 +115,14 @@ def reduce_advantage_pump_metrics(
             counts, one record per streaming chunk.
         num_mask_sample_filtered: Environment-flagged sample counts, one per
             streaming chunk.
+        logprob_errors: Absolute generation/training log-probability deltas for
+            every valid response token, one tensor per streaming chunk.
         num_invalid_tool_calls: Per-sample invalid tool-call counts.
         num_malformed_thinking: Per-sample malformed-thinking counts.
         num_assistant_messages: Per-sample assistant message counts (rate denominator).
+        alp_shaped_rewards: ALP-adjusted rewards, one tensor per streaming chunk.
+        alp_successes: Binary episode outcomes before sample filtering.
+        alp_response_lengths: Newly generated assistant token counts across all turns.
 
     Returns:
         Step-level reward, advantage, token-count, optional sequence
@@ -124,6 +133,13 @@ def reduce_advantage_pump_metrics(
     out: dict[str, float] = {}
     if rewards:
         out["reward"] = float(torch.cat([r.flatten() for r in rewards]).mean())
+    if alp_shaped_rewards:
+        out["alp/shaped_reward"] = float(torch.cat(alp_shaped_rewards).mean())
+        out["alp/penalty"] = out["reward"] - out["alp/shaped_reward"]
+    if alp_successes:
+        out["alp/success_rate"] = float(torch.cat(alp_successes).mean())
+    if alp_response_lengths:
+        out["alp/response_tokens"] = float(torch.cat(alp_response_lengths).mean())
     if masked_advantages:
         cat = torch.cat([a.flatten() for a in masked_advantages])
         if cat.numel() > 0:
@@ -140,6 +156,8 @@ def reduce_advantage_pump_metrics(
         out["num_mask_sample_filtered"] = float(sum(num_mask_sample_filtered))
     if seq_logprob_error_metrics:
         out.update(_reduce_seq_logprob_error_metrics(seq_logprob_error_metrics))
+    if logprob_errors:
+        out.update(_reduce_token_logprob_error_tails(logprob_errors))
     n_asst = sum(num_assistant_messages or [])
     if n_asst:
         n_invalid = sum(num_invalid_tool_calls or [])
@@ -150,6 +168,33 @@ def reduce_advantage_pump_metrics(
         out["num_malformed_thinking"] = float(n_malformed)
         out["num_assistant_messages"] = float(n_asst)
     return out
+
+
+def _reduce_token_logprob_error_tails(
+    records: list[torch.Tensor],
+) -> dict[str, float]:
+    """Reduce exact valid-token log-probability tail evidence for one step."""
+    errors = torch.cat([record.flatten().double() for record in records])
+    finite = torch.isfinite(errors)
+    # Non-finite deltas are evidence of a broken step, not a reason to abort the
+    # run at logging time; the post-run gate rejects any nonzero count.
+    count_nonfinite = errors.numel() - int(finite.sum())
+    if count_nonfinite:
+        errors = errors[finite]
+    has_errors = errors.numel() > 0
+    p95_abs, p99_abs = (
+        np.quantile(errors.numpy(), (0.95, 0.99)) if has_errors else (0.0, 0.0)
+    )
+    return {
+        "logprob_tails/valid_tokens": float(errors.numel()),
+        "logprob_tails/mean_abs": float(errors.mean()) if has_errors else 0.0,
+        "logprob_tails/p95_abs": float(p95_abs),
+        "logprob_tails/p99_abs": float(p99_abs),
+        "logprob_tails/max_abs": float(errors.max()) if has_errors else 0.0,
+        "logprob_tails/count_gt_0_5": float((errors > 0.5).sum()),
+        "logprob_tails/count_gt_1_0": float((errors > 1.0).sum()),
+        "logprob_tails/count_nonfinite": float(count_nonfinite),
+    }
 
 
 def _reduce_seq_logprob_error_metrics(

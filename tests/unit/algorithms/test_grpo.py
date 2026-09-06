@@ -46,6 +46,7 @@ from nemo_rl.algorithms.grpo import (
     _initial_policy_generation_stale,
     _maybe_restore_async_replay_buffer_checkpoint,
     _needs_hf_refit_handshake,
+    _raise_if_grpo_batch_has_no_valid_tokens,
     _raise_if_reward_penalties_enabled_without_nemo_gym,
     _resolve_logprob_skip_flags,
     _resolve_message_level_advantage_penalties,
@@ -358,7 +359,7 @@ def mock_grpo_components():
 
     # Mock environment return values
     for env in [task_to_env["math"], val_task_to_env["math"]]:
-        env.step.return_value = (
+        env.step.return_value = EnvironmentReturn(
             [{"role": "environment", "content": "correct"}],  # observations
             [{}],  # metadata
             [[]],  # next_stop_strings
@@ -2111,21 +2112,23 @@ def _patched_logprob_phase(policy):
 
 @ray.remote(num_cpus=0)
 class MockEnvironment(EnvironmentInterface):
-    def __init__(self, rewards: list[float]):
+    def __init__(self, rewards: list[float], successes: list[float] | None = None):
         self.rewards = rewards
+        self.successes = successes
         self._calls = 0
 
     def step(
         self, messages: list[LLMMessageLogType], env_info: list[dict]
     ) -> EnvironmentReturn:
         self._calls += 1
-        return (
+        return EnvironmentReturn(
             [{"role": "environment", "content": "observation"}] * len(messages),
             [{}] * len(messages),
             [[]] * len(messages),
             self.rewards,
             [True] * len(messages),
             [None] * len(messages),
+            torch.tensor(self.successes) if self.successes is not None else None,
         )
 
     def get_calls(self):
@@ -2153,7 +2156,7 @@ def mock_env():
 def mock_envs():
     """Create mock environments for multiple task tests."""
     math_env = MockEnvironment.remote(rewards=[1.0, 2.0])
-    code_env = MockEnvironment.remote(rewards=[3.0, 4.0])
+    code_env = MockEnvironment.remote(rewards=[3.0, 4.0], successes=[0.0, 1.0])
     yield {"math": math_env, "code": code_env}
     ray.kill(math_env)
     ray.kill(code_env)
@@ -2181,18 +2184,16 @@ def test_calculate_rewards_single_task(mock_env):
     batch = create_mock_batch(2, task_names, message_logs)
 
     # Calculate rewards
-    env_observations, metadata, next_stop_strings, rewards, terminateds, answers = (
-        calculate_rewards(batch, task_to_env)
-    )
+    result = calculate_rewards(batch, task_to_env)
 
     # Verify results
-    assert torch.allclose(rewards, torch.tensor([1.0, 2.0]))
-    assert len(env_observations) == 2
-    assert len(terminateds) == 2
-    assert len(next_stop_strings) == 2
-    assert len(metadata) == 2
-    assert len(answers) == 2
-    assert torch.allclose(rewards, torch.tensor([1.0, 2.0]))
+    assert torch.allclose(result.rewards, torch.tensor([1.0, 2.0]))
+    assert len(result.observations) == 2
+    assert len(result.terminateds) == 2
+    assert len(result.next_stop_strings) == 2
+    assert len(result.metadata) == 2
+    assert len(result.answers) == 2
+    assert torch.isnan(result.episode_successes).all()
     assert (
         ray.get(mock_env.get_calls.remote()) == 1
     )  # Should only call once for all samples of same task
@@ -2201,7 +2202,7 @@ def test_calculate_rewards_single_task(mock_env):
 def test_calculate_rewards_multiple_tasks(mock_envs):
     """Test reward calculation with multiple task types."""
     # Create test data
-    task_names = ["math", "math", "code", "code"]
+    task_names = ["math", "code", "math", "code"]
     message_logs = [
         [{"role": "user", "content": "1+1"}, {"role": "assistant", "content": "2"}],
         [{"role": "user", "content": "2+2"}, {"role": "assistant", "content": "4"}],
@@ -2217,18 +2218,17 @@ def test_calculate_rewards_multiple_tasks(mock_envs):
     batch = create_mock_batch(4, task_names, message_logs)
 
     # Calculate rewards
-    env_observations, metadata, next_stop_strings, rewards, terminateds, answers = (
-        calculate_rewards(batch, mock_envs)
-    )
+    result = calculate_rewards(batch, mock_envs)
 
     # Verify results
-    assert torch.allclose(rewards, torch.tensor([1.0, 2.0, 3.0, 4.0]))
-    assert len(env_observations) == 4
-    assert len(terminateds) == 4
-    assert len(next_stop_strings) == 4
-    assert len(metadata) == 4
-    assert len(answers) == 4
-    assert torch.allclose(rewards, torch.tensor([1.0, 2.0, 3.0, 4.0]))
+    assert torch.allclose(result.rewards, torch.tensor([1.0, 3.0, 2.0, 4.0]))
+    assert len(result.observations) == 4
+    assert len(result.terminateds) == 4
+    assert len(result.next_stop_strings) == 4
+    assert len(result.metadata) == 4
+    assert len(result.answers) == 4
+    assert torch.isnan(result.episode_successes[[0, 2]]).all()
+    assert torch.equal(result.episode_successes[[1, 3]], torch.tensor([0.0, 1.0]))
     assert (
         ray.get(mock_envs["math"].get_calls.remote()) == 1
     )  # One call for all math samples
@@ -2245,17 +2245,16 @@ def test_calculate_rewards_empty_batch(mock_env):
     batch = create_mock_batch(0, [], [])
 
     # Calculate rewards
-    env_observations, metadata, next_stop_strings, rewards, terminateds, answers = (
-        calculate_rewards(batch, task_to_env)
-    )
+    result = calculate_rewards(batch, task_to_env)
 
     # Verify results
-    assert len(rewards) == 0
-    assert len(env_observations) == 0
-    assert len(terminateds) == 0
-    assert len(next_stop_strings) == 0
-    assert len(metadata) == 0
-    assert len(answers) == 0
+    assert len(result.rewards) == 0
+    assert len(result.observations) == 0
+    assert len(result.terminateds) == 0
+    assert len(result.next_stop_strings) == 0
+    assert len(result.metadata) == 0
+    assert len(result.answers) == 0
+    assert len(result.episode_successes) == 0
     assert (
         ray.get(mock_env.get_calls.remote()) == 0
     )  # Should not call environment for empty batch
@@ -6098,3 +6097,28 @@ def test_train_fields_for_step(skip_prev_logprobs, expect_prev):
 )
 def test_needs_hf_refit_handshake(backend, nccl_reshard, colocated, expected):
     assert _needs_hf_refit_handshake(backend, nccl_reshard, colocated) is expected
+
+
+def test_raise_if_grpo_batch_has_no_valid_tokens_accepts_valid_batch():
+    train_data = {
+        "sample_mask": torch.tensor([1.0, 0.0]),
+        "token_mask": torch.tensor([[0.0, 1.0], [0.0, 1.0]]),
+    }
+
+    _raise_if_grpo_batch_has_no_valid_tokens(train_data)
+
+
+@pytest.mark.parametrize(
+    ("sample_mask", "token_mask"),
+    [
+        (torch.zeros(2), torch.ones(2, 3)),
+        (torch.ones(2), torch.zeros(2, 3)),
+    ],
+)
+def test_raise_if_grpo_batch_has_no_valid_tokens_rejects_empty_signal(
+    sample_mask, token_mask
+):
+    train_data = {"sample_mask": sample_mask, "token_mask": token_mask}
+
+    with pytest.raises(RuntimeError, match="no valid training tokens"):
+        _raise_if_grpo_batch_has_no_valid_tokens(train_data)

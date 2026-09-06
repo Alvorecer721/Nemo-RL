@@ -41,10 +41,15 @@ from nemo_rl.algorithms.grpo import (
     GRPOLoggerConfig,
     RewardPenaltyConfig,
 )
+from nemo_rl.algorithms.logits_sampling_utils import (
+    TrainingSamplingParams,
+    need_top_k_or_top_p_filtering,
+)
 from nemo_rl.algorithms.loss import ClippedPGLossConfig
 from nemo_rl.algorithms.loss.loss_functions import MseValueLossConfig
 from nemo_rl.algorithms.opd import OnPolicyDistillationConfig
 from nemo_rl.algorithms.ppo import PPOConfig
+from nemo_rl.algorithms.single_controller_utils.rewards import validate_alp_config
 from nemo_rl.data import DataConfig
 from nemo_rl.data_plane.interfaces import DataPlaneConfig
 from nemo_rl.data_plane.schema import (
@@ -776,8 +781,8 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
     """Reject algorithm blocks the SingleController path cannot honour.
 
     Both directions on the critic: one the PPO path needs and does not have, and
-    one a GRPO run carries and would never build. Plus the reward-shaping and
-    sampling knobs SC reads on neither path.
+    one a GRPO run carries and would never build. Reward shaping supports ALP
+    with GRPO; other shaping, reward scaling, and dynamic sampling remain unsupported.
     """
     algo_cfg = algo_config(master_config)
 
@@ -791,6 +796,19 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
             "with max_num_steps."
         )
 
+    shaping = algo_cfg.reward_shaping
+    alp_enabled = shaping.enabled and shaping.alp_coef is not None
+    if alp_enabled:
+        if is_ppo_run(master_config) or algo_cfg.adv_estimator.name != "grpo":
+            raise ValueError(
+                "SingleController ALP currently requires the GRPO advantage estimator"
+            )
+        if algo_cfg.num_generations_per_prompt < 2:
+            raise ValueError(
+                "SingleController ALP requires at least 2 generations per prompt"
+            )
+        validate_alp_config(shaping)
+
     # An enabled one here describes shaping this run does not do. An entry leaves
     # this list once the SC path implements it; overlong_filtering is applied in
     # the advantage stage from the raw completion flags in the TransferQueue.
@@ -799,10 +817,33 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
         for name, enabled in (
             ("use_dynamic_sampling", algo_cfg.use_dynamic_sampling),
             ("reward_scaling", algo_cfg.reward_scaling.enabled),
-            ("reward_shaping", algo_cfg.reward_shaping.enabled),
+            ("reward_shaping", shaping.enabled and not alp_enabled),
         )
         if enabled
     ]
+    if not is_ppo_run(master_config):
+        grpo_cfg = master_config.grpo
+        assert grpo_cfg is not None
+        if grpo_cfg.async_grpo is not None and grpo_cfg.async_grpo.enabled:
+            raise ValueError(
+                "grpo.async_grpo.enabled=true selects the legacy async loop; "
+                "SingleController reads async_rl.* instead. Disable grpo.async_grpo "
+                "or launch examples/run_grpo.py."
+            )
+        unsupported += [
+            name
+            for name, enabled in (
+                ("deduplicate_multimodal_data", grpo_cfg.deduplicate_multimodal_data),
+                ("calculate_advantages_on_gpu", grpo_cfg.calculate_advantages_on_gpu),
+                ("debug_payload_metrics", grpo_cfg.debug_payload_metrics),
+                (
+                    "stop_at_validation_metric/threshold",
+                    grpo_cfg.stop_at_validation_metric is not None
+                    or grpo_cfg.stop_at_validation_threshold is not None,
+                ),
+            )
+            if enabled
+        ]
     if unsupported:
         names = ", ".join(unsupported)
         raise NotImplementedError(
@@ -940,9 +981,44 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
         )
 
 
+def resolve_fused_linear_logprobs(policy_config: PolicyConfig) -> bool:
+    """Whether the Megatron policy computes logprobs through the fused path."""
+    megatron_cfg = policy_config.get("megatron_cfg", {})
+    return bool(
+        megatron_cfg.get("enabled") and megatron_cfg.get("use_fused_linear_logprobs")
+    )
+
+
+def _validate_fused_logprob_settings(policy_config: PolicyConfig) -> None:
+    """Mirror the legacy loop's fused-logprob guards before the loss is built."""
+    if not resolve_fused_linear_logprobs(policy_config):
+        return
+    sequence_packing = policy_config.get("sequence_packing")
+    if sequence_packing is not None and sequence_packing["enabled"]:
+        raise ValueError(
+            "policy.megatron_cfg.use_fused_linear_logprobs=true is not supported "
+            "with sequence packing: the fused forward rolls labels over the packed "
+            "sequence. Disable one of them."
+        )
+    generation_config = policy_config["generation"]
+    if need_top_k_or_top_p_filtering(
+        TrainingSamplingParams(
+            top_k=generation_config.get("top_k"),
+            top_p=generation_config.get("top_p", 1.0),
+        )
+    ):
+        raise ValueError(
+            "policy.megatron_cfg.use_fused_linear_logprobs=true computes logprobs "
+            "from unfiltered logits, so top-k/top-p training-time filtering cannot "
+            "apply. Set policy.generation.top_k=null and top_p=1.0, or disable the "
+            "fused path."
+        )
+
+
 def validate_single_controller_config(master_config: MasterConfig) -> None:
     """Validate cross-section SingleController constraints before setup."""
     _validate_algo_settings(master_config)
+    _validate_fused_logprob_settings(master_config.policy)
 
     async_config = master_config.async_rl
     algo_cfg = algo_config(master_config)
@@ -1155,7 +1231,6 @@ class AdvantageConfig:
     """Internal DataPlane field mapping for advantage calculation."""
 
     output_field: str = "advantages"
-    prompt_ids_field: str = "prompt_ids_for_adv"
     reward_field: str = "total_reward"
     token_mask_field: str = "token_mask"
     sample_mask_field: str = "sample_mask"
