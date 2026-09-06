@@ -25,11 +25,20 @@ from tensordict import TensorDict
 from nemo_rl.algorithms.single_controller_utils.utils import (
     aggregate_step_metrics,
     apply_message_level_advantage_penalties,
+    compute_prompt_group_counts,
     fields_for_put,
     reduce_advantage_pump_metrics,
     squeeze_trailing_unit_dim,
     tensor_field,
 )
+from nemo_rl.algorithms.advantage_estimator import (
+    AdvEstimatorConfig,
+    GRPOAdvantageEstimator,
+)
+from nemo_rl.algorithms.loss import ClippedPGLossConfig
+from nemo_rl.algorithms.reward_functions import RewardShapingConfig
+from nemo_rl.algorithms.single_controller_utils.rewards import apply_grouped_alp
+from nemo_rl.algorithms.utils import build_rollout_group_ids_from_sample_ids
 from nemo_rl.data_plane import KVBatchMeta
 
 
@@ -54,6 +63,135 @@ class TestSqueezeTrailingUnitDim:
     def test_leaves_non_unit_trailing_dim(self) -> None:
         out = squeeze_trailing_unit_dim(torch.zeros(4, 3))
         assert out.shape == (4, 3)
+
+
+class TestPromptGroupCounts:
+    def test_interleaved_occurrences_keep_correctness_groups_separate(self) -> None:
+        group_ids = build_rollout_group_ids_from_sample_ids(
+            [
+                "repeat1_g0",
+                "repeat2_g0",
+                "mixed_g0",
+                "repeat1_g1",
+                "repeat2_g1",
+                "mixed_g1",
+            ],
+            expected_group_size=2,
+        )
+        raw = torch.tensor([0.0, 1.0, 1.0, 0.0, 1.0, 0.0])
+        mask = torch.tensor([[0, 1, 1]] * 6)
+        advantages = torch.tensor([[0.0], [0.0], [0.5], [0.0], [0.0], [-0.5]]).expand(
+            6, 3
+        )
+        out = compute_prompt_group_counts(
+            group_ids=group_ids,
+            raw_rewards=raw,
+            episode_successes=raw,
+            advantages=advantages,
+            mask=mask,
+            truncated=torch.tensor([True, False, True, True, False, False]),
+        )
+        assert out == {
+            "total": 3,
+            "all_wrong": 1,
+            "all_correct": 1,
+            "mixed_correctness": 1,
+            "unknown_correctness": 0,
+            "raw_reward_zero_variance": 2,
+            "zero_policy_advantage": 2,
+            "no_valid_tokens": 0,
+            "nonfinite_policy_advantage": 0,
+            "all_truncated": 1,
+            "unknown_truncation": 0,
+        }
+
+    @pytest.mark.parametrize("coefficient,zero_groups", [(None, 1), (0.1, 0)])
+    def test_all_correct_alp_unequal_lengths_can_supply_policy_advantages(
+        self, coefficient: float | None, zero_groups: int
+    ) -> None:
+        raw = torch.ones(2)
+        mask = torch.tensor([[0, 1, 0, 0, 0], [0, 1, 1, 1, 1]])
+        sample_ids = ["q_g0", "q_g1"]
+        groups = build_rollout_group_ids_from_sample_ids(
+            sample_ids, expected_group_size=2
+        )
+        rewards = raw
+        if coefficient is not None:
+            rewards = apply_grouped_alp(
+                raw,
+                successes=raw,
+                token_mask=mask,
+                sample_ids=sample_ids,
+                group_size=2,
+                cfg=RewardShapingConfig(
+                    enabled=True, alp_coef=coefficient, max_response_length=10
+                ),
+            ).rewards
+        estimator = GRPOAdvantageEstimator(
+            AdvEstimatorConfig(
+                normalize_rewards=True, use_leave_one_out_baseline=False
+            ),
+            ClippedPGLossConfig(),
+        )
+        advantages = estimator.compute_advantage(
+            prompt_ids=groups, rewards=rewards, mask=mask
+        )
+        out = compute_prompt_group_counts(
+            group_ids=groups,
+            raw_rewards=raw,
+            episode_successes=raw,
+            advantages=advantages,
+            mask=mask,
+            truncated=torch.zeros(2, dtype=torch.bool),
+        )
+        assert out["all_correct"] == 1
+        assert out["raw_reward_zero_variance"] == 1
+        assert out["zero_policy_advantage"] == zero_groups
+
+    def test_valid_loss_tokens_exclude_prompt_padding_and_fully_filtered_groups(
+        self,
+    ) -> None:
+        out = compute_prompt_group_counts(
+            group_ids=torch.tensor([[0], [0], [1], [1], [2], [2]]),
+            raw_rewards=torch.zeros(6),
+            episode_successes=torch.zeros(6),
+            advantages=torch.tensor(
+                [
+                    [7.0, 0.0, float("nan")],
+                    [9.0, 0.0, 8.0],
+                    [1.0, 2.0, 3.0],
+                    [1.0, 2.0, 3.0],
+                    [0.0, float("inf"), 0.0],
+                    [0.0, 0.0, 0.0],
+                ]
+            ),
+            mask=torch.tensor(
+                [[1, 1, 0], [1, 1, 0], [0, 0, 0], [0, 0, 0], [0, 1, 0], [0, 1, 0]]
+            ),
+            truncated=None,
+        )
+        assert out["zero_policy_advantage"] == 1
+        assert out["no_valid_tokens"] == 1
+        assert out["nonfinite_policy_advantage"] == 1
+        assert out["unknown_truncation"] == 3
+
+    @pytest.mark.parametrize(
+        "successes", [None, torch.tensor([1.0, float("nan")]), torch.tensor([0.2, 0.8])]
+    )
+    def test_missing_correctness_never_falls_back_to_raw_reward(
+        self, successes: torch.Tensor | None
+    ) -> None:
+        out = compute_prompt_group_counts(
+            group_ids=torch.zeros(2, 1, dtype=torch.long),
+            raw_rewards=torch.ones(2),
+            episode_successes=successes,
+            advantages=torch.zeros(2, 3),
+            mask=torch.ones(2, 3),
+            truncated=torch.zeros(2, dtype=torch.bool),
+        )
+        assert out["unknown_correctness"] == 1
+        assert out["all_correct"] == out["all_wrong"] == out["mixed_correctness"] == 0
+        assert out["raw_reward_zero_variance"] == out["zero_policy_advantage"] == 1
 
 
 class TestTensorField:
@@ -134,6 +272,21 @@ class TestAggregateStepMetrics:
 
 
 class TestReduceAdvantagePumpMetrics:
+    def test_group_counts_pool_unequal_chunks_before_computing_fractions(self) -> None:
+        out = reduce_advantage_pump_metrics(
+            [],
+            [],
+            [],
+            prompt_group_counts=[
+                {"total": 1, "all_wrong": 1, "mixed_correctness": 0},
+                {"total": 3, "all_wrong": 0, "mixed_correctness": 3},
+            ],
+        )
+        assert out["prompt_groups/total"] == 4
+        assert out["prompt_groups/all_wrong"] == 1
+        assert out["prompt_groups/all_wrong_fraction"] == 0.25
+        assert out["prompt_groups/mixed_correctness_fraction"] == 0.75
+
     def test_reward_and_advantages_and_tokens(self) -> None:
         out = reduce_advantage_pump_metrics(
             rewards=[torch.tensor([1.0, 3.0])],
