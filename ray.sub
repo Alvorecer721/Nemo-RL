@@ -720,7 +720,11 @@ monitor-sidecar() {
     fi
   done
 }
-monitor-sidecar &
+# Shared-srun tasks already observe ENDED and exit gracefully. The legacy
+# process-group SIGTERM sidecar races with ray stop and makes successful jobs fail.
+if [[ "$RAY_SINGLE_SRUN" != "1" ]]; then
+  monitor-sidecar &
+fi
 
 # Background process to sync ray logs every $RAY_LOG_SYNC_FREQUENCY seconds
 log-sync-sidecar() {
@@ -963,7 +967,11 @@ monitor-sidecar() {
     fi
   done
 }
-monitor-sidecar &
+# Shared-srun tasks already observe ENDED and exit gracefully. The legacy
+# process-group SIGTERM sidecar races with ray stop and makes successful jobs fail.
+if [[ "$RAY_SINGLE_SRUN" != "1" ]]; then
+  monitor-sidecar &
+fi
 
 # Background process to sync ray logs every $RAY_LOG_SYNC_FREQUENCY seconds
 log-sync-sidecar() {
