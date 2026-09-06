@@ -99,6 +99,7 @@ from nemo_rl.algorithms.single_controller_utils.setup import SingleControllerAct
 from nemo_rl.algorithms.single_controller_utils.utils import (
     aggregate_step_metrics,
     apply_message_level_advantage_penalties,
+    compute_prompt_group_counts,
     fields_for_put,
     reduce_advantage_pump_metrics,
     squeeze_trailing_unit_dim,
@@ -448,6 +449,7 @@ class SingleControllerActor:
             "alp_shaped_rewards": [],
             "alp_successes": [],
             "alp_response_lengths": [],
+            "prompt_group_counts": [],
             "num_mask_sample_filtered": [],
             "sequence_lengths": [],
             "seq_logprob_error_metrics": [],
@@ -3244,12 +3246,21 @@ class SingleControllerActor:
             return meta, True
         adv_cfg = self._advantage_cfg
 
+        input_fields = self._advantage_input_fields()
+        # Current rollout payloads advertise explicit episode outcomes, including
+        # NaN when unknown. Older payloads can omit them; never infer correctness
+        # from a composite reward solely to populate an observability metric.
+        if (
+            EPISODE_SUCCESS in (meta.fields or [])
+            and EPISODE_SUCCESS not in input_fields
+        ):
+            input_fields.append(EPISODE_SUCCESS)
         data = await call_data_plane(
             self._dp_client,
             "get_samples",
             sample_ids=meta.sample_ids,
             partition_id=meta.partition_id,
-            select_fields=self._advantage_input_fields(),
+            select_fields=input_fields,
         )
 
         rewards = squeeze_trailing_unit_dim(
@@ -3336,6 +3347,11 @@ class SingleControllerActor:
         mask = token_mask * final_sample_mask.unsqueeze(-1)
 
         raw_rewards = rewards
+        episode_successes = (
+            squeeze_trailing_unit_dim(tensor_field(data, EPISODE_SUCCESS)).float()
+            if EPISODE_SUCCESS in data.keys()
+            else None
+        )
         shaping = self._algo_cfg.reward_shaping
         if shaping.enabled and shaping.alp_coef is not None:
             successes = (
@@ -3450,6 +3466,16 @@ class SingleControllerActor:
             response_advantages = torch.masked_select(advantages, mask.bool())
         self._step_log_dict["masked_advantages"].append(
             response_advantages.detach().cpu()
+        )
+        self._step_log_dict.setdefault("prompt_group_counts", []).append(
+            compute_prompt_group_counts(
+                group_ids=prompt_ids,
+                raw_rewards=raw_rewards,
+                episode_successes=episode_successes,
+                advantages=advantages,
+                mask=mask,
+                truncated=truncated,
+            )
         )
 
         fields_to_put = {adv_cfg.output_field: advantages}

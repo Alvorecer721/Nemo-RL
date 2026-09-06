@@ -90,6 +90,75 @@ def aggregate_step_metrics(train_result: dict[str, Any]) -> dict[str, Any]:
     return metrics
 
 
+def compute_prompt_group_counts(
+    *,
+    group_ids: torch.Tensor,
+    raw_rewards: torch.Tensor,
+    episode_successes: torch.Tensor | None,
+    advantages: torch.Tensor,
+    mask: torch.Tensor,
+    truncated: torch.Tensor | None,
+) -> dict[str, int]:
+    """Count selected occurrence groups without changing rewards or advantages.
+
+    Group IDs are the already validated, row-aligned occurrence IDs used by
+    the estimator. Correctness uses explicit binary outcomes before filtering;
+    missing/nonbinary outcomes leave the entire group unknown. Raw reward
+    constancy is exact and precedes ALP. Final policy advantages include shaping,
+    message penalties and clipping, and are inspected only at ``mask[:, 1:]``,
+    matching the loss's prediction positions. Groups with no valid loss tokens
+    are separate from groups whose valid advantages are all exactly zero.
+    These metrics describe the advantage-based objective, not other loss terms.
+    """
+    valid = mask[:, 1:].bool()
+    final_advantages = advantages.detach()[:, 1:]
+    row_has_tokens = valid.any(dim=-1)
+    row_nonzero = ((final_advantages != 0) & valid).any(dim=-1)
+    row_nonfinite = (~torch.isfinite(final_advantages) & valid).any(dim=-1)
+    counts = {
+        "total": 0,
+        "all_wrong": 0,
+        "all_correct": 0,
+        "mixed_correctness": 0,
+        "unknown_correctness": 0,
+        "raw_reward_zero_variance": 0,
+        "zero_policy_advantage": 0,
+        "no_valid_tokens": 0,
+        "nonfinite_policy_advantage": 0,
+        "all_truncated": 0,
+        "unknown_truncation": 0,
+    }
+    ids = group_ids.flatten()
+    for group in ids.unique():
+        rows = ids == group
+        counts["total"] += 1
+        successes = episode_successes[rows] if episode_successes is not None else None
+        if successes is None or not ((successes == 0) | (successes == 1)).all():
+            counts["unknown_correctness"] += 1
+        elif (successes == 0).all():
+            counts["all_wrong"] += 1
+        elif (successes == 1).all():
+            counts["all_correct"] += 1
+        else:
+            counts["mixed_correctness"] += 1
+        rewards = raw_rewards[rows]
+        counts["raw_reward_zero_variance"] += int(
+            torch.isfinite(rewards).all() and (rewards == rewards[0]).all()
+        )
+        has_tokens = bool(row_has_tokens[rows].any())
+        nonfinite = bool(row_nonfinite[rows].any())
+        counts["no_valid_tokens"] += int(not has_tokens)
+        counts["nonfinite_policy_advantage"] += int(nonfinite)
+        counts["zero_policy_advantage"] += int(
+            has_tokens and not nonfinite and not row_nonzero[rows].any()
+        )
+        if truncated is None:
+            counts["unknown_truncation"] += 1
+        else:
+            counts["all_truncated"] += int(truncated[rows].all())
+    return counts
+
+
 def reduce_advantage_pump_metrics(
     rewards: list[torch.Tensor],
     masked_advantages: list[torch.Tensor],
@@ -104,6 +173,7 @@ def reduce_advantage_pump_metrics(
     alp_shaped_rewards: list[torch.Tensor] | None = None,
     alp_successes: list[torch.Tensor] | None = None,
     alp_response_lengths: list[torch.Tensor] | None = None,
+    prompt_group_counts: list[dict[str, int]] | None = None,
 ) -> dict[str, float]:
     """Reduce per-step accumulators from _advantage_stage into step scalars.
 
@@ -123,6 +193,9 @@ def reduce_advantage_pump_metrics(
         alp_shaped_rewards: ALP-adjusted rewards, one tensor per streaming chunk.
         alp_successes: Binary episode outcomes before sample filtering.
         alp_response_lengths: Newly generated assistant token counts across all turns.
+        prompt_group_counts: Occurrence-group counts per streaming chunk. Fractions
+            use all selected groups as denominator, including unknown outcomes and
+            groups without valid loss tokens; they are never averaged per chunk.
 
     Returns:
         Step-level reward, advantage, token-count, optional sequence
@@ -140,6 +213,16 @@ def reduce_advantage_pump_metrics(
         out["alp/success_rate"] = float(torch.cat(alp_successes).mean())
     if alp_response_lengths:
         out["alp/response_tokens"] = float(torch.cat(alp_response_lengths).mean())
+    if prompt_group_counts:
+        counts: dict[str, int] = {}
+        for record in prompt_group_counts:
+            for name, count in record.items():
+                counts[name] = counts.get(name, 0) + count
+        total = counts["total"]
+        for name, count in counts.items():
+            out[f"prompt_groups/{name}"] = float(count)
+            if name != "total" and total:
+                out[f"prompt_groups/{name}_fraction"] = count / total
     if masked_advantages:
         cat = torch.cat([a.flatten() for a in masked_advantages])
         if cat.numel() > 0:
