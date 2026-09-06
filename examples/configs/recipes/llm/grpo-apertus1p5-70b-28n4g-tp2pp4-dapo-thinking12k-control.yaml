@@ -1,9 +1,9 @@
-# Provisional matched pilot: freeze node/update counts after the capacity and throughput gates.
+# Matched 24-update pure-DAPO pilot; 12 trainer nodes plus 16 TP4/PP1 inference replicas.
 defaults: ../../grpo_math_8B_megatron.yaml
 grpo:
   num_prompts_per_step: 48
   num_generations_per_prompt: 16
-  max_num_steps: 32
+  max_num_steps: 24
   use_leave_one_out_baseline: false
   val_period: 0
   seed: ${oc.decode:${oc.env:AP_SEED,42}}
@@ -76,7 +76,7 @@ policy:
     colocated:
       enabled: false
       resources:
-        num_nodes: 8
+        num_nodes: 16
         gpus_per_node: 4
     vllm_cfg:
       env_vars:
@@ -156,4 +156,4 @@ logger:
     flush_interval: 2
 cluster:
   gpus_per_node: 4
-  num_nodes: 20
+  num_nodes: 28
