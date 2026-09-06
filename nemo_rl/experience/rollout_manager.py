@@ -452,6 +452,7 @@ class AsyncRolloutImpl:
         task_name = input_sample["task_name"]
 
         total_reward = 0.0
+        episode_success = None
         turn_count = 0
         # token statistics
         total_token_count = 0
@@ -539,10 +540,24 @@ class AsyncRolloutImpl:
                 )
 
             # Update reward and termination statistics
-            # Multi-reward isn't supported in RolloutManager now, see
-            # https://github.com/NVIDIA-NeMo/RL/issues/2625 for more details.
-            assert isinstance(env_output.rewards, torch.Tensor)
-            total_reward += float(env_output.rewards[0].item())
+            # GRPO consumes the aggregate task reward, while ALP uses the
+            # separately graded episode outcome. Neither is inferred from the other.
+            step_reward = (
+                sum(
+                    float(component[0].item())
+                    for component in env_output.rewards.values()
+                )
+                if isinstance(env_output.rewards, dict)
+                else float(env_output.rewards[0].item())
+            )
+            total_reward += step_reward
+            # Keep only the latest graded state. In particular, do not carry a
+            # prior turn's success forward when the final grader omits it.
+            episode_success = (
+                float(env_output.episode_successes[0])
+                if env_output.episode_successes is not None
+                else None
+            )
             terminated = env_output.terminateds[0].item()
             env_obs_content = env_output.observations[0]["content"]
             tokenized_obs = self._tokenizer(
@@ -594,6 +609,7 @@ class AsyncRolloutImpl:
             env_extras=current_extra_env_info,
             truncated=truncated,
             reward=total_reward,
+            episode_success=episode_success,
         )
         sample_metrics = {
             "turn_count": turn_count,
@@ -796,6 +812,7 @@ class AsyncNemoGymRolloutImpl:
         # Length-based reward shaping for low-effort prompts; None disables it.
         effort_config: Optional[EffortLevelsConfig] = None,
         cot_token_ids: Optional[tuple[int, int]] = None,
+        log_full_result_tables: bool = False,
         **kwargs: Any,
     ) -> None:
         self._tokenizer = tokenizer
@@ -805,6 +822,7 @@ class AsyncNemoGymRolloutImpl:
         self._max_rollout_turns = max_rollout_turns
         self._generation_config = generation_config
         self._mask_env_flagged_samples = mask_env_flagged_samples
+        self._log_full_result_tables = log_full_result_tables
         self._reward_penalty_config = reward_penalty_config
         self._timeouts = timeouts if timeouts is not None else RolloutTimeouts()
         self._max_gym_row_attempts = (
@@ -1096,6 +1114,7 @@ class AsyncNemoGymRolloutImpl:
                     env_extras=result["full_result"],
                     truncated=truncated,
                     reward=float(result["full_result"]["reward"]),
+                    episode_success=result["full_result"].get("episode_success"),
                 )
             )
         return completions, penalty_counts
@@ -1191,10 +1210,11 @@ class AsyncNemoGymRolloutImpl:
                 rollout_metrics.update(
                     calculate_single_metric(values, n, f"{agent_name}/{key}")
                 )
-        rollout_metrics[f"{agent_name}/full_result"] = Table(
-            data=[[json.dumps(r, separators=(",", ":"))] for r in agent_extras],
-            columns=["Full result"],
-        )
+        if self._log_full_result_tables:
+            rollout_metrics[f"{agent_name}/full_result"] = Table(
+                data=[[json.dumps(r, separators=(",", ":"))] for r in agent_extras],
+                columns=["Full result"],
+            )
 
         # Necessary for downstream nemo rl logging/printing.
         rollout_metrics["mean_gen_tokens_per_sample"] = rollout_metrics[
@@ -1223,6 +1243,7 @@ class RolloutManager:
         retry_policy: Optional[RolloutRetryPolicy] = None,
         effort_config: Optional[EffortLevelsConfig] = None,
         cot_token_ids: Optional[tuple[int, int]] = None,
+        log_full_result_tables: bool = False,
     ) -> None:
         assert num_generations_per_prompt >= 1, (
             "num_generations_per_prompt must be >= 1"
@@ -1256,8 +1277,9 @@ class RolloutManager:
             max_rollout_turns=max_rollout_turns,
             policy_generation=policy_generation,  # type: ignore
             generation_config=generation_config,
-            # Only used by AsyncNemoGymRolloutImpl; AsyncRolloutImpl ignores it.
+            # Only used by AsyncNemoGymRolloutImpl; AsyncRolloutImpl ignores these.
             mask_env_flagged_samples=mask_env_flagged_samples,
+            log_full_result_tables=log_full_result_tables,
             reward_penalty_config=reward_penalty_config,
             # None means "no deadlines", which is what async_rl's own defaults resolve
             # to; callers that have a config pass the resolved values in.

@@ -156,16 +156,16 @@ vllm = [
   # sudo apt-get update
   # sudo apt-get install libibverbs-dev
   "deep_ep @ git+https://github.com/deepseek-ai/DeepEP.git@17cfb817bccec3a9c247013360cc550c2bac441e",
-  # Default wheels on GitHub are cu130. See v0.25.1 release assets:
-  # https://github.com/vllm-project/vllm/releases/tag/v0.25.1
-  "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.25.1/vllm-0.25.1-cp38-abi3-manylinux_2_28_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
-  "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.25.1/vllm-0.25.1-cp38-abi3-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-  "vllm==0.25.1 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
+  # Default wheels on GitHub are cu130. See v0.26.0 release assets:
+  # https://github.com/vllm-project/vllm/releases/tag/v0.26.0
+  "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "vllm==0.26.0 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
   "num2words>=0.5.14",
-  "flashinfer-python==0.6.13",
-  "flashinfer-cubin==0.6.13",
-  "flashinfer-jit-cache==0.6.13",
-  "nvidia-cutlass-dsl[cu13]==4.5.2",
+  "flashinfer-python==0.6.14",
+  "flashinfer-cubin==0.6.14",
+  "flashinfer-jit-cache==0.6.14",
+  "nvidia-cutlass-dsl[cu13]==4.6.0",
 ]
 sglang = [
   # sgl-project/sglang branch `sglang-miles` (based on v0.5.16). Needed for the
@@ -321,7 +321,10 @@ nv-grouped-gemm = { git = "https://github.com/fanshiqing/grouped_gemm", tag = "v
 flash_mla = { git = "https://github.com/deepseek-ai/FlashMLA", rev = "b7643bd54521f563b839b98289b5cd048c062ba2" }
 nvidia-modelopt = { git = "https://github.com/NVIDIA/Model-Optimizer", rev = "c3b913b9cc1d82d5a0af9fa77b4db87829e6f158" }
 nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext.git", tag = "v0.6.0" }
-flashinfer-cubin = { index = "flashinfer", extra = "sglang" }
+flashinfer-cubin = [
+  { index = "flashinfer", extra = "sglang" },
+  { index = "flashinfer", extra = "vllm" },
+]
 flashinfer-jit-cache = { index = "flashinfer-cu130" }
 
 [tool.uv.workspace]
@@ -392,7 +395,7 @@ link-mode = "copy"
 # vllm defaults to opencv for video IO but falls back to torchcodec.
 # The timm override is needed because sglang requires timm==1.0.16.
 override-dependencies = [
-  "transformer-engine[pytorch,core_cu13] @ git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.15",
+  "transformer-engine[pytorch,core_cu13] @ git+https://github.com/NVIDIA/TransformerEngine.git@27486e03cfc1fa41f6932dcecdc47c71c47eac3e",
   "nvidia-cublas==13.5.1.27; sys_platform != 'darwin'",
   "nvidia-cudnn-cu13==9.20.0.48; sys_platform != 'darwin'",
   "nvidia-cudnn-frontend==1.25.0 ; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
@@ -636,12 +639,23 @@ requires-dist = ["torch", "packaging", "ninja"]
 
 [[tool.uv.dependency-metadata]]
 name = "transformer-engine"
-version = "2.15.0+42b8400"
-requires-dist = ["torch", "pydantic", "importlib-metadata>=1.0", "packaging"]
+version = "2.18.0+27486e03"
+# Match setup_requirements() with NVTE_FRAMEWORK=pytorch at the pinned source.
+requires-dist = [
+  "torch>=2.1",
+  "pydantic",
+  "importlib-metadata>=1.0",
+  "packaging",
+  "einops",
+  "onnxscript",
+  "onnx",
+  "nvdlfw-inspect",
+  "nvidia-cudnn-frontend>=1.25.0",
+]
 
 [[tool.uv.dependency-metadata]]
 name = "transformer-engine-torch"
-version = "2.15.0+42b8400"
+version = "2.18.0+27486e03"
 requires-dist = ["torch", "transformer-engine"]
 
 [[tool.uv.dependency-metadata]]

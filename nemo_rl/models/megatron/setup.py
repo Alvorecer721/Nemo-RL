@@ -26,6 +26,7 @@ from typing import Any, Callable, Optional, TypeVar
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.model_provider import ModelProviderMixin, get_model
+from megatron.bridge.models.transformer_config import _enable_safe_hybridep_dispatch
 from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.training import fault_tolerance
 from megatron.bridge.training.checkpointing import (
@@ -745,6 +746,16 @@ def setup_model_config(
 
     # Apply performance settings
     _apply_performance_config(model_cfg, config)
+
+    # Bridge infers THD from its dataset, but NeMo-RL supplies packed batches
+    # itself and leaves ConfigContainer.dataset unset. Apply the same safeguard
+    # after graph settings so eager HybridEP pads unequal expert-rank inputs.
+    sequence_packing = config.get("sequence_packing")
+    if sequence_packing is not None:
+        _enable_safe_hybridep_dispatch(
+            getattr(model_cfg, "transformer", model_cfg),
+            uses_thd=sequence_packing["enabled"],
+        )
 
     # Validate optimizer configuration
     _validate_optimizer_config(config)

@@ -20,6 +20,7 @@ set -euo pipefail
 # REPO_DIR defaults to the job working dir ($PWD) — also where the relative #SBATCH logs/ land, so they agree.
 # (sbatch copies this script to /var/spool/slurmd, so BASH_SOURCE doesn't resolve here; $PWD is the reliable handle.)
 REPO_DIR=${REPO_DIR:-$PWD}
+RUNTIME_REPO_DIR=${RUNTIME_REPO_DIR:-$REPO_DIR}
 CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}  # CUDA xielu kernel for the TRAINING side; see docs/apertus-xielu.md
@@ -38,6 +39,15 @@ RUN_LOG=${RUN_LOG:-$REPO_DIR/logs/grpo_fixgate_${SLURM_JOB_ID:-manual}.run.log}
 # earlier on PATH misses the seeded cache and rebuilds from source. Expanded by this shell
 # into the srun command (the body below is double-quoted), so it must be set out here.
 UV=${UV:-/root/.local/bin/uv}
+# Exact-image gates can reuse the baked project environment instead of
+# rebuilding compiled lock dependencies in a checkout-local venv.
+PROJECT_VENV_DIR=${PROJECT_VENV_DIR:-$REPO_DIR/.venv}
+RUN_PREFIX=${RUN_PREFIX:-"$UV run --locked --extra mcore python"}
+NVTE_WITH_NCCL_EP=${NVTE_WITH_NCCL_EP:-0}
+# Release images prefetch worker environments under /opt/ray_venvs. Keep the
+# persistent checkout-local path as the default for source-overlay probes, but
+# allow an exact-image gate to reuse the baked environments.
+WORKER_VENV_DIR=${WORKER_VENV_DIR:-$REPO_DIR/venvs}
 
 # Fail fast if submodules are not initialized — the driver imports megatron.core and the refit uses the bridge, so an empty submodule dir otherwise surfaces as a cryptic ModuleNotFoundError mid-run.
 for sm in 3rdparty/Megatron-Bridge-workspace/Megatron-Bridge 3rdparty/Gym-workspace/Gym 3rdparty/Automodel-workspace/Automodel; do
@@ -57,7 +67,7 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     # on PATH can predate the project's [tool.uv] fields and fail the build.
     export UV=$UV
     export HF_HOME=\${HF_HOME:-/iopsstor/scratch/cscs/\${USER}/.cache/huggingface}
-    export PYTHONPATH=$REPO_DIR:$BRIDGE_ROOT/src:$XIELU_SITE
+    export PYTHONPATH=$RUNTIME_REPO_DIR:$BRIDGE_ROOT/src:$XIELU_SITE
     # Persist the project + worker venvs on capstor: the image defaults both to
     # container-overlay paths that die with the job, forcing a rebuild every run.
     # Team uv cache on capstor, seeded from the image cache (complete for the
@@ -68,12 +78,13 @@ srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
     # uv progress rendering has SIGPIPEd (exit 141) against the Slurm output stream
     # right after large first-time installs; plain log lines are enough here.
     export UV_NO_PROGRESS=1
-    export UV_PROJECT_ENVIRONMENT=$REPO_DIR/.venv
-    export NEMO_RL_VENV_DIR=$REPO_DIR/venvs
-    cd $REPO_DIR
+    export UV_PROJECT_ENVIRONMENT=$PROJECT_VENV_DIR
+    export NVTE_WITH_NCCL_EP=$NVTE_WITH_NCCL_EP
+    export NEMO_RL_VENV_DIR=$WORKER_VENV_DIR
+    cd $RUNTIME_REPO_DIR
     # Apertus runtime guard: fail loud if nemo_rl is the stock /opt copy rather than this checkout (online GRPO otherwise silently regresses to gen-KL ~0.79).
     python -c 'from nemo_rl_apertus.runtime_guard import assert_apertus_runtime; assert_apertus_runtime()'
-    "$UV" run --locked --extra mcore python $RUN_SCRIPT --config $RECIPE \
+    $RUN_PREFIX $RUN_SCRIPT --config $RECIPE \
       grpo.max_num_steps=$MAX_STEPS \
       policy.generation.vllm_cfg.gpu_memory_utilization=0.40 ${VLLM_XIELU_SITE:+policy.generation.vllm_cfg.env_vars.PYTHONPATH=$VLLM_XIELU_SITE}
   " 2>&1 | tee "$RUN_LOG" || probe_rc=$?

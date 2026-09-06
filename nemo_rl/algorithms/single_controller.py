@@ -95,6 +95,7 @@ from nemo_rl.algorithms.single_controller_utils.config import (
     validate_single_controller_config,
 )
 from nemo_rl.algorithms.single_controller_utils.setup import SingleControllerActorArgs
+from nemo_rl.algorithms.single_controller_utils.rewards import apply_grouped_alp
 from nemo_rl.algorithms.single_controller_utils.utils import (
     aggregate_step_metrics,
     apply_message_level_advantage_penalties,
@@ -104,11 +105,13 @@ from nemo_rl.algorithms.single_controller_utils.utils import (
     tensor_field,
 )
 from nemo_rl.data.interfaces import DatumSpec
+from nemo_rl.data.multimodal_utils import present_multimodal_fields
 from nemo_rl.data_plane import DATA_PLANE_CHECKPOINT_SCHEMA_VERSION, KVBatchMeta
 from nemo_rl.data_plane.async_utils import call_data_plane
 from nemo_rl.data_plane.schema import (
     DP_CALIB_INPUT_FIELDS,
     DP_TRAIN_FIELDS,
+    EPISODE_SUCCESS,
     ROLLOUT_METRICS,
 )
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
@@ -441,6 +444,9 @@ class SingleControllerActor:
         self._step_log_dict: dict[str, list] = {
             "rewards": [],
             "masked_advantages": [],
+            "alp_shaped_rewards": [],
+            "alp_successes": [],
+            "alp_response_lengths": [],
             "num_mask_sample_filtered": [],
             "sequence_lengths": [],
             "seq_logprob_error_metrics": [],
@@ -1820,7 +1826,6 @@ class SingleControllerActor:
                         )
 
                     if groups_dispatched == 0 and self._gen is not None:
-                        # Raise here for observability.
                         try:
                             await asyncio.to_thread(self._gen.snapshot_step_metrics)
                         except RayActorError as error:
@@ -1947,11 +1952,16 @@ class SingleControllerActor:
                         )
 
                     if getattr(self._gen, "requires_kv_scale_sync", False):
+                        # Mirrors grpo_sync's calibration filter. The static
+                        # list cannot name the VLM extras -- which of
+                        # pixel_values / image_grid_thw / ... exist is
+                        # per-processor -- so without the union this path
+                        # calibrates image-blind on a VLM run.
                         calibration_fields = [
                             field
                             for field in (train_meta.fields or [])
                             if field in DP_CALIB_INPUT_FIELDS
-                        ]
+                        ] + present_multimodal_fields(train_meta)
                         calibration_batches.append(
                             await asyncio.to_thread(
                                 self._trainer.read_from_dataplane,
@@ -3318,6 +3328,32 @@ class SingleControllerActor:
 
         mask = token_mask * final_sample_mask.unsqueeze(-1)
 
+        raw_rewards = rewards
+        shaping = self._algo_cfg.reward_shaping
+        if shaping.enabled and shaping.alp_coef is not None:
+            successes = (
+                squeeze_trailing_unit_dim(tensor_field(data, EPISODE_SUCCESS)).float()
+                if shaping.alp_success_source == "episode_success"
+                else raw_rewards
+            )
+            alp = apply_grouped_alp(
+                raw_rewards,
+                successes=successes,
+                token_mask=token_mask,
+                sample_ids=meta.sample_ids,
+                group_size=self._algo_cfg.num_generations_per_prompt,
+                cfg=shaping,
+            )
+            rewards = alp.rewards
+            # Use the same occurrence groups for ALP and GRPO baselines. Equal
+            # prompt text from separate admissions must not merge their outcomes.
+            prompt_ids = alp.group_ids
+            self._step_log_dict["alp_shaped_rewards"].append(rewards.detach().cpu())
+            self._step_log_dict["alp_successes"].append(alp.successes.detach().cpu())
+            self._step_log_dict["alp_response_lengths"].append(
+                alp.response_lengths.detach().cpu()
+            )
+
         repeated_batch: dict[str, torch.Tensor] = {
             "total_reward": rewards,
         }
@@ -3391,7 +3427,7 @@ class SingleControllerActor:
             )
 
         response_advantages = torch.masked_select(advantages, mask.bool())
-        self._step_log_dict["rewards"].append(rewards.detach().cpu())
+        self._step_log_dict["rewards"].append(raw_rewards.detach().cpu())
         if self._teacher_logprobs_required:
             valid = response_advantages.detach().double()
             self._opd_stat_sum += float(valid.sum())
@@ -3444,6 +3480,13 @@ class SingleControllerActor:
             adv_cfg.mask_sample_field,
             adv_cfg.truncated_field,
         ]
+        shaping = self._algo_cfg.reward_shaping
+        if (
+            shaping.enabled
+            and shaping.alp_coef is not None
+            and shaping.alp_success_source == "episode_success"
+        ):
+            fields.append(EPISODE_SUCCESS)
         if self._message_level_advantage_penalties_enabled:
             fields.extend(
                 [

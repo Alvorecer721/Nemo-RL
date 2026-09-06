@@ -29,6 +29,8 @@ grpo:
   batch_multiplier: 1
   reward_shaping:
     enabled: false
+    alp_coef: null
+    alp_success_source: episode_success  # SC: explicit outcome; binary_reward requires binary episode rewards.
     overlong_buffer_length: 128
     overlong_buffer_penalty: 1
     max_response_length: ${policy.max_total_sequence_length}

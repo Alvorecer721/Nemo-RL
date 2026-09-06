@@ -357,6 +357,8 @@ debugging.md
 nsys-profiling.md
 fp8.md
 guides/use-custom-vllm.md
+guides/pp-foundation-activation.md
+superpowers/plans/2026-09-05-pp-foundation.md
 ```
 
 ```{toctree}

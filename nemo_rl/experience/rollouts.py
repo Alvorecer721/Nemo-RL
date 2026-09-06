@@ -817,6 +817,7 @@ def calculate_rewards(
     all_metadata = []  # Store extracted metadata
     all_indices_order = []
     all_answers = []
+    all_episode_successes = []
 
     for future, result in zip(futures, results):
         indices = future_to_indices[future]
@@ -828,6 +829,7 @@ def calculate_rewards(
             task_rewards,
             terminateds,
             answers,
+            episode_successes,
         ) = result
 
         is_dict_rewards = isinstance(task_rewards, dict)
@@ -854,6 +856,11 @@ def calculate_rewards(
             all_next_stop_strings.append(next_stop_strings[i])
             all_metadata.append(metadata[i])
             all_answers.append(answers[i])
+            all_episode_successes.append(
+                float(episode_successes[i])
+                if episode_successes is not None
+                else float("nan")
+            )
 
     # Sort results by original index to maintain order
     sorted_indices = sorted(
@@ -888,6 +895,9 @@ def calculate_rewards(
         rewards=rewards,
         terminateds=terminateds,
         answers=answers,
+        episode_successes=torch.tensor(
+            [all_episode_successes[i] for i in sorted_indices], dtype=torch.float32
+        ),
     )
 
 

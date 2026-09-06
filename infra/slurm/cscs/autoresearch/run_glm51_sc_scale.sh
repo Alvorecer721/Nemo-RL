@@ -29,6 +29,7 @@ SOURCE_STATUS=$(git -C "$REPO_DIR" status \
   .gitmodules \
   3rdparty \
   docker/nemo_rl_vllm0251.toml \
+  docker/nemo_rl_vllm026.toml \
   examples/configs \
   examples/prompts \
   examples/run_grpo_single_controller.py \
@@ -92,7 +93,7 @@ export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_OFFLINE=1
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
-export NEMO_RL_VENV_DIR=${GLM_ACTOR_VENV_DIR:-/opt/ray_venvs/glm51-sc-$EXPECTED_HEAD}
+export NEMO_RL_VENV_DIR=${GLM_ACTOR_VENV_DIR:-/opt/ray_venvs}
 export NRL_MEGATRON_CHECKPOINT_DIR=$MEGATRON_CACHE
 export NRL_REFIT_NUM_STREAMS=${NRL_REFIT_NUM_STREAMS:-2}
 export NRL_ROUTER_REPLAY_VALIDATE=1

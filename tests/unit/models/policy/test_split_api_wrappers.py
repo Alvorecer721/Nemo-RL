@@ -29,8 +29,16 @@ contracts cheaply:
 
 from __future__ import annotations
 
+import io
+import pickle
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
+import pytest
+import torch
+
+from nemo_rl.algorithms.single_controller_utils.utils import aggregate_step_metrics
 from nemo_rl.data_plane import KVBatchMeta
 from nemo_rl.data_plane.schema import (
     DP_TRAIN_FIELDS,
@@ -87,6 +95,50 @@ def _meta() -> KVBatchMeta:
 
 
 class TestPreshardedWrappers:
+    def test_finish_metrics_unpickle_without_backend_and_preserve_reduction(
+        self, monkeypatch
+    ):
+        backend = types.ModuleType("test_backend_storage_loader")
+
+        def load_storage(data):
+            return torch.load(io.BytesIO(data), weights_only=True)
+
+        load_storage.__module__ = backend.__name__
+        load_storage.__qualname__ = "load_storage"
+        backend.load_storage = load_storage
+        monkeypatch.setitem(sys.modules, backend.__name__, backend)
+        monkeypatch.setattr(torch.storage, "_load_from_bytes", load_storage)
+        raw = {
+            "global_loss": torch.tensor([0.25]),
+            "grad_norm": torch.tensor([0.5]),
+            "model_dtype": torch.bfloat16,
+            "all_mb_metrics": {
+                "loss": [torch.tensor(0.125), torch.tensor(0.125)],
+                "sampling_importance_ratio": [torch.tensor(0.5), torch.tensor(0.5)],
+                "is_oob_ratio": [torch.tensor(0.125), torch.tensor(0.0)],
+            },
+        }
+        raw_payload = pickle.dumps(raw)
+        worker = _SplitStubWorker()
+        with patch.object(worker, "finish_train_step", return_value=raw):
+            encoded = pickle.dumps(worker.finish_train_step_presharded())
+        monkeypatch.delitem(sys.modules, backend.__name__)
+        with pytest.raises(ModuleNotFoundError, match=backend.__name__):
+            pickle.loads(raw_payload)
+        received = pickle.loads(encoded)
+        assert received["model_dtype"] == torch.bfloat16
+        assert isinstance(raw["global_loss"], torch.Tensor)
+        policy, _ = _make_tq_policy()
+        with patch("nemo_rl.models.policy.tq_policy.ray") as mock_ray:
+            mock_ray.get.return_value = [received]
+            reduced = aggregate_step_metrics(policy.finish_train_step())
+        assert reduced == {
+            "loss": 0.25,
+            "grad_norm": 0.5,
+            "sampling_importance_ratio": 1.0,
+            "is_oob_ratio": 0.125,
+        }
+
     def test_begin_forwards_args(self):
         w = _SplitStubWorker()
         loss_fn = object()
@@ -135,16 +187,17 @@ def _make_tq_policy() -> tuple[TQPolicy, MagicMock]:
 
 
 class TestTQPolicySplitFanout:
-    def test_stamp_pad_seqlen_uses_current_policy_topology(self):
+    def test_isolated_meta_uses_current_policy_topology(self):
         p, _ = _make_tq_policy()
         meta = _meta()
         meta.sequence_lengths = [2827, 1536]
         meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] = 2827
 
         with patch.object(TQPolicy, "_packing_args", return_value=(None, None)):
-            p._stamp_pad_seqlen(meta)
+            isolated = p._isolated_meta(meta, fields=[], task_name="train")
 
-        assert meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2828
+        assert isolated.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2828
+        assert meta.extra_info[GLOBAL_FORWARD_PAD_SEQLEN] == 2827
 
     def test_begin_consumes_single_data_futures_with_ray_get(self):
         """run_all_workers_single_data returns plain ObjectRefs, not a
@@ -246,6 +299,31 @@ class TestTQPolicySplitFanout:
         assert out["all_mb_metrics"]["loss"] == [0.1, 0.1]  # twins dropped
         # _aggregate_train_results surfaces global_loss under "loss"
         assert out["loss"] == 1.0
+
+    def test_finish_propagates_mtp_metrics(self):
+        """Worker-reduced MTP metrics survive the TQPolicy aggregation layer."""
+        p, _ = _make_tq_policy()
+        with patch("nemo_rl.models.policy.tq_policy.ray") as mock_ray:
+            mock_ray.get.return_value = [
+                {
+                    "global_loss": 1.0,
+                    "grad_norm": 0.5,
+                    "all_mb_metrics": {"loss": [0.1]},
+                    "mtp_metrics": {
+                        "mtp_1_loss": 0.25,
+                        "mtp_1_acceptance_rate": 75.0,
+                        "grad_norm": 1.25,
+                    },
+                    "is_replica_leader": True,
+                }
+            ]
+            out = p.finish_train_step()
+
+        assert out["mtp_metrics"] == {
+            "mtp_1_loss": 0.25,
+            "mtp_1_acceptance_rate": 75.0,
+            "grad_norm": 1.25,
+        }
 
     def test_abort_consumes_single_data_futures_with_ray_get(self):
         p, wg = _make_tq_policy()

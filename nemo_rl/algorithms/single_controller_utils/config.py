@@ -49,6 +49,7 @@ from nemo_rl.algorithms.loss import ClippedPGLossConfig
 from nemo_rl.algorithms.loss.loss_functions import MseValueLossConfig
 from nemo_rl.algorithms.opd import OnPolicyDistillationConfig
 from nemo_rl.algorithms.ppo import PPOConfig
+from nemo_rl.algorithms.single_controller_utils.rewards import validate_alp_config
 from nemo_rl.data import DataConfig
 from nemo_rl.data_plane.interfaces import DataPlaneConfig
 from nemo_rl.data_plane.schema import (
@@ -780,8 +781,8 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
     """Reject algorithm blocks the SingleController path cannot honour.
 
     Both directions on the critic: one the PPO path needs and does not have, and
-    one a GRPO run carries and would never build. Plus the reward-shaping and
-    sampling knobs SC reads on neither path.
+    one a GRPO run carries and would never build. Reward shaping supports ALP
+    with GRPO; other shaping, reward scaling, and dynamic sampling remain unsupported.
     """
     algo_cfg = algo_config(master_config)
 
@@ -795,6 +796,19 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
             "with max_num_steps."
         )
 
+    shaping = algo_cfg.reward_shaping
+    alp_enabled = shaping.enabled and shaping.alp_coef is not None
+    if alp_enabled:
+        if is_ppo_run(master_config) or algo_cfg.adv_estimator.name != "grpo":
+            raise ValueError(
+                "SingleController ALP currently requires the GRPO advantage estimator"
+            )
+        if algo_cfg.num_generations_per_prompt < 2:
+            raise ValueError(
+                "SingleController ALP requires at least 2 generations per prompt"
+            )
+        validate_alp_config(shaping)
+
     # An enabled one here describes shaping this run does not do. An entry leaves
     # this list once the SC path implements it; overlong_filtering is applied in
     # the advantage stage from the raw completion flags in the TransferQueue.
@@ -803,7 +817,7 @@ def _validate_algo_settings(master_config: MasterConfig) -> None:
         for name, enabled in (
             ("use_dynamic_sampling", algo_cfg.use_dynamic_sampling),
             ("reward_scaling", algo_cfg.reward_scaling.enabled),
-            ("reward_shaping", algo_cfg.reward_shaping.enabled),
+            ("reward_shaping", shaping.enabled and not alp_enabled),
         )
         if enabled
     ]

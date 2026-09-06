@@ -71,6 +71,7 @@ from nemo_rl.algorithms.reward_functions import (
     apply_reward_shaping,
 )
 from nemo_rl.algorithms.utils import calculate_baseline_and_std_per_prompt
+from nemo_rl.data.dataloader import CyclingDataLoader
 from nemo_rl.data.interfaces import DatumSpec, LLMMessageLogType
 from nemo_rl.data.multimodal_utils import PackedTensor
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
@@ -358,7 +359,7 @@ def mock_grpo_components():
 
     # Mock environment return values
     for env in [task_to_env["math"], val_task_to_env["math"]]:
-        env.step.return_value = (
+        env.step.return_value = EnvironmentReturn(
             [{"role": "environment", "content": "correct"}],  # observations
             [{}],  # metadata
             [[]],  # next_stop_strings
@@ -842,12 +843,34 @@ def test_multimodal_dedup_rejects_unqualified_transfer_paths(
         _validate_multimodal_dedup_capability(master_config)
 
     master_config.policy["generation"]["backend"] = "vllm"
+
+    # Data plane + NeMo-Gym stays rejected: ``grpo_train_sync`` never calls
+    # ``attach_initial_nemo_gym_image_payloads``, so the run would silently
+    # train on the media a Gym dataset omits from ``extra_env_info``.
     master_config.data_plane = {"enabled": True}
-    with pytest.raises(NotImplementedError, match="data_plane.enabled=false"):
+    with patch("nemo_rl.algorithms.grpo.should_use_nemo_gym", return_value=True):
+        with pytest.raises(NotImplementedError, match="NeMo-Gym"):
+            _validate_multimodal_dedup_capability(master_config)
+
+    # Data plane without Gym is supported: the wire format carries dedup
+    # (``PackedTensor.to_wire`` emits one row per *logical* row), and the Gym
+    # attach helper is itself gated on ``should_use_nemo_gym``. Rejecting this
+    # blocked every Nemotron-Omni recipe, since all of them set
+    # ``deduplicate_multimodal_data: true``.
+    with patch("nemo_rl.algorithms.grpo.should_use_nemo_gym", return_value=False):
         _validate_multimodal_dedup_capability(master_config)
 
     master_config.data_plane = {"enabled": False}
     _validate_multimodal_dedup_capability(master_config)
+
+    # And with dedup off, nothing is gated — the guard returns before it looks
+    # at the backend or at NeMo-Gym, so a text-only sync GRPO + Gym run is not
+    # blocked by a multimodal validator.
+    master_config.grpo.deduplicate_multimodal_data = False
+    master_config.policy["generation"]["backend"] = "sglang"
+    master_config.data_plane = {"enabled": True}
+    with patch("nemo_rl.algorithms.grpo.should_use_nemo_gym", return_value=True):
+        _validate_multimodal_dedup_capability(master_config)
 
 
 def test_grpo_sync_seq_logprob_error_helper_accepts_dict_result(monkeypatch):
@@ -2089,21 +2112,23 @@ def _patched_logprob_phase(policy):
 
 @ray.remote(num_cpus=0)
 class MockEnvironment(EnvironmentInterface):
-    def __init__(self, rewards: list[float]):
+    def __init__(self, rewards: list[float], successes: list[float] | None = None):
         self.rewards = rewards
+        self.successes = successes
         self._calls = 0
 
     def step(
         self, messages: list[LLMMessageLogType], env_info: list[dict]
     ) -> EnvironmentReturn:
         self._calls += 1
-        return (
+        return EnvironmentReturn(
             [{"role": "environment", "content": "observation"}] * len(messages),
             [{}] * len(messages),
             [[]] * len(messages),
             self.rewards,
             [True] * len(messages),
             [None] * len(messages),
+            torch.tensor(self.successes) if self.successes is not None else None,
         )
 
     def get_calls(self):
@@ -2131,7 +2156,7 @@ def mock_env():
 def mock_envs():
     """Create mock environments for multiple task tests."""
     math_env = MockEnvironment.remote(rewards=[1.0, 2.0])
-    code_env = MockEnvironment.remote(rewards=[3.0, 4.0])
+    code_env = MockEnvironment.remote(rewards=[3.0, 4.0], successes=[0.0, 1.0])
     yield {"math": math_env, "code": code_env}
     ray.kill(math_env)
     ray.kill(code_env)
@@ -2159,18 +2184,16 @@ def test_calculate_rewards_single_task(mock_env):
     batch = create_mock_batch(2, task_names, message_logs)
 
     # Calculate rewards
-    env_observations, metadata, next_stop_strings, rewards, terminateds, answers = (
-        calculate_rewards(batch, task_to_env)
-    )
+    result = calculate_rewards(batch, task_to_env)
 
     # Verify results
-    assert torch.allclose(rewards, torch.tensor([1.0, 2.0]))
-    assert len(env_observations) == 2
-    assert len(terminateds) == 2
-    assert len(next_stop_strings) == 2
-    assert len(metadata) == 2
-    assert len(answers) == 2
-    assert torch.allclose(rewards, torch.tensor([1.0, 2.0]))
+    assert torch.allclose(result.rewards, torch.tensor([1.0, 2.0]))
+    assert len(result.observations) == 2
+    assert len(result.terminateds) == 2
+    assert len(result.next_stop_strings) == 2
+    assert len(result.metadata) == 2
+    assert len(result.answers) == 2
+    assert torch.isnan(result.episode_successes).all()
     assert (
         ray.get(mock_env.get_calls.remote()) == 1
     )  # Should only call once for all samples of same task
@@ -2179,7 +2202,7 @@ def test_calculate_rewards_single_task(mock_env):
 def test_calculate_rewards_multiple_tasks(mock_envs):
     """Test reward calculation with multiple task types."""
     # Create test data
-    task_names = ["math", "math", "code", "code"]
+    task_names = ["math", "code", "math", "code"]
     message_logs = [
         [{"role": "user", "content": "1+1"}, {"role": "assistant", "content": "2"}],
         [{"role": "user", "content": "2+2"}, {"role": "assistant", "content": "4"}],
@@ -2195,18 +2218,17 @@ def test_calculate_rewards_multiple_tasks(mock_envs):
     batch = create_mock_batch(4, task_names, message_logs)
 
     # Calculate rewards
-    env_observations, metadata, next_stop_strings, rewards, terminateds, answers = (
-        calculate_rewards(batch, mock_envs)
-    )
+    result = calculate_rewards(batch, mock_envs)
 
     # Verify results
-    assert torch.allclose(rewards, torch.tensor([1.0, 2.0, 3.0, 4.0]))
-    assert len(env_observations) == 4
-    assert len(terminateds) == 4
-    assert len(next_stop_strings) == 4
-    assert len(metadata) == 4
-    assert len(answers) == 4
-    assert torch.allclose(rewards, torch.tensor([1.0, 2.0, 3.0, 4.0]))
+    assert torch.allclose(result.rewards, torch.tensor([1.0, 3.0, 2.0, 4.0]))
+    assert len(result.observations) == 4
+    assert len(result.terminateds) == 4
+    assert len(result.next_stop_strings) == 4
+    assert len(result.metadata) == 4
+    assert len(result.answers) == 4
+    assert torch.isnan(result.episode_successes[[0, 2]]).all()
+    assert torch.equal(result.episode_successes[[1, 3]], torch.tensor([0.0, 1.0]))
     assert (
         ray.get(mock_envs["math"].get_calls.remote()) == 1
     )  # One call for all math samples
@@ -2223,17 +2245,16 @@ def test_calculate_rewards_empty_batch(mock_env):
     batch = create_mock_batch(0, [], [])
 
     # Calculate rewards
-    env_observations, metadata, next_stop_strings, rewards, terminateds, answers = (
-        calculate_rewards(batch, task_to_env)
-    )
+    result = calculate_rewards(batch, task_to_env)
 
     # Verify results
-    assert len(rewards) == 0
-    assert len(env_observations) == 0
-    assert len(terminateds) == 0
-    assert len(next_stop_strings) == 0
-    assert len(metadata) == 0
-    assert len(answers) == 0
+    assert len(result.rewards) == 0
+    assert len(result.observations) == 0
+    assert len(result.terminateds) == 0
+    assert len(result.next_stop_strings) == 0
+    assert len(result.metadata) == 0
+    assert len(result.answers) == 0
+    assert len(result.episode_successes) == 0
     assert (
         ray.get(mock_env.get_calls.remote()) == 0
     )  # Should not call environment for empty batch
@@ -2986,12 +3007,11 @@ def test_setup_initializes_noncolocated_dynamo_with_nemo_gym(monkeypatch) -> Non
     assert DynamoConfig.model_validate(dynamo_config).engine_world_size == 4
     synchronizer.init_communicator.assert_called_once_with()
     spinup_nemo_gym_actor.assert_called_once_with(
-        env_configs=master_config.env,
+        master_config.env,
         base_urls=["http://dynamo-wrapper.example/v1"],
         model_name=master_config.policy["model_name"],
         tokenizer=tokenizer,
         enable_router_replay=False,
-        routed_experts_dtype="int16",
         use_fastokens=False,
     )
 
@@ -3360,12 +3380,11 @@ def test_setup_starts_nemo_gym_for_trtllm(monkeypatch, mock_grpo_components):
 
     assert result[2] is nemo_gym_actor
     spinup_nemo_gym_actor.assert_called_once_with(
-        env_configs=master_config.env,
+        master_config.env,
         base_urls=["http://trtllm.example/v1"],
         model_name="test-model",
         tokenizer=tokenizer,
         enable_router_replay=False,
-        routed_experts_dtype="int16",
         use_fastokens=False,
     )
 
@@ -3409,7 +3428,7 @@ def test_setup_refits_noncolocated_megatron_while_nemo_gym_waits(
     synchronizer.sync_weights.side_effect = sync_weights
     nemo_gym_actor = object()
 
-    def spinup_nemo_gym_actor(**kwargs):
+    def spinup_nemo_gym_actor(_env_configs, **kwargs):
         assert kwargs["base_urls"] == [reserved_url]
         events.append("gym_started")
         gym_started.set()
@@ -4586,6 +4605,7 @@ def test_grpo_exit_on_max_steps(mock_grpo_components, train_func):
     # Set max steps to 12
     master_config = mock_grpo_components["master_config"]
     master_config.grpo.max_num_steps = 12
+    master_config.grpo.max_num_epochs = 100
 
     grpo_save_state = _initial_grpo_save_state()
 
@@ -4653,7 +4673,7 @@ def test_grpo_exit_on_max_steps(mock_grpo_components, train_func):
 
 @pytest.mark.parametrize(
     "train_func", [grpo_train]
-)  # Only test sync version for epochs (async uses steps)
+)  # Sync coverage retained alongside the async regression below.
 def test_grpo_exit_on_max_epochs(mock_grpo_components, train_func):
     """Test that GRPO training loop exits when max_num_epochs is reached"""
     # Set max epochs to 2 and max steps to a large number
@@ -4703,6 +4723,63 @@ def test_grpo_exit_on_max_epochs(mock_grpo_components, train_func):
 
     # Verify we trained for exactly two epochs (20 batches)
     assert mock_grpo_components["policy"].train.call_count == 20
+
+
+def test_async_grpo_exit_on_max_epochs(mock_grpo_components, tmp_path):
+    """Async GRPO stops and saves at the epoch bound when it comes first."""
+    master_config = mock_grpo_components["master_config"]
+    master_config.grpo.max_num_epochs = 2
+    master_config.grpo.max_num_steps = 100
+    master_config.policy["generation"]["colocated"]["enabled"] = False
+    master_config.checkpointing["enabled"] = True
+    master_config.checkpointing["save_period"] = 100
+    master_config.checkpointing["metric_name"] = None
+
+    checkpointer = mock_grpo_components["checkpointer"]
+    checkpointer.init_tmp_checkpoint.return_value = "/tmp/checkpoint"
+    checkpointer.checkpoint_dir = tmp_path
+
+    mock_rollout_metrics = {
+        "mean_gen_tokens_per_sample": 10.0,
+        "max_gen_tokens": 20,
+        "min_gen_tokens": 5,
+    }
+    mock_batch = next(iter(mock_grpo_components["train_dataloader"]))
+
+    grpo_save_state = _initial_grpo_save_state()
+    with (
+        mock_async_grpo_infrastructure(mock_batch, mock_rollout_metrics),
+        patch(
+            "nemo_rl.algorithms.grpo.CyclingDataLoader",
+            wraps=CyclingDataLoader,
+        ) as cycling_dataloader_cls,
+        patch("nemo_rl.algorithms.grpo.torch.save"),
+    ):
+        async_grpo_train(
+            mock_grpo_components["policy"],
+            _mock_policy_generation(),
+            mock_grpo_components["train_dataloader"],
+            mock_grpo_components["val_dataloader"],
+            mock_grpo_components["tokenizer"],
+            mock_grpo_components["loss_fn"],
+            mock_grpo_components["task_to_env"],
+            mock_grpo_components["val_task_to_env"],
+            mock_grpo_components["logger"],
+            checkpointer,
+            grpo_save_state,
+            master_config,
+        )
+
+    assert mock_grpo_components["policy"].train.call_count == 20
+    assert [
+        call.args[0] for call in checkpointer.init_tmp_checkpoint.call_args_list
+    ] == [20]
+    assert grpo_save_state.current_step == 20
+    assert grpo_save_state.total_steps == 20
+    assert master_config.grpo.max_num_steps == 20
+    cycling_dataloader_cls.assert_called_once_with(
+        mock_grpo_components["train_dataloader"]
+    )
 
 
 @pytest.mark.parametrize("train_func", [grpo_train, async_grpo_train])

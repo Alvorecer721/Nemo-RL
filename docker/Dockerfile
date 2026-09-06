@@ -218,8 +218,8 @@ ENV LD_LIBRARY_PATH="/opt/nemo_rl_venv/lib/python3.13/site-packages/z3/lib:/opt/
 
 # First copy only the dependency files
 COPY --from=nemo-rl pyproject.toml uv.lock ./
-# Copy in the top level __init__.py/package_info.py since build-custom-vllm.sh needs the nemo_rl package to exist.
-COPY --from=nemo-rl nemo_rl/__init__.py nemo_rl/package_info.py ./nemo_rl/
+# Copy in the bootstrap modules since build-custom-vllm.sh needs the nemo_rl package to exist.
+COPY --from=nemo-rl nemo_rl/__init__.py nemo_rl/package_info.py nemo_rl/transformers_compat.py ./nemo_rl/
 COPY --from=nemo-rl tools/build-custom-vllm.sh ./tools/build-custom-vllm.sh
 COPY --from=nemo-rl tools/build-custom-flashinfer.sh ./tools/build-custom-flashinfer.sh
 COPY --from=nemo-rl tools/uv-sync-retry.sh ./tools/uv-sync-retry.sh
@@ -285,6 +285,10 @@ if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
     rm -rf /tmp/nemo-rl-warm-sglang
 fi
 EOF
+# The base image provides NCCL 2.29 headers, while TE's optional NCCL-EP
+# backend requires the NCCL 2.30 internal API. Declare this immediately before
+# the first TE consumer so unrelated backend cache layers remain reusable.
+ARG NVTE_WITH_NCCL_EP=0
 RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
 uv venv --seed /tmp/nemo-rl-warm-mcore
 UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #SBATCH --account=infra01
-#SBATCH --job-name=nrl-vllm0251-image
+#SBATCH --job-name=nrl-vllm026-image
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --time=12:00:00
@@ -38,11 +38,27 @@ OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 MAX_JOBS=${MAX_JOBS:-4}
 NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS:-90}
-# Clariden's unversioned python3 is Python 3.6, while the repository's
-# fingerprint helper uses modern stdlib/Python syntax. Pin the known host
-# interpreter explicitly so clean sbatch jobs do not depend on an inherited
-# container PATH.
-HOST_PYTHON=${HOST_PYTHON:-/usr/bin/python3.11}
+NVTE_WITH_NCCL_EP=${NVTE_WITH_NCCL_EP:-0}
+[[ "$NVTE_WITH_NCCL_EP" == 0 || "$NVTE_WITH_NCCL_EP" == 1 ]] || {
+    echo "NVTE_WITH_NCCL_EP must be 0 or 1, got: $NVTE_WITH_NCCL_EP" >&2
+    exit 2
+}
+# The fingerprint helper needs modern Python, while the host interpreter varies
+# across Clariden images. Prefer a system interpreter and fall back to the
+# user's shared Miniconda installation.
+if [[ -z "${HOST_PYTHON:-}" ]]; then
+    for candidate in \
+        /usr/bin/python3.13 \
+        /usr/bin/python3.12 \
+        /usr/bin/python3.11 \
+        "/users/$CSCS_USER/miniconda3/bin/python"; do
+        if [[ -x "$candidate" ]] \
+            && "$candidate" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+            HOST_PYTHON=$candidate
+            break
+        fi
+    done
+fi
 # This Apertus production image is validated with vLLM. Keep TensorRT-LLM an
 # explicit opt-in until its GH200 source build has independent evidence.
 BUILD_TRTLLM=${BUILD_TRTLLM:-0}
@@ -52,7 +68,7 @@ BUILD_TRTLLM=${BUILD_TRTLLM:-0}
 # script name only when deliberately producing an image that needs the
 # upstream custom-setup layer.
 CUSTOM_SETUP_FNAME=${CUSTOM_SETUP_FNAME-}
-VLLM_VERSION=0.25.1
+VLLM_VERSION=0.26.0
 # Pin the arm64 manifest used on Clariden rather than resolving a mutable NGC
 # tag differently on a later rebuild. Override only when deliberately updating
 # the foundation image.
@@ -70,18 +86,19 @@ esac
 # Podman's named-context identity bug that otherwise invalidates uv.lock when
 # an unrelated application source file changes. Set to "rebuild" only when
 # intentionally changing dependencies.
-HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-3e3d9dc43114407930cbf7d1626397ab979c5eebfec2b1b0ade2ae8530d81288}
-HERMETIC_FINGERPRINT_SHA256=3e3d9dc43114407930cbf7d1626397ab979c5eebfec2b1b0ade2ae8530d81288
+HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-679a0eb8c22b64929c8db02890c1d3c343b68c7ba3193b96713473a4e17033cb}
+HERMETIC_FINGERPRINT_SHA256=679a0eb8c22b64929c8db02890c1d3c343b68c7ba3193b96713473a4e17033cb
 # Use an explicit allocation-local store so the launcher does not depend on a
 # login-node containers/storage.conf. Large release layers are bounded in the
 # Dockerfile so they fit this node-local tmpfs.
 PODMAN_STORAGE_BASE=${PODMAN_STORAGE_BASE:-/tmp/nemo-rl-podman-$CSCS_USER-$SLURM_JOB_ID}
 
 cd "$REPO_DIR"
-command -v "$HOST_PYTHON" >/dev/null || {
-    echo "Host Python not found: HOST_PYTHON=$HOST_PYTHON" >&2
+if [[ -z "${HOST_PYTHON:-}" || ! -x "$HOST_PYTHON" ]] \
+    || ! "$HOST_PYTHON" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+    echo "No host Python >=3.11 found; set HOST_PYTHON explicitly." >&2
     exit 1
-}
+fi
 [[ -f docker/Dockerfile ]] || {
     echo "NeMo-RL Dockerfile not found under REPO_DIR=$REPO_DIR" >&2
     exit 1
@@ -115,6 +132,7 @@ BUILD_INPUTS_SHA256=$(
         printf 'base_image\0%s\0' "$BASE_IMAGE"
         printf 'max_jobs\0%s\0' "$MAX_JOBS"
         printf 'nvte_cuda_archs\0%s\0' "$NVTE_CUDA_ARCHS"
+        printf 'nvte_with_nccl_ep\0%s\0' "$NVTE_WITH_NCCL_EP"
         printf 'build_trtllm\0%s\0' "$BUILD_TRTLLM"
         printf 'custom_setup_fname\0%s\0' "$CUSTOM_SETUP_FNAME"
         printf 'platform\0linux/arm64\0'
@@ -126,8 +144,8 @@ IMAGE="nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
 SQSH_PATH="${OUTPUT_DIR}/nemo-rl-apertus-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
 generate_hermetic_cache_fingerprint() {
     "$HOST_PYTHON" tools/generate_fingerprint.py
-    printf '\nbase_image=%s\nnvte_cuda_archs=%s\nbuild_trtllm=%s\ncustom_setup_fname=%s\n' \
-        "$BASE_IMAGE" "$NVTE_CUDA_ARCHS" "$BUILD_TRTLLM" "$CUSTOM_SETUP_FNAME"
+    printf '\nbase_image=%s\nnvte_cuda_archs=%s\nnvte_with_nccl_ep=%s\nbuild_trtllm=%s\ncustom_setup_fname=%s\n' \
+        "$BASE_IMAGE" "$NVTE_CUDA_ARCHS" "$NVTE_WITH_NCCL_EP" "$BUILD_TRTLLM" "$CUSTOM_SETUP_FNAME"
 }
 # The runtime version check expects this file to contain exactly one JSON
 # document. Image-construction choices participate only in the separate
@@ -348,11 +366,11 @@ print(match.group(2))
     echo "Hermetic pyproject MD5: $HERMETIC_PYPROJECT_MD5"
     echo "Hermetic lock MD5:      $HERMETIC_LOCK_MD5"
     echo "Hermetic vLLM version:  $HERMETIC_VLLM_VERSION"
-    [[ "$HERMETIC_PYPROJECT_MD5" == "c7976a8db6827e720ea6fbf85ae800b7" ]] || { # pragma: allowlist secret
+    [[ "$HERMETIC_PYPROJECT_MD5" == "5bcd5feb94a97da7fe078f0ec1c1a902" ]] || { # pragma: allowlist secret
         echo "Hermetic pyproject.toml does not match the pinned digest" >&2
         exit 1
     }
-    [[ "$HERMETIC_LOCK_MD5" == "308f8a106aba5fd3c7ad707ae11ae09a" ]] || { # pragma: allowlist secret
+    [[ "$HERMETIC_LOCK_MD5" == "e266ae4f7b43eefdaf328f5387dfc309" ]] || { # pragma: allowlist secret
         echo "Hermetic uv.lock does not match the pinned digest" >&2
         exit 1
     }
@@ -392,6 +410,7 @@ podman build \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "MAX_JOBS=$MAX_JOBS" \
     --build-arg "NVTE_CUDA_ARCHS=$NVTE_CUDA_ARCHS" \
+    --build-arg "NVTE_WITH_NCCL_EP=$NVTE_WITH_NCCL_EP" \
     --build-arg "SKIP_TRTLLM_BUILD=$SKIP_TRTLLM_BUILD" \
     --build-arg "CUSTOM_SETUP_FNAME=$CUSTOM_SETUP_FNAME" \
     --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
@@ -503,8 +522,8 @@ from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tool_parsers import utils as tool_parser_utils
 
-if vllm.__version__ != "0.25.1":
-    raise RuntimeError(f"Expected vLLM 0.25.1, found {vllm.__version__}")
+if vllm.__version__ != "0.26.0":
+    raise RuntimeError(f"Expected vLLM 0.26.0, found {vllm.__version__}")
 if any(
     symbol is None
     for symbol in (OnlineRenderer, ServingTokenization, tool_parser_utils.NamespaceTool)
@@ -514,6 +533,55 @@ print("vLLM:", vllm.__version__)
 print("OpenAI:", openai.__version__)
 print("xgrammar:", version("xgrammar"))
 print("vLLM 0.25 renderer, tokenization, and tool-parser imports: OK")
+PY
+
+# TE is compiled independently in the Megatron worker environment. Verify the
+# exact MCore pairing and the TE APIs used by the dense and grouped-MoE paths.
+enroot start --root --rw "$SQSH_PATH" \
+    /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python \
+    - "$NVTE_WITH_NCCL_EP" <<'PY'
+import ctypes
+import sys
+from importlib.metadata import version
+
+import megatron.core.extensions.transformer_engine as mcore_te
+
+if not mcore_te.HAVE_TE:
+    raise RuntimeError("MCore did not discover Transformer Engine")
+
+import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
+
+expected_te = "2.18.0+27486e03"
+actual_te = version("transformer-engine")
+if actual_te != expected_te:
+    raise RuntimeError(f"Expected Transformer Engine {expected_te}, found {actual_te}")
+
+expect_nccl_ep = bool(int(sys.argv[1]))
+ep_symbols = [
+    name
+    for name in ("ep_initialize", "ep_finalize", "ep_get_zero_copy")
+    if hasattr(tex, name)
+]
+if expect_nccl_ep:
+    if len(ep_symbols) != 3:
+        raise RuntimeError(f"NCCL-EP was enabled but only found symbols: {ep_symbols}")
+    nccl = ctypes.CDLL("libnccl.so.2", mode=ctypes.RTLD_GLOBAL)
+    nccl_version = ctypes.c_int()
+    if nccl.ncclGetVersion(ctypes.byref(nccl_version)) != 0:
+        raise RuntimeError("ncclGetVersion failed")
+    if nccl_version.value < 23004:
+        raise RuntimeError(f"NCCL-EP requires NCCL >=2.30.4, found {nccl_version.value}")
+elif ep_symbols:
+    raise RuntimeError(f"NCCL-EP was expected to be disabled, found symbols: {ep_symbols}")
+
+if any(
+    symbol is None
+    for symbol in (mcore_te.TELinear, te.DotProductAttention, te.GroupedLinear)
+):
+    raise RuntimeError("Required MCore/Transformer Engine APIs are unavailable")
+print("Transformer Engine:", actual_te)
+print("MCore TE adapters: OK; NCCL-EP enabled:", expect_nccl_ep)
 PY
 
 echo "SquashFS checksum and size:"
