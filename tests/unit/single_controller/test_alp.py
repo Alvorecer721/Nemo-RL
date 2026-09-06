@@ -82,7 +82,7 @@ def test_alp_rejects_scores_and_missing_episode_outcomes(successes):
     "sample_ids", [["a_g0", "b_g1"], ["a_g0", "a_g0"], ["a_g0", "a_g2"], ["a", "b"]]
 )
 def test_alp_rejects_partial_duplicate_and_invalid_groups(sample_ids):
-    with pytest.raises(ValueError, match="ALP"):
+    with pytest.raises(ValueError, match="[Rr]ollout"):
         apply_grouped_alp(
             torch.ones(2),
             successes=torch.ones(2),
@@ -90,6 +90,50 @@ def test_alp_rejects_partial_duplicate_and_invalid_groups(sample_ids):
             sample_ids=sample_ids,
             group_size=2,
             cfg=_cfg(),
+        )
+
+
+@pytest.mark.parametrize("group_size, count", [(1, 1), (2, 0)])
+def test_alp_rejects_singleton_and_empty_batches(group_size: int, count: int) -> None:
+    with pytest.raises(ValueError, match="nonempty complete groups of at least 2"):
+        apply_grouped_alp(
+            torch.ones(count),
+            successes=torch.ones(count),
+            token_mask=torch.ones(count, 3),
+            sample_ids=[f"q_g{i}" for i in range(count)],
+            group_size=group_size,
+            cfg=_cfg(),
+        )
+
+
+@pytest.mark.parametrize(
+    "field, value, message",
+    [
+        ("rewards", torch.ones(2, 1), "shape"),
+        ("successes", torch.ones(1), "shape"),
+        ("rewards", torch.tensor([float("inf"), 0.0]), "finite"),
+        ("rewards", torch.tensor([float("nan"), 0.0]), "finite"),
+        ("token_mask", torch.ones(2), "binary generated-token mask"),
+        ("token_mask", torch.ones(1, 3), "binary generated-token mask"),
+        (
+            "token_mask",
+            torch.tensor([[0.0, 0.5], [0.0, 1.0]]),
+            "binary generated-token mask",
+        ),
+    ],
+)
+def test_alp_rejects_invalid_reward_and_token_inputs(
+    field: str, value: torch.Tensor, message: str
+) -> None:
+    inputs = {
+        "rewards": torch.ones(2),
+        "successes": torch.ones(2),
+        "token_mask": torch.ones(2, 3),
+    }
+    inputs[field] = value
+    with pytest.raises(ValueError, match=message):
+        apply_grouped_alp(
+            **inputs, sample_ids=["q_g0", "q_g1"], group_size=2, cfg=_cfg()
         )
 
 

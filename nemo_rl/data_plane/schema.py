@@ -66,7 +66,6 @@ SC_ROLLOUT_SCHEMA_FIELDS = (
     *DP_TRAIN_FIELDS,
     MASK_SAMPLE,
     TRUNCATED,
-    "prompt_ids_for_adv",
     "total_reward",
     EPISODE_SUCCESS,
     "values",

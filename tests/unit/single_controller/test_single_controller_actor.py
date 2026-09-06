@@ -17,6 +17,7 @@
 import asyncio
 import math
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -567,9 +568,6 @@ def test_advantage_stage_composes_all_filters_before_computing_advantages(
     generation_logprobs[2, 1:] = 1.0
     data = TensorDict(
         {
-            "prompt_ids_for_adv": torch.zeros(
-                batch_size, sequence_length, dtype=torch.long
-            ),
             "total_reward": torch.tensor([0.0, 0.0, 1.0, 0.0]),
             "token_mask": torch.ones(batch_size, sequence_length),
             "sample_mask": torch.ones(batch_size),
@@ -621,10 +619,11 @@ def test_advantage_stage_composes_all_filters_before_computing_advantages(
     meta = KVBatchMeta(
         partition_id="rollout_data",
         task_name="train",
-        sample_ids=[f"sample-{i}" for i in range(batch_size)],
+        sample_ids=[f"sample_g{i}" for i in range(batch_size)],
         fields=list(data.keys()),
     )
 
+    ctrl._algo_cfg.num_generations_per_prompt = batch_size
     result_meta, has_valid_training_tokens = asyncio.run(ctrl._advantage_stage(meta))
     capsys.readouterr()
 
@@ -683,9 +682,6 @@ def test_advantage_stage_writes_each_sample_filter_without_seq_threshold(
     batch_size, sequence_length = 2, 5
     data = TensorDict(
         {
-            "prompt_ids_for_adv": torch.zeros(
-                batch_size, sequence_length, dtype=torch.long
-            ),
             "total_reward": torch.tensor([1.0, 0.0]),
             "token_mask": torch.ones(batch_size, sequence_length),
             "sample_mask": torch.ones(batch_size),
@@ -724,10 +720,11 @@ def test_advantage_stage_writes_each_sample_filter_without_seq_threshold(
     meta = KVBatchMeta(
         partition_id="rollout_data",
         task_name="train",
-        sample_ids=[f"sample-{i}" for i in range(batch_size)],
+        sample_ids=[f"sample_g{i}" for i in range(batch_size)],
         fields=list(data.keys()),
     )
 
+    ctrl._algo_cfg.num_generations_per_prompt = batch_size
     _, has_valid_training_tokens = asyncio.run(ctrl._advantage_stage(meta))
 
     expected = torch.tensor(expected_sample_mask)
@@ -747,9 +744,6 @@ def test_advantage_stage_reports_seq_logprob_metrics_without_masking() -> None:
     generation_logprobs[1, 1:] = 1.0
     data = TensorDict(
         {
-            "prompt_ids_for_adv": torch.zeros(
-                batch_size, sequence_length, dtype=torch.long
-            ),
             "total_reward": torch.tensor([0.0, 1.0]),
             "token_mask": torch.ones(batch_size, sequence_length),
             "sample_mask": torch.ones(batch_size),
@@ -788,10 +782,11 @@ def test_advantage_stage_reports_seq_logprob_metrics_without_masking() -> None:
     meta = KVBatchMeta(
         partition_id="rollout_data",
         task_name="train",
-        sample_ids=[f"sample-{i}" for i in range(batch_size)],
+        sample_ids=[f"sample_g{i}" for i in range(batch_size)],
         fields=list(data.keys()),
     )
 
+    ctrl._algo_cfg.num_generations_per_prompt = batch_size
     _, has_valid_training_tokens = asyncio.run(ctrl._advantage_stage(meta))
 
     assert has_valid_training_tokens
@@ -818,9 +813,6 @@ def test_advantage_stage_clips_training_values_and_metrics() -> None:
     batch_size, sequence_length = 2, 4
     data = TensorDict(
         {
-            "prompt_ids_for_adv": torch.zeros(
-                batch_size, sequence_length, dtype=torch.long
-            ),
             "total_reward": torch.tensor([-4.0, 6.0]),
             "token_mask": torch.ones(batch_size, sequence_length),
             "sample_mask": torch.ones(batch_size),
@@ -860,10 +852,11 @@ def test_advantage_stage_clips_training_values_and_metrics() -> None:
     meta = KVBatchMeta(
         partition_id="rollout_data",
         task_name="train",
-        sample_ids=[f"sample-{i}" for i in range(batch_size)],
+        sample_ids=[f"sample_g{i}" for i in range(batch_size)],
         fields=list(data.keys()),
     )
 
+    ctrl._algo_cfg.num_generations_per_prompt = batch_size
     asyncio.run(ctrl._advantage_stage(meta))
 
     assert data_plane.written_fields is not None
@@ -882,9 +875,6 @@ def test_advantage_stage_skips_estimator_when_seq_mask_removes_whole_chunk(
     batch_size, sequence_length = 2, 5
     data = TensorDict(
         {
-            "prompt_ids_for_adv": torch.zeros(
-                batch_size, sequence_length, dtype=torch.long
-            ),
             "total_reward": torch.tensor([1.0, 0.0]),
             "token_mask": torch.ones(batch_size, sequence_length),
             "sample_mask": torch.ones(batch_size),
@@ -923,10 +913,11 @@ def test_advantage_stage_skips_estimator_when_seq_mask_removes_whole_chunk(
     meta = KVBatchMeta(
         partition_id="rollout_data",
         task_name="train",
-        sample_ids=[f"sample-{i}" for i in range(batch_size)],
+        sample_ids=[f"sample_g{i}" for i in range(batch_size)],
         fields=list(data.keys()),
     )
 
+    ctrl._algo_cfg.num_generations_per_prompt = batch_size
     result_meta, has_valid_training_tokens = asyncio.run(ctrl._advantage_stage(meta))
     capsys.readouterr()
 
@@ -945,9 +936,6 @@ def test_advantage_stage_skips_preexisting_empty_mask_without_seq_threshold() ->
     batch_size, sequence_length = 2, 5
     data = TensorDict(
         {
-            "prompt_ids_for_adv": torch.zeros(
-                batch_size, sequence_length, dtype=torch.long
-            ),
             "total_reward": torch.tensor([1.0, 0.0]),
             "token_mask": torch.ones(batch_size, sequence_length),
             "sample_mask": torch.zeros(batch_size),
@@ -984,10 +972,11 @@ def test_advantage_stage_skips_preexisting_empty_mask_without_seq_threshold() ->
     meta = KVBatchMeta(
         partition_id="rollout_data",
         task_name="train",
-        sample_ids=[f"sample-{i}" for i in range(batch_size)],
+        sample_ids=[f"sample_g{i}" for i in range(batch_size)],
         fields=list(data.keys()),
     )
 
+    ctrl._algo_cfg.num_generations_per_prompt = batch_size
     result_meta, has_valid_training_tokens = asyncio.run(ctrl._advantage_stage(meta))
 
     assert not has_valid_training_tokens
@@ -1025,7 +1014,6 @@ def test_opd_advantage_stage_reads_teacher_and_student_logprobs() -> None:
             assert "generation_logprobs" in select_fields
             return TensorDict(
                 {
-                    "prompt_ids_for_adv": torch.zeros(2, 3, dtype=torch.long),
                     "total_reward": torch.zeros(2),
                     "token_mask": torch.tensor([[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]]),
                     "sample_mask": torch.ones(2),
@@ -1071,11 +1059,12 @@ def test_opd_advantage_stage_reads_teacher_and_student_logprobs() -> None:
     meta = KVBatchMeta(
         partition_id="rollout_data",
         task_name="train",
-        sample_ids=["a", "b"],
+        sample_ids=["a_g0", "a_g1"],
         fields=[],
         sequence_lengths=[3, 3],
     )
 
+    ctrl._algo_cfg.num_generations_per_prompt = 2
     enriched, has_valid_training_tokens = asyncio.run(ctrl._advantage_stage(meta))
 
     assert has_valid_training_tokens
@@ -2235,9 +2224,6 @@ def test_advantage_stage_writes_gae_returns_alongside_advantages() -> None:
     batch_size, sequence_length = 2, 4
     data = TensorDict(
         {
-            "prompt_ids_for_adv": torch.zeros(
-                batch_size, sequence_length, dtype=torch.long
-            ),
             "total_reward": torch.tensor([1.0, 0.0]),
             "token_mask": torch.ones(batch_size, sequence_length),
             "sample_mask": torch.ones(batch_size),
@@ -2287,10 +2273,11 @@ def test_advantage_stage_writes_gae_returns_alongside_advantages() -> None:
     meta = KVBatchMeta(
         partition_id="rollout_data",
         task_name="train",
-        sample_ids=[f"sample-{i}" for i in range(batch_size)],
+        sample_ids=[f"sample-{i}_g0" for i in range(batch_size)],
         fields=list(data.keys()),
     )
 
+    ctrl._algo_cfg.num_generations_per_prompt = 1
     result_meta, has_valid_training_tokens = asyncio.run(ctrl._advantage_stage(meta))
 
     assert has_valid_training_tokens
@@ -2320,7 +2307,6 @@ def test_alp_advantage_stage_preserves_raw_rewards_and_uses_occurrence_groups(
     )
     data = TensorDict(
         {
-            "prompt_ids_for_adv": torch.zeros(4, 5, dtype=torch.long),
             "total_reward": raw.clone(),
             "episode_success": torch.tensor([1.0, 0.0, 0.0, 0.0]),
             "token_mask": torch.tensor(
@@ -2415,3 +2401,211 @@ def test_alp_advantage_stage_preserves_raw_rewards_and_uses_occurrence_groups(
     assert metrics["alp/shaped_reward"] == pytest.approx(shaped.mean().item())
     assert metrics["alp/success_rate"] == 0.25
     assert metrics["alp/response_tokens"] == 3.0
+
+
+class _GroupRecordingGRPOEstimator(GRPOAdvantageEstimator):
+    def __init__(
+        self, estimator_config: AdvEstimatorConfig, loss_config: ClippedPGLossConfig
+    ) -> None:
+        super().__init__(estimator_config, loss_config)
+        self.group_ids: torch.Tensor | None = None
+
+    def compute_advantage(
+        self, *, prompt_ids: torch.Tensor, **kwargs: Any
+    ) -> torch.Tensor:
+        self.group_ids = prompt_ids.clone()
+        return super().compute_advantage(prompt_ids=prompt_ids, **kwargs)
+
+
+def _occurrence_advantage_controller(
+    data: TensorDict, *, group_size: int, coefficient: float | None
+) -> Any:
+    """Run the real advantage stage against a small in-memory data plane."""
+    ctrl = object.__new__(SingleControllerActor.__ray_metadata__.modified_class)
+    ctrl._dp_client = _AdvantageDataPlane(data)
+    ctrl._advantage_cfg = AdvantageConfig()
+    ctrl._advantage_estimator = _GroupRecordingGRPOEstimator(
+        AdvEstimatorConfig(normalize_rewards=True, use_leave_one_out_baseline=False),
+        ClippedPGLossConfig(),
+    )
+    ctrl._algo_cfg = GRPOConfig(
+        num_generations_per_prompt=group_size,
+        overlong_filtering=True,
+        seq_logprob_error_threshold=None,
+        reward_shaping=RewardShapingConfig(
+            enabled=coefficient is not None,
+            alp_coef=coefficient,
+            max_response_length=10,
+            alp_success_source="episode_success",
+        ),
+    )
+    ctrl._policy_logprobs_required = False
+    ctrl._reference_logprobs_required = False
+    ctrl._teacher_logprobs_required = False
+    ctrl._is_ppo = False
+    ctrl._message_level_advantage_penalties_enabled = False
+    ctrl._step_log_dict = {
+        key: []
+        for key in (
+            "rewards",
+            "masked_advantages",
+            "sequence_lengths",
+            "num_mask_sample_filtered",
+            "seq_logprob_error_metrics",
+            "logprob_errors",
+            "alp_shaped_rewards",
+            "alp_successes",
+            "alp_response_lengths",
+        )
+    }
+    return ctrl
+
+
+@pytest.mark.parametrize("group_size", [2, 16])
+def test_alp_zero_coefficient_matches_control_for_duplicate_prompt_occurrences(
+    group_size: int,
+) -> None:
+    """Merging equal-token occurrences changes control even when lambda is zero."""
+    n = 2 * group_size
+    raw = torch.tensor([1.0] * group_size + [0.0] * group_size)
+    data = TensorDict(
+        {
+            # Deliberately equal prompt text for two separately admitted groups.
+            "prompt_ids_for_adv": torch.zeros(n, 5, dtype=torch.long),
+            "total_reward": raw.clone(),
+            "episode_success": raw.clone(),
+            "token_mask": torch.tensor([[0, 1, 0, 1, 1]] * n),
+            "sample_mask": torch.ones(n),
+            "mask_sample": torch.tensor([True] + [False] * (n - 1)),
+            "truncated": torch.tensor([False] * (n - 1) + [True]),
+        },
+        batch_size=[n],
+    )
+    meta = KVBatchMeta(
+        partition_id="rollout_data",
+        task_name="train",
+        sample_ids=[f"{group}_g{i}" for group in ("a", "b") for i in range(group_size)],
+        fields=list(data.keys()),
+    )
+    control = _occurrence_advantage_controller(
+        data.clone(), group_size=group_size, coefficient=None
+    )
+    alp = _occurrence_advantage_controller(
+        data.clone(), group_size=group_size, coefficient=0.0
+    )
+    for ctrl in (control, alp):
+        _, valid = asyncio.run(ctrl._advantage_stage(meta))
+        assert valid
+
+    torch.testing.assert_close(
+        control._dp_client.written_fields["advantages"],
+        alp._dp_client.written_fields["advantages"],
+    )
+    # Each occurrence has constant reward; its own centered advantage is zero.
+    assert control._dp_client.written_fields["advantages"].count_nonzero() == 0
+    assert torch.equal(
+        control._advantage_estimator.group_ids,
+        alp._advantage_estimator.group_ids,
+    )
+    expected_mask = data["token_mask"].clone()
+    expected_mask[[0, n - 1]] = 0
+    for ctrl in (control, alp):
+        final_mask = data["token_mask"] * ctrl._dp_client.written_fields[
+            "sample_mask"
+        ].unsqueeze(-1)
+        assert torch.equal(final_mask[:, 1:], expected_mask[:, 1:])
+        assert "total_reward" not in ctrl._dp_client.written_fields
+        torch.testing.assert_close(ctrl._dp_client._data["total_reward"], raw)
+
+
+@pytest.mark.parametrize("group_size", [2, 16])
+@pytest.mark.parametrize("coefficient", [None, 0.0, 0.5])
+@pytest.mark.parametrize("all_filtered", [False, True])
+def test_occurrence_advantages_are_invariant_to_permutation_chunks_and_replay(
+    group_size: int, coefficient: float | None, all_filtered: bool
+) -> None:
+    """Complete-group scheduling and a repeated stage cannot change the objective."""
+    n = 3 * group_size
+    raw = torch.tensor(
+        [1.0] * group_size + [0.0] * group_size + [1.1, -0.2] * (group_size // 2)
+    )
+    successes = torch.tensor(
+        [1.0] * group_size + [0.0] * group_size + [1.0, 0.0] * (group_size // 2)
+    )
+    data = TensorDict(
+        {
+            "total_reward": raw.clone(),
+            "episode_success": successes,
+            "token_mask": torch.tensor([[0, 1, 0, 0, 0], [0, 1, 0, 1, 1]] * (n // 2)),
+            "sample_mask": torch.ones(n),
+            "mask_sample": torch.full((n,), all_filtered, dtype=torch.bool),
+            "truncated": torch.zeros(n, dtype=torch.bool),
+        },
+        batch_size=[n],
+    )
+    data["mask_sample"][0] = True  # Successful sibling still determines solve rate.
+    data["truncated"][2 * group_size] = True
+    data["sample_mask"][group_size] = 0
+    sample_ids = [
+        f"{group}_g{i}" for group in ("a", "b", "c") for i in range(group_size)
+    ]
+
+    def run(indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch = data[indices].clone()
+        ctrl = _occurrence_advantage_controller(
+            batch, group_size=group_size, coefficient=coefficient
+        )
+        meta = KVBatchMeta(
+            partition_id="rollout_data",
+            task_name="train",
+            sample_ids=[sample_ids[i] for i in indices.tolist()],
+            fields=list(batch.keys()),
+        )
+        meta, valid = asyncio.run(ctrl._advantage_stage(meta))
+        assert valid == (not all_filtered)
+        assert "prompt_ids_for_adv" not in ctrl._dp_client.selected_fields
+        first_advantages = ctrl._dp_client.written_fields["advantages"].clone()
+        # Apply the stage's actual writes, as a restored/retried data plane would.
+        batch.update(ctrl._dp_client.written_fields)
+        final_mask = batch["token_mask"] * batch["sample_mask"].unsqueeze(-1)
+        _, replay_valid = asyncio.run(ctrl._advantage_stage(meta))
+        assert replay_valid == valid
+        torch.testing.assert_close(
+            ctrl._dp_client.written_fields["advantages"], first_advantages
+        )
+        torch.testing.assert_close(batch["total_reward"], raw[indices])
+        assert "total_reward" not in ctrl._dp_client.written_fields
+        if coefficient is not None:
+            shaped, replay_shaped = ctrl._step_log_dict["alp_shaped_rewards"]
+            torch.testing.assert_close(shaped, replay_shaped)
+            expected_shaped = (
+                raw
+                if coefficient == 0.0
+                else torch.tensor(
+                    [0.95, 0.85] * (group_size // 2)
+                    + [0.0] * group_size
+                    + [1.075, -0.275] * (group_size // 2)
+                )
+            )
+            torch.testing.assert_close(shaped, expected_shaped[indices])
+            assert torch.equal(
+                ctrl._step_log_dict["alp_successes"][0], successes[indices]
+            )
+            assert torch.equal(
+                ctrl._step_log_dict["alp_response_lengths"][0],
+                data["token_mask"][indices].sum(-1).float(),
+            )
+        return first_advantages, final_mask[:, 1:]
+
+    expected_advantages, expected_mask = run(torch.arange(n))
+    permutation = torch.randperm(n, generator=torch.Generator().manual_seed(42))
+    permuted_advantages, permuted_mask = run(permutation)
+    torch.testing.assert_close(permuted_advantages, expected_advantages[permutation])
+    assert torch.equal(permuted_mask, expected_mask[permutation])
+    for indices in (
+        torch.cat((torch.arange(2 * group_size, n), torch.arange(group_size))),
+        torch.arange(group_size, 2 * group_size),
+    ):
+        chunk_advantages, chunk_mask = run(indices)
+        torch.testing.assert_close(chunk_advantages, expected_advantages[indices])
+        assert torch.equal(chunk_mask, expected_mask[indices])

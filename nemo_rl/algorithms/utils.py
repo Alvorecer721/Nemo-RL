@@ -15,6 +15,7 @@
 import math
 import random
 import warnings
+from collections.abc import Sequence
 from functools import partial, wraps
 from typing import Any, Optional
 
@@ -121,6 +122,49 @@ def alp_pass_rate(
         leave_one_out_baseline=False,
     )
     return pass_rate
+
+
+def build_rollout_group_ids_from_sample_ids(
+    sample_ids: Sequence[str],
+    *,
+    expected_group_size: int | None = None,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Identify rollout occurrences from ``{group_id}_g{index}`` sample IDs.
+
+    Return row-aligned integer IDs of shape ``[samples, 1]``. Equal prompt text
+    in separate occurrences stays separate, even when rows are interleaved.
+    When a group size is supplied, require exactly generations ``0..G-1`` for
+    every occurrence before computing either group rewards or advantages.
+    """
+    if expected_group_size is not None and expected_group_size <= 0:
+        raise ValueError(
+            f"expected_group_size must be positive, got {expected_group_size}"
+        )
+    group_to_index: dict[str, int] = {}
+    group_to_generations: dict[str, set[int]] = {}
+    group_indices: list[int] = []
+    for sample_id in sample_ids:
+        group_id, separator, generation = sample_id.rpartition("_g")
+        if not group_id or not separator or not generation.isdecimal():
+            raise ValueError(f"Invalid rollout sample ID: {sample_id!r}")
+        generation_index = int(generation)
+        generations = group_to_generations.setdefault(group_id, set())
+        if generation_index in generations:
+            raise ValueError(
+                f"Duplicate generation index in rollout sample ID: {sample_id!r}"
+            )
+        generations.add(generation_index)
+        group_indices.append(group_to_index.setdefault(group_id, len(group_to_index)))
+    if expected_group_size is not None:
+        expected_generations = set(range(expected_group_size))
+        for group_id, generations in group_to_generations.items():
+            if generations != expected_generations:
+                raise ValueError(
+                    f"Rollout group {group_id!r} requires all {expected_group_size} "
+                    f"unique rollouts; got generation indices {sorted(generations)}"
+                )
+    return torch.tensor(group_indices, device=device, dtype=torch.long)[:, None]
 
 
 def calculate_baseline_and_std_per_prompt(

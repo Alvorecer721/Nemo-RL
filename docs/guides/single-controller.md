@@ -276,8 +276,13 @@ for composite scores or accumulated per-turn rewards that can exceed one.
 including thinking and final answers. The original generated-token mask excludes
 historical assistant messages, prompt tokens, tool observations, and padding.
 Policy-side sample filtering does not change the lengths or success-rate
-denominator. Prompt occurrence IDs keep repeated instances of identical prompt
-text in separate groups for both ALP and GRPO advantages.
+denominator. Sample IDs of the form `{occurrence_id}_g{generation_index}` define
+the complete rollout groups for both ALP success rates and GRPO advantages,
+including when ALP is disabled. Repeated instances of identical prompt text stay
+in separate groups. With `alp_coef: 0`, enabling ALP preserves control advantages
+and loss masks. SingleController does not need a separate prompt-token tensor
+for advantage grouping; prompt-history masking still uses the explicit prompt
+boundary in the rollout payload.
 
 The data-plane task reward remains unchanged, so replay or retries recompute ALP
 from the raw reward. The `reward` metric reports that raw reward; `alp/shaped_reward`,

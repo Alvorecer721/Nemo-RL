@@ -26,6 +26,7 @@ from nemo_rl.algorithms.utils import (
     EFFICIENCY_CATEGORIES,
     STEP_WINDOW_WALL_CLOCK_CATEGORIES,
     WALL_CLOCK_EFFICIENCY_CATEGORIES,
+    build_rollout_group_ids_from_sample_ids,
     calculate_baseline_and_std_per_prompt,
     get_tokenizer,
     maybe_pad_last_batch,
@@ -34,6 +35,61 @@ from nemo_rl.algorithms.utils import (
 )
 from nemo_rl.data.chat_templates import COMMON_CHAT_TEMPLATES
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+
+
+def test_rollout_group_ids_preserve_interleaved_complete_occurrences() -> None:
+    group_ids = build_rollout_group_ids_from_sample_ids(
+        ["uuid_g_history_g1", "other_g0", "uuid_g_history_g0", "other_g1"],
+        expected_group_size=2,
+        device="cpu",
+    )
+    assert group_ids.dtype == torch.long
+    assert group_ids.device == torch.device("cpu")
+    assert group_ids.tolist() == [[0], [1], [0], [1]]
+    baseline, std = calculate_baseline_and_std_per_prompt(
+        group_ids,
+        torch.tensor([1.0, 0.0, 1.0, 0.0]),
+        torch.ones(4),
+        leave_one_out_baseline=False,
+    )
+    assert baseline.tolist() == [1.0, 0.0, 1.0, 0.0]
+    assert std.tolist() == [0.0, 0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    "sample_ids",
+    [
+        ["a_g0", "b_g1"],
+        ["a_g0", "a_g0"],
+        ["a_g0", "a_g2"],
+        ["a_g-1", "a_g0"],
+        ["a_g+0", "a_g1"],
+        ["a_g 0", "a_g1"],
+        ["a_g0", "a_g1_0"],
+        ["_g0", "_g1"],
+        ["a", "b"],
+    ],
+)
+def test_rollout_group_ids_reject_invalid_or_incomplete_occurrences(
+    sample_ids: list[str],
+) -> None:
+    with pytest.raises(ValueError):
+        build_rollout_group_ids_from_sample_ids(sample_ids, expected_group_size=2)
+
+
+@pytest.mark.parametrize("group_size", [0, -1])
+def test_rollout_group_ids_reject_nonpositive_group_size(group_size: int) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        build_rollout_group_ids_from_sample_ids([], expected_group_size=group_size)
+
+
+def test_rollout_group_ids_allow_empty_batches_and_single_trajectory_groups() -> None:
+    empty = build_rollout_group_ids_from_sample_ids([], expected_group_size=1)
+    assert empty.shape == (0, 1)
+    singleton_groups = build_rollout_group_ids_from_sample_ids(
+        ["a_g0", "b_g0"], expected_group_size=1
+    )
+    assert singleton_groups.tolist() == [[0], [1]]
 
 
 @pytest.fixture

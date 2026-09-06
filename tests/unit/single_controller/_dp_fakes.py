@@ -35,8 +35,8 @@ _BULK_FIELDS = [
     "sample_mask",
     "mask_sample",
     "truncated",
-    "prompt_ids_for_adv",
     "total_reward",
+    "episode_success",
 ]
 _ADV_FIELD = "advantages"
 
