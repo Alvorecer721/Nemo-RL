@@ -16,8 +16,8 @@ grpo:
   - 33
   max_num_epochs: 1
   reward_shaping:
-    enabled: false
-    alp_coef: null
+    enabled: true
+    alp_coef: 0.1
     alp_success_source: episode_success
     max_response_length: 12288
     overlong_buffer_length: null
@@ -154,7 +154,7 @@ logger:
   wandb:
     project: apertus-benchmarks
     entity: ml-team-cscs
-    name: nemo70b-dapo-thinking12k-gbs768-seed42
+    name: nemo70b-dapo-thinking12k-gbs768-alp-seed42
   tensorboard_enabled: true
   monitor_gpus: true
   gpu_monitoring:
