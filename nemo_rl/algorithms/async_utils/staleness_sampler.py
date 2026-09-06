@@ -59,7 +59,7 @@ from nemo_rl.algorithms.async_utils.replay_buffer import (
     TQReplayBuffer,
 )
 from nemo_rl.data_plane import KVBatchMeta
-from nemo_rl.data_plane.schema import ROLLOUT_METRICS
+from nemo_rl.data_plane.schema import EPISODE_SUCCESS, ROLLOUT_METRICS
 
 # Poll interval for the rollout-pump admission gate.
 _GATE_POLL_SECONDS = 0.005
@@ -286,6 +286,16 @@ class BaseSampler(abc.ABC):
             for metrics in meta.extra_info.get(ROLLOUT_METRICS, [])  # type: ignore[union-attr]
         ]
         selected_meta = selected_metas[0].concat(*selected_metas[1:])  # type: ignore[union-attr]
+        # concat inherits the first group's fields. A restored legacy group may
+        # lack optional outcomes, so advertise them only when the whole chunk
+        # can supply them. ALP still requests its required outcomes explicitly.
+        if selected_meta.fields is not None and not all(
+            meta is not None and EPISODE_SUCCESS in (meta.fields or [])
+            for meta in selected_metas
+        ):
+            selected_meta.fields = [
+                name for name in selected_meta.fields if name != EPISODE_SUCCESS
+            ]
         selected_meta.extra_info[ROLLOUT_METRICS] = selected_rollout_metrics
         await self._buffer.remove(selected_idxs, remove_in_dp=False)
         return selected_meta, len(selected_idxs)
