@@ -1,9 +1,15 @@
 """Reject a requested factor 32 that never reaches the model's tensors."""
 
+import ast
+import asyncio
+import importlib
 import math
+import os
 from pathlib import Path
 import runpy
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import torch
 
@@ -29,6 +35,54 @@ def reference(factor):
 
 
 class TestRopeRuntimeAudit(unittest.TestCase):
+    def test_actual_async_hook_runs_even_when_hf_overrides_are_missing(self):
+        # Load the actual method and its standard-library imports without
+        # importing Ray/vLLM or starting an engine in this CPU unit test.
+        source = (
+            Path(__file__).resolve().parents[3]
+            / "nemo_rl/models/generation/vllm/vllm_worker_async.py"
+        )
+        tree = ast.parse(source.read_text())
+        cls = next(
+            n
+            for n in tree.body
+            if isinstance(n, ast.ClassDef) and n.name == "VllmAsyncGenerationWorkerImpl"
+        )
+        method = next(
+            n
+            for n in cls.body
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "post_init_async"
+        )
+        namespace = {}
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in ("asyncio", "os"):
+                        namespace[alias.asname or alias.name] = importlib.import_module(
+                            alias.name
+                        )
+        exec(
+            compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"),
+            namespace,
+        )
+        rpc = AsyncMock()
+        worker = SimpleNamespace(
+            llm=SimpleNamespace(collective_rpc=rpc),
+            report_device_id_async=AsyncMock(return_value=["gpu0"]),
+            cfg={"vllm_cfg": {}, "vllm_kwargs": {"hf_overrides": {}}},
+            _sparse_refit_receiver=None,
+            _mtp_load_from_disk=False,
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "NRL_ROPE_AUDIT_DIR": "/tmp/audit-hook-test",
+                "NRL_ROPE_AUDIT_FACTOR": "32",
+            },
+        ):
+            asyncio.run(namespace["post_init_async"](worker))
+        rpc.assert_any_await("verify_rope_runtime", args=(32.0,))
+
     def test_actual_factor32_passes(self):
         check_frequencies(reference(32), 32)
 

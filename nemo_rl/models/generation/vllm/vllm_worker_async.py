@@ -389,6 +389,8 @@ class VllmAsyncGenerationWorkerImpl(
             self.generation_tokens = []
 
     async def post_init_async(self):
+        import os
+
         self._engine_loop = asyncio.get_running_loop()
         if self._sparse_refit_receiver is not None:
             self._sparse_refit_receiver.set_async_loop(self._engine_loop)
