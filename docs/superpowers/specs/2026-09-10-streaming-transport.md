@@ -21,3 +21,8 @@ Keep dependency pins and lockfiles unchanged. Keep rollout PP1; trainer PP2/PP4
 in refit probes is permitted. No M2N/NCCL-EP activation. Report host, distributed
 CPU and GPU evidence separately; no throughput claim without a matched measure.
 Existing issues: streaming #32, byte transport #39. Do not duplicate issues.
+
+Implementation clarification: strict WeightFifo preserves its oldest-version
+contract by rejecting a group quantum greater than one before consumption.
+Aligned ready-first/windowed/in-order selection is supported; FIFO with quantum
+one retains its existing behavior. This avoids an undrainable old-version tail.
