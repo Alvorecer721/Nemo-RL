@@ -159,8 +159,8 @@ def generate_manifest(
     """Generate a stable manifest from the checked-out build inputs."""
     if not re.search(r"@sha256:[0-9a-f]{64}$", base_image):
         raise ValueError("BASE_IMAGE must be pinned with an immutable @sha256 digest")
-    if profile not in {"full", "apertus"}:
-        raise ValueError(f"Unknown image profile: {profile}")
+    if not re.fullmatch(r"[a-z][a-z0-9_-]*", profile):
+        raise ValueError(f"Invalid image profile label: {profile}")
     if platform not in {"linux/arm64", "linux/amd64"}:
         raise ValueError(f"Unsupported platform: {platform}")
     recipe = dependency_recipe(repo_root)
@@ -191,8 +191,8 @@ def generate_manifest(
         [
             sys.executable,
             str(repo_root / "nemo_rl/distributed/actor_environments.py"),
-            "--profile",
-            profile,
+            "--actors",
+            build_args.get("NRL_ACTORS", ""),
             "all",
             *skip_extras,
         ],
@@ -301,7 +301,7 @@ def main() -> None:
     )
     generate.add_argument("--base-image", required=True)
     generate.add_argument("--platform", default="linux/arm64")
-    generate.add_argument("--profile", choices=["full", "apertus"], default="full")
+    generate.add_argument("--profile", default="full", help="image profile label")
     generate.add_argument("--build-arg", action="append", default=[])
     generate.add_argument("--output", required=True, type=Path)
     digest = commands.add_parser("digest")

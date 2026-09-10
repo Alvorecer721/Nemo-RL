@@ -12,7 +12,7 @@ esac
 
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 EXPECTED_HEAD=$(git -C "$REPO_DIR" rev-parse HEAD)
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm0251.toml}
 GLM_CKPT=${GLM_CKPT:-/capstor/store/cscs/swissai/infra01/hf_models/models/zai-org/GLM-5.1}
 GLM_MEGATRON_CACHE=${GLM_MEGATRON_CACHE:-/iopsstor/scratch/cscs/xyixuan/.cache/huggingface/nemo_rl_glm51_tp1pp18ep4}
 GLM_RESUME_ROOT=${GLM_RESUME_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_glm51_cross_allocation_resume/$EXPECTED_HEAD}

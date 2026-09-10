@@ -5,7 +5,7 @@
 import json
 import subprocess
 
-from tests.unit.tools.test_image_build_manifest import TOOL, _BuilderFixture
+from tests.unit.infra.test_cscs_image_build import TOOL, _BuilderFixture
 
 
 class AssemblyFlowTests(_BuilderFixture):

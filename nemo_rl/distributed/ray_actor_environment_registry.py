@@ -79,7 +79,7 @@ def _actor_python_env(actor: str, extras: list[str] | None) -> str:
 
 _reject_undeclared_extras()
 
-# Image profiles filter build rows only. All registered actors remain available
+# Worker selections filter build rows only. All registered actors remain available
 # at runtime, including system actors and workers omitted from a smaller image.
 ACTOR_ENVIRONMENT_REGISTRY: dict[str, str] = {
     actor: _actor_python_env(actor, extras)

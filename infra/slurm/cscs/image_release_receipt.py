@@ -8,11 +8,18 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 from typing import TypedDict
 
-from image_build_manifest import Manifest, validate_manifest, verify_manifest
+# This host CLI also runs from Slurm spool directories, without NeMo-RL installed.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools"))
+from image_build_manifest import (  # noqa: E402
+    Manifest,
+    validate_manifest,
+    verify_manifest,
+)
 
 
 class ReleaseReceipt(TypedDict):

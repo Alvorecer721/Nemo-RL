@@ -9,7 +9,7 @@ including TE 2.18, vLLM 0.26, Bridge and MCore. No main-branch merge is requeste
 Use upstream #4002's dependency-free actor manifest and two-phase hardlink
 installation, adapted to our current workers and readiness markers. The full
 image remains available; the CSCS builder selects an `apertus` profile for
-Megatron training, vLLM/Megatron generation, and their controller/reward actors.
+Megatron policy training, vLLM generation, and their rollout controller actors.
 Keep backend environments separate. Create dependency venvs in the cache-owning
 layer; final assembly adds source and checks existing installations offline.
 
@@ -23,11 +23,13 @@ dependency cache. Do not bypass runtime fingerprints or change platform support.
 
 - [x] Add `nemo_rl/distributed/actor_environments.py`, usable as a stdlib-only
   script, and derive the runtime registry from the same mappings.
-- [x] Support `--profile full|apertus` plus upstream backend skip flags. Output
+- [x] Support explicit `--actors` selection plus upstream backend skip flags. Output
   TSV records `actor_fqn<TAB>stage<TAB>uv arguments`; reject invalid selections.
   `stage` is `deps` or `trtllm`. Keep system actors in the registry but omit them
   from venv build rows. Apertus retains both vLLM workers, MegatronPolicyWorker,
   AsyncTrajectoryCollector, ReplayBuffer and SyncRolloutActor.
+  The CSCS `full|apertus` choice is resolved by the launchers; the six-worker list
+  lives in `infra/slurm/cscs/profiles/apertus.actors`.
 - [x] Hash the manifest in `tools/generate_fingerprint.py`. Preserve local
   readiness markers, frozen wrappers, exact environment selection and retries.
 - [x] Test manifest/runtime parity, profile coverage, skip-by-extras behavior,
@@ -41,8 +43,9 @@ dependency cache. Do not bypass runtime fingerprints or change platform support.
   `infra/slurm/cscs/build_nemo_rl_image.slurm` with the generated manifest.
   Support `HERMETIC_CACHE_TAG=auto|rebuild|<digest>`, preserving the two-allocation
   flow and durable local registry. Verify the embedded manifest on cache reuse.
-- [x] Pass `NRL_IMAGE_PROFILE=apertus` by default in the CSCS builder, together
-  with the existing TE, architecture, base-image and optional-backend settings.
+- [x] Default to `NRL_IMAGE_PROFILE=apertus` in the CSCS builder and pass its
+  resolved names as `NRL_ACTORS`, together with the existing TE, architecture,
+  base-image and optional-backend settings.
 - [x] Record build/assembly/export elapsed time and storage availability. Keep
   compiler concurrency bounded and all existing source cleanliness gates.
 - [x] Validate shell syntax and fixture-based cache selection tests.
@@ -66,6 +69,18 @@ dependency cache. Do not bypass runtime fingerprints or change platform support.
   with the new image where compatible, without modifying active experiments.
 
 ## Progress ledger
+
+- PR #37's layout cleanup moves all four CSCS EDFs, release-receipt policy,
+  the six-worker profile, and these build records under `infra/slurm/cscs/`.
+  Generic Docker inputs use `NRL_ACTORS`; core code imports no site profile.
+  Host validation passed 93 tests and 31 subtests, Ruff and syntax checks for
+  23 shell scripts. Actor rows and EDF contents matched the pre-move versions
+  byte for byte; the moved receipt CLI accepted the existing qualified image's
+  receipt from outside the checkout. Two broader GLM test modules could not
+  collect on the host because `nemo-lens` is absent; their changed EDF paths
+  were checked directly. The GPU evidence below remains tied to its recorded
+  image source. The reorganized source needs qualification with the next build;
+  no fingerprint mismatch is bypassed to reuse that evidence.
 
 - Initial audit complete; baseline is origin/main 6196eabe33686a494268545c54040bbd842098cf.
 - Ruling: this implements the approved Docker scope with existing dependency

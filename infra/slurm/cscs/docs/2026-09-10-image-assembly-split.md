@@ -8,7 +8,7 @@
 
 **Tech Stack:** Bash, Python standard library, Podman, Enroot, Slurm.
 
-**Spec:** `docs/superpowers/specs/2026-09-10-image-assembly-split.md`
+**Spec:** `infra/slurm/cscs/docs/2026-09-10-image-assembly-split-spec.md`
 
 ## Global constraints
 
@@ -19,7 +19,7 @@
 
 ## Tasks
 
-- [x] Add `tools/image_release_receipt.py` with a strict versioned receipt,
+- [x] Add `infra/slurm/cscs/image_release_receipt.py` with a strict versioned receipt,
   atomic publication, immutable-reference validation, and image/manifest checks.
   Test missing receipt, mutable reference, wrong source/platform/fingerprint,
   corrupted dependency manifest, and refusal to overwrite a different receipt.

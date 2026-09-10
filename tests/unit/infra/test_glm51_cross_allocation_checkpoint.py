@@ -124,7 +124,7 @@ def test_glm51_checkpoint_launcher_uses_cluster_safety_controls() -> None:
     ).read_text()
 
     assert "CONTAINER_ENV" in launcher
-    assert "docker/nemo_rl_vllm0251.toml" in launcher
+    assert "infra/slurm/cscs/environments/nemo_rl_vllm0251.toml" in launcher
     assert "RAY_SINGLE_SRUN=1" in launcher
     assert "RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY:-68719476736}" in launcher
     assert "--mem=850000M" in launcher

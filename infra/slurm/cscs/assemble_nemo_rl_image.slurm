@@ -26,7 +26,7 @@ CACHE_DIR=${CACHE_DIR:-$SCRATCH_ROOT/podman-cache/nemo-rl}
 OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 PODMAN_STORAGE_BASE=${PODMAN_STORAGE_BASE:-/tmp/nemo-rl-assemble-$CSCS_USER-$SLURM_JOB_ID}
-IMAGE_TOOLS_DIR="$REPO_DIR/tools"
+IMAGE_TOOLS_DIR="$REPO_DIR/infra/slurm/cscs"
 image_host_python
 # Capture the producer receipt once; every subsequent check uses this snapshot.
 RECEIPT_FIELDS=$("$HOST_PYTHON" "$IMAGE_TOOLS_DIR/image_release_receipt.py" fields "$RELEASE_RECEIPT")

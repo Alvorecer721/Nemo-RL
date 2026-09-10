@@ -21,7 +21,7 @@ set -euo pipefail
 # (sbatch copies this script to /var/spool/slurmd, so BASH_SOURCE doesn't resolve here; $PWD is the reliable handle.)
 REPO_DIR=${REPO_DIR:-$PWD}
 RUNTIME_REPO_DIR=${RUNTIME_REPO_DIR:-$REPO_DIR}
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}  # CUDA xielu kernel for the TRAINING side; see docs/apertus-xielu.md
 # Benchmarks only: set VLLM_XIELU_SITE to inject the kernel into vLLM generation,

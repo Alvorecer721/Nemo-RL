@@ -15,7 +15,7 @@ set -euo pipefail
 # The .so links libtorch's unstable C++ ABI and a specific libcudart SONAME, so one
 # build serves exactly one (python, torch, cuda) triple — hence the ABI-tagged output.
 REPO_DIR=${REPO_DIR:-$SLURM_SUBMIT_DIR}
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl.toml}
 SRC=${SRC:-$REPO_DIR/3rdparty/kernels/xielu}
 OUTROOT=${OUTROOT:-$REPO_DIR/xielu-builds}   # copy the ABI-tagged site dir to the team wheelhouse to share it
 ARCHES=${ARCHES:-9.0}

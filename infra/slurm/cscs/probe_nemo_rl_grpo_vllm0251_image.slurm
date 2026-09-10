@@ -29,7 +29,7 @@
 set -euo pipefail
 
 REPO_DIR=${REPO_DIR:-$PWD}
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm0251.toml}
 RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nrl_vllm0251_grpo_${SLURM_JOB_ID}}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}
 GENERATION_ACTOR=${GENERATION_ACTOR:-nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker}

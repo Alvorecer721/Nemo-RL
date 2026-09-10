@@ -36,6 +36,14 @@ PHASE=${PHASE:-build}
 BASE_SQSH=${BASE_SQSH:?set BASE_SQSH to the release SquashFS to extend}
 VLLM_VERSION=0.26.0
 NRL_IMAGE_PROFILE=${NRL_IMAGE_PROFILE:-apertus}
+case "$NRL_IMAGE_PROFILE" in
+    full) NRL_ACTORS="" ;;
+    apertus)
+        NRL_ACTORS=$(cat "$REPO_DIR/infra/slurm/cscs/profiles/apertus.actors")
+        [[ -n "${NRL_ACTORS//[[:space:]]/}" ]] || { echo "Empty Apertus actor profile" >&2; exit 2; }
+        ;;
+    *) echo "NRL_IMAGE_PROFILE must be full or apertus" >&2; exit 2 ;;
+esac
 EXPECTED_TE=${EXPECTED_TE:-2.18.0+27486e03}
 GATE_VENVS="\
 nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker \
@@ -112,6 +120,7 @@ BUILD_INPUTS_SHA256=$(
         printf 'submodules\0%s\0' "$SUBMODULE_STATUS"
         printf 'base_release\0%s\0' "$BASE_TAG"
         printf 'image_profile\0%s\0' "$NRL_IMAGE_PROFILE"
+        printf 'actors\0%s\0' "$NRL_ACTORS"
         printf 'platform\0linux/arm64\0'
     } | sha256sum | cut -d' ' -f1
 )
@@ -228,7 +237,7 @@ podman build \
     --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
     --build-arg "NEMO_RL_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
     --build-arg "NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64" \
-    --build-arg "NRL_IMAGE_PROFILE=$NRL_IMAGE_PROFILE" \
+    --build-arg "NRL_ACTORS=$NRL_ACTORS" \
     --tag "$IMAGE" \
     "$SOURCE_CONTEXT"
 

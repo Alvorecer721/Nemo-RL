@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Declare the uv extras used by Ray actors and image build profiles.
+"""Declare the uv extras used by Ray actors and image builds.
 
 The runtime registry imports this table. Docker runs this file directly before
 the full source or dependencies are installed, so it must remain stdlib-only and
 must never import ``nemo_rl``. ``None`` means the driver's interpreter: these
 actors stay in the runtime registry but do not need a prebuilt worker venv.
 
-Profiles select image contents only; they never change runtime actor lookup.
+Build-time actor selection never changes runtime actor lookup.
 """
 
 from __future__ import annotations
@@ -96,11 +96,6 @@ VLLM_CONTROLLER_ACTORS = frozenset(
         "nemo_rl.experience.sync_rollout_actor.SyncRolloutActor",
     }
 )
-APERTUS_ACTORS = VLLM_CONTROLLER_ACTORS | {
-    "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker",
-    "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker",
-    "nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker",
-}
 
 
 def _build_stage(extras: list[str]) -> str:
@@ -111,15 +106,17 @@ def _build_stage(extras: list[str]) -> str:
 def main(argv: list[str]) -> int:
     r"""Print sorted ``actor FQN\tstage\tuv extra flags`` build rows.
 
-    Usage: actor_environments.py [--profile full|apertus] [stage] [skip extra ...]
+    Usage: actor_environments.py [--actors "actor FQN ..."] [stage] [skip extra ...]
 
     ``stage`` defaults to ``all``; ``deps`` and ``trtllm`` restrict the image layer.
     Skip extras are positional, matching the upstream Docker interface. For
-    example, ``--profile full all vllm sglang`` also omits controller and ModelOpt
+    example, ``all vllm sglang`` also omits controller and ModelOpt
     actors whose names contain neither backend name but whose extras require it.
     """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("full", "apertus"), default="full")
+    parser.add_argument(
+        "--actors", default="", help="space-separated actor FQNs; empty selects all"
+    )
     parser.add_argument(
         "stage", choices=("all", "deps", "trtllm"), nargs="?", default="all"
     )
@@ -134,10 +131,10 @@ def main(argv: list[str]) -> int:
     unknown = skip - declared
     if unknown:
         parser.error(f"unknown extras: {sorted(unknown)}")
-    selected = set(ACTOR_ENVIRONMENTS) if args.profile == "full" else APERTUS_ACTORS
+    selected = set(args.actors.split()) if args.actors else set(ACTOR_ENVIRONMENTS)
     missing = selected - ACTOR_ENVIRONMENTS.keys()
     if missing:
-        parser.error(f"profile contains unregistered actors: {sorted(missing)}")
+        parser.error(f"selection contains unregistered actors: {sorted(missing)}")
     for actor in sorted(selected):
         extras = ACTOR_ENVIRONMENTS[actor]
         if extras is None or skip.intersection(extras):

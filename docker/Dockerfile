@@ -177,7 +177,7 @@ ARG BUILD_CUSTOM_FLASHINFER_REF
 ARG SKIP_VLLM_BUILD
 ARG SKIP_SGLANG_BUILD
 ARG SKIP_TRTLLM_BUILD
-ARG NRL_IMAGE_PROFILE=full
+ARG NRL_ACTORS=""
 ARG NVTE_WITH_NCCL_EP=0
 ARG BASE_IMAGE
 ARG UV_VERSION
@@ -266,7 +266,7 @@ SKIP_EXTRAS=()
 [[ -z "${SKIP_SGLANG_BUILD:-}" ]] || SKIP_EXTRAS+=(sglang)
 [[ -z "${SKIP_TRTLLM_BUILD:-}" ]] || SKIP_EXTRAS+=(trtllm)
 "${UV_PROJECT_ENVIRONMENT}/bin/python" nemo_rl/distributed/actor_environments.py \
-    --profile "$NRL_IMAGE_PROFILE" all "${SKIP_EXTRAS[@]}" > /opt/actor_venvs.tsv
+    --actors "$NRL_ACTORS" all "${SKIP_EXTRAS[@]}" > /opt/actor_venvs.tsv
 test -s /opt/actor_venvs.tsv
 UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --no-install-project
 while IFS=$'\t' read -r actor stage extras; do
@@ -303,7 +303,7 @@ RUN --mount=type=ssh \
 # path-source member isn't copied until the COPY just above (kept late so a
 # TRT-LLM ref bump doesn't bust the cached TE/backend build).
 # WARNING: removing this check (or this layer) without also reverting --frozen
-# above would let an out-of-date lock ship silently. Keep it before the profile exit.
+# above would let an out-of-date lock ship silently. Keep it before the worker-selection exit.
 uv lock --check
 
 if ! awk -F '\t' '$2 == "trtllm" { found=1 } END { exit !found }' /opt/actor_venvs.tsv; then

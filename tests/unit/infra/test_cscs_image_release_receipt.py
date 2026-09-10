@@ -14,7 +14,7 @@ TOOLS = Path(__file__).resolve().parents[3] / "tools"
 
 @pytest.fixture
 def receipt_tool(monkeypatch):
-    path = TOOLS / "image_release_receipt.py"
+    path = TOOLS.parent / "infra/slurm/cscs/image_release_receipt.py"
     assert path.is_file(), "The build must publish an immutable assembly receipt"
     monkeypatch.syspath_prepend(str(TOOLS))
     spec = importlib.util.spec_from_file_location("image_release_receipt", path)

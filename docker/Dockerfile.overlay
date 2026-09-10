@@ -9,7 +9,7 @@ FROM ${BASE_RELEASE_IMAGE}
 ARG NEMO_RL_COMMIT
 ARG NEMO_RL_BUILD_INPUTS_SHA256
 ARG NEMO_RL_BUILD_FINGERPRINT_B64
-ARG NRL_IMAGE_PROFILE=apertus
+ARG NRL_ACTORS=""
 ARG OVERLAY_GATE_VENVS="nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
 
 ENV NEMO_RL_COMMIT=${NEMO_RL_COMMIT:-<unknown>}
@@ -29,7 +29,7 @@ RUN python tools/restamp_overlay_fingerprint.py \
 # Overlay dependencies may change. The selected actor manifest determines every
 # environment to reconcile; application-only release assembly uses offline mode.
 RUN <<"EOF" bash -exu -o pipefail
-python3 nemo_rl/distributed/actor_environments.py --profile "$NRL_IMAGE_PROFILE" \
+python3 nemo_rl/distributed/actor_environments.py --actors "$NRL_ACTORS" \
     all trtllm > /opt/actor_venvs.tsv
 test -s /opt/actor_venvs.tsv
 UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --all-groups --no-install-project

@@ -2,7 +2,7 @@
 
 This directory contains the Clariden/GH200 Slurm wrappers used to build, probe, and train with the NeMo-RL `nvcr.io/nvidia/nemo-rl:v0.7.0` container on Slingshot.
 
-The default container environment is `docker/nemo_rl.toml` in this checkout. The wrappers set `CUDA_CACHE_PATH` and Hugging Face cache paths in shell code because TOML values are not shell-expanded by Pyxis/EDF.
+The default container environment is `infra/slurm/cscs/environments/nemo_rl.toml` in this checkout. The wrappers set `CUDA_CACHE_PATH` and Hugging Face cache paths in shell code because TOML values are not shell-expanded by Pyxis/EDF.
 Its AWS OFI hook and NCCL/libfabric values follow the current
 [CSCS NCCL guidance](https://docs.cscs.ch/software/communication/nccl/): the
 portable `cuda-dl` hook, GPU Direct RDMA through `PHB`, and
@@ -101,7 +101,14 @@ controllers. Set `NRL_IMAGE_PROFILE=full` to include the other backends. The ove
 does not build TRT-LLM; use the base-image launcher with `BUILD_TRTLLM=1` and the
 full profile when that backend is needed.
 
-`docker/nemo_rl_vllm026_ncclext.toml` selects the built overlay. The bounded
+The six-worker selection is declared in [`profiles/apertus.actors`](profiles/apertus.actors).
+Both launchers pass those names through the shared Dockerfile's `NRL_ACTORS`
+argument; `full` passes an empty selection, meaning all registered workers.
+The selected names enter the dependency manifest and cache identity. The shared
+actor registry defines dependencies and validates names without importing CSCS
+configuration.
+
+`infra/slurm/cscs/environments/nemo_rl_vllm026_ncclext.toml` selects the built overlay. The bounded
 probe is `AP_VARIANT=8b-smoke bash infra/slurm/cscs/autoresearch/submit_apertus_bench.sh`: three nodes, two updates,
 trainer TP2/PP2 and rollout TP2/PP1. The wrapper also provides `70b-bench`;
 it accepts only variants whose recipes are present. These recipes are separate
@@ -124,14 +131,20 @@ operational fallback, not a speedup or native cross-node qualification.
 
 The current source builds TE 2.18 and vLLM 0.26. The September 10 build-tooling
 candidate completed native GPU checks and a bounded 70B initial/resume smoke;
-see the [qualification record](../../../docs/superpowers/plans/2026-09-10-image-build-refresh.md#final-qualification-september-10)
+see the [qualification record](docs/2026-09-10-image-build-refresh.md#final-qualification-september-10)
 for its source, immutable digest, job IDs and the nonfatal TransferQueue resume
 warning. This candidate retains the existing dependency pins; full upstream
 synchronization remains a separate integration.
 
+CSCS environment definitions are under [`environments/`](environments/), and
+build plans and qualification records are under [`docs/`](docs/).
+`image_release_receipt.py` owns the local-registry and platform rules for the
+build-to-assembly handoff. Generic dependency manifests and worker checks stay
+under the repository's `tools/` directory.
+
 ### Historical vLLM 0.25.1 release
 
-The machine-local `docker/nemo_rl_vllm0251.toml` EDF selects the custom arm64
+The machine-local `infra/slurm/cscs/environments/nemo_rl_vllm0251.toml` EDF selects the custom arm64
 image built from this checkout. It runs the baked `/opt/nemo-rl` tree and
 frozen environments under `/opt/ray_venvs`; it does not require checkout-local
 `.venv` or `venvs` directories.

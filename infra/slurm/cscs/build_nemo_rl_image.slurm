@@ -50,7 +50,11 @@ for variable in MAX_JOBS NVTE_BUILD_MAX_JOBS NVTE_BUILD_THREADS_PER_JOB TRTLLM_B
     }
 done
 case "$NRL_IMAGE_PROFILE" in
-    full|apertus) ;;
+    full) NRL_ACTORS="" ;;
+    apertus)
+        NRL_ACTORS=$(cat "$REPO_DIR/infra/slurm/cscs/profiles/apertus.actors")
+        [[ -n "${NRL_ACTORS//[[:space:]]/}" ]] || { echo "Empty Apertus actor profile" >&2; exit 2; }
+        ;;
     *) echo "NRL_IMAGE_PROFILE must be full or apertus" >&2; exit 2 ;;
 esac
 [[ "$PLATFORM" == linux/arm64 ]] || {
@@ -136,7 +140,7 @@ HERMETIC_MANIFEST="$PODMAN_STORAGE_BASE/hermetic-manifest.json"
 # limits are conservative defaults; any intentional override is recorded.
 DEPENDENCY_BUILD_ARGS=(
     "BASE_IMAGE=$BASE_IMAGE"
-    "NRL_IMAGE_PROFILE=$NRL_IMAGE_PROFILE"
+    "NRL_ACTORS=$NRL_ACTORS"
     "MAX_JOBS=$MAX_JOBS"
     "NVTE_BUILD_MAX_JOBS=$NVTE_BUILD_MAX_JOBS"
     "NVTE_BUILD_THREADS_PER_JOB=$NVTE_BUILD_THREADS_PER_JOB"
@@ -369,7 +373,7 @@ echo "Persistent image: $REGISTRY_IMAGE"
 # Only a successfully published complete image receives an assembly handoff.
 RELEASE_DIGEST=$(cat "$PODMAN_STORAGE_BASE/release.digest")
 RELEASE_RECEIPT="${SQSH_PATH%.sqsh}.release.json"
-"$HOST_PYTHON" "$REPO_DIR/tools/image_release_receipt.py" create \
+"$HOST_PYTHON" "$REPO_DIR/infra/slurm/cscs/image_release_receipt.py" create \
     --manifest "$HERMETIC_MANIFEST" --source-commit "$SOURCE_COMMIT" \
     --image-ref "${LOCAL_REGISTRY}/nemo-rl-${NRL_IMAGE_PROFILE}@${RELEASE_DIGEST}" \
     --vllm-version "$VLLM_VERSION" --output "$RELEASE_RECEIPT"

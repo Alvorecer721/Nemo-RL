@@ -31,11 +31,6 @@ ROOT = Path(__file__).resolve().parents[3]
 MANIFEST = ROOT / "nemo_rl/distributed/actor_environments.py"
 REGISTRY = ROOT / "nemo_rl/distributed/ray_actor_environment_registry.py"
 CONTROLLERS = {"AsyncTrajectoryCollector", "ReplayBuffer", "SyncRolloutActor"}
-APERTUS = CONTROLLERS | {
-    "VllmGenerationWorker",
-    "VllmAsyncGenerationWorker",
-    "MegatronPolicyWorker",
-}
 LEGACY_GROUPS = {
     "--extra vllm": CONTROLLERS | {"VllmGenerationWorker", "VllmAsyncGenerationWorker"},
     "--extra sglang": {"SGLangGenerationWorker"},
@@ -136,25 +131,38 @@ class ActorEnvironmentTests(unittest.TestCase):
         self.assertEqual(len(rows), len({row[0] for row in rows}))
         return {actor: (stage, flags) for actor, stage, flags in rows}
 
-    def test_full_profile_preserves_current_worker_environments(self) -> None:
+    def test_explicit_actor_selection_is_independent_of_site_profiles(self) -> None:
+        selected = {
+            "nemo_rl.models.value.workers.megatron_value_worker.MegatronValueWorker",
+            "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker",
+        }
+        rows = self.rows("--actors", " ".join(sorted(selected)))
+        self.assertEqual(set(rows), selected)
+        rows = self.rows("--actors", " ".join(sorted(selected)), "all", "vllm")
+        self.assertEqual(
+            {name.rsplit(".", 1)[1] for name in rows}, {"MegatronValueWorker"}
+        )
+
+    def test_unknown_explicit_actor_is_rejected_before_output(self) -> None:
+        result = self.run_cli("--actors", "missing.Worker")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("unregistered actors", result.stderr)
+
+    def test_default_selection_preserves_current_worker_environments(self) -> None:
         expected = {
             name: ("trtllm" if flags == "--extra trtllm" else "deps", flags)
             for flags, names in LEGACY_GROUPS.items()
             for name in names
         }
-        rows = self.rows("--profile", "full")
+        rows = self.rows()
         self.assertEqual(
             {name.rsplit(".", 1)[1]: row for name, row in rows.items()}, expected
         )
-        self.assertEqual(rows, self.rows())
-
-    def test_apertus_contains_only_required_megatron_vllm_workers(self) -> None:
-        rows = self.rows("--profile", "apertus")
-        self.assertEqual({actor.rsplit(".", 1)[1] for actor in rows}, APERTUS)
-        self.assertTrue(all(stage == "deps" for stage, _ in rows.values()))
+        self.assertEqual(rows, self.rows("--actors", ""))
 
     def test_skip_extras_reaches_controllers_and_quant_workers(self) -> None:
-        rows = self.rows("--profile", "full", "all", "vllm", "automodel")
+        rows = self.rows("all", "vllm", "automodel")
         names = {actor.rsplit(".", 1)[1] for actor in rows}
         self.assertFalse(names & CONTROLLERS)
         self.assertNotIn("VllmQuantGenerationWorker", names)
@@ -180,7 +188,7 @@ class ActorEnvironmentTests(unittest.TestCase):
         )
 
     def test_invalid_selection_fails_before_emitting_rows(self) -> None:
-        for args in (("--profile", "typo"), ("badstage",), ("all", "notanextra")):
+        for args in (("badstage",), ("all", "notanextra")):
             with self.subTest(args=args):
                 result = self.run_cli(*args)
                 self.assertEqual(result.returncode, 2)
@@ -192,11 +200,17 @@ class ActorEnvironmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             standalone = Path(directory) / "actor_environments.py"
             shutil.copyfile(MANIFEST, standalone)
-            result = self.run_cli("--profile", "apertus", script=standalone)
+            result = self.run_cli(script=standalone)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(result.stdout.splitlines()), 6)
+        self.assertEqual(
+            len(result.stdout.splitlines()), sum(map(len, LEGACY_GROUPS.values()))
+        )
 
     def test_docker_manifest_invocation_without_python_on_path(self) -> None:
+        selected = {
+            "nemo_rl.models.value.workers.megatron_value_worker.MegatronValueWorker",
+            "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker",
+        }
         docker_lines = (
             (ROOT / "docker/Dockerfile").read_text().replace("\\\n", "").splitlines()
         )
@@ -225,7 +239,7 @@ class ActorEnvironmentTests(unittest.TestCase):
                 env={
                     "PATH": str(empty_path),
                     "UV_PROJECT_ENVIRONMENT": str(prefix),
-                    "NRL_IMAGE_PROFILE": "apertus",
+                    "NRL_ACTORS": "\n".join(sorted(selected)),
                     "manifest_output": str(output),
                 },
                 capture_output=True,
@@ -233,7 +247,7 @@ class ActorEnvironmentTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             rows = [line.split("\t") for line in output.read_text().splitlines()]
-        self.assertEqual({row[0].rsplit(".", 1)[1] for row in rows}, APERTUS)
+        self.assertEqual({row[0] for row in rows}, selected)
         self.assertTrue(all(row[1] == "deps" for row in rows))
 
     def test_registry_keeps_legacy_commands_and_system_override(self) -> None:
