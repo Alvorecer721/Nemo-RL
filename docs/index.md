@@ -360,6 +360,8 @@ fp8.md
 guides/use-custom-vllm.md
 guides/pp-foundation-activation.md
 superpowers/plans/2026-09-05-pp-foundation.md
+superpowers/plans/2026-09-10-upstream-sync.md
+superpowers/specs/2026-09-10-upstream-sync-ledger.md
 ```
 
 ```{toctree}

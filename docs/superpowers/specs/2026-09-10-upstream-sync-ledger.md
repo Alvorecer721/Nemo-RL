@@ -67,7 +67,7 @@ Fork submodule pins are published as `integrate/2026-09-10-upstream-sync` in
 
 ## Deferred (not in this sync)
 
-- Dockerfile #4038 (`libnvidia-ml-dev` during the dependency build, `uv cache clean deep-ep`) for multi-node HybridEP: DeepEP/HybridEP are not qualified on Slingshot; deferred with the HybridEP feature itself.
+- Dockerfile #4038 (`ENV HYBRID_EP_MULTINODE=1`, `libnvidia-ml-dev` during the dependency build, `uv cache clean deep-ep`) for multi-node HybridEP: DeepEP/HybridEP are not qualified on Slingshot; deferred whole. The review caught that the `ENV` line and its cache-key term had auto-merged without the enabler; both were removed so the dependency stage matches the fork's.
 - Rollout PP>1, the 12k ablation, and every exclusive feature listed in `session/20260910_git_cleanup/feature-audit.md` (prompt-group metrics, export safeguard, fixed-manifest evaluation, RoPE verification, profiling hooks, streamed chunk divisibility, thinking penalty, refit-every-N, MFU): extracted once, separately, after this base lands.
 - Bridge local BF16 export iterator (#6005) and CPU/native load fixes (#5977/#5978) as replacements for the export safeguard: candidates, evaluated with that feature.
 
@@ -93,8 +93,10 @@ uv's wheel cache still serves every unchanged native wheel. Full report:
 TransferQueue restored-schema warmup: after a checkpoint restore, a fresh
 adapter re-warmed integer fields with float32 placeholders and the controller
 logged `dtype mismatch: existing=torch.int64, incoming=torch.float32`.
-`register_partition` now asks the controller which fields the partition's rows
-already carry and warms only the rest (`_tracked_fields`). Regressions:
+`register_partition` now asks the controller for the partition's own field map
+(GET_PARTITION_META, the request `clear_partition` uses) and warms only the
+fields it does not hold yet (`_tracked_fields`); an unknown partition yields
+no tracked fields. Regressions:
 `tests/unit/data_plane/test_tq_lifecycle.py::test_register_partition_skips_fields_the_controller_already_tracks`
 and `tests/unit/data_plane/test_restored_schema_warmup.py`.
 
@@ -145,6 +147,7 @@ Filled in as steps complete; job IDs and digests only after the runs exist.
 | Bridge merge | done, `3880d9e0`; Bridge unit/pre-commit checks pending (container) |
 | NeMo-RL merge + relock | done: merge `7bae96802` on build tip `28f599e9f` (re-anchored after the CSCS layout reorganization), followed by `fix(data_plane)`, `fix(sc)`, `test(sync)`, `docs(sync)`, `test(infra)` |
 | Static checks | ruff check/format clean on every changed Python file |
+| Code review | `/code-review high 28f599e9f..HEAD`: 7 findings, all verified and fixed in the follow-up commit (HybridEP switch, TRT-LLM venv prefix, DPO early-exit status, orphaned `sample_masks` key, baseline comment and estimator docstring, TQ probe via partition metadata, docs index) |
 | CPU unit tests | job 3350447 (venv from the new lock inside the qualified 0.26 image): data plane 290 passed / 14 skipped, build 326 passed, controller 2862 passed / 1 failed (pre-existing recipe accounting); TQ regression red against the merge commit, green with the fix |
 | Pins published | Core `c4df534e` and Bridge `3880d9e0` on `integrate/2026-09-10-upstream-sync` in both forks (ls-remote verified); NeMo branch pushed |
 | Image build / assembly / native gates | dependency rebuild job 3350563 submitted from `6b8d6d1cf`; release build, assembly and gates pending |

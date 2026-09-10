@@ -22,6 +22,7 @@ business logic. Backend init is lifted from
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import glob
 import importlib
@@ -773,6 +774,17 @@ def _from_wire(td: TensorDict) -> TensorDict:
     return new_td
 
 
+def _partition_meta(client: Any, partition_id: str) -> Any:
+    """Ask the controller for the partition's own field map (``None`` if unknown).
+
+    The sync client only issues GET_PARTITION_META inside ``clear_partition``,
+    so run its coroutine on the client's loop the way its bound sync methods do.
+    """
+    return asyncio.run_coroutine_threadsafe(
+        client._get_partition_meta(partition_id), client._loop
+    ).result()
+
+
 class TQDataPlaneClient(DataPlaneClient):
     """Adapter façade — maps NeMo-RL calls onto TransferQueue's public API."""
 
@@ -938,19 +950,9 @@ class TQDataPlaneClient(DataPlaneClient):
         already.update(fields)
 
     def _tracked_fields(self, partition_id: str) -> set[str]:
-        """Field names the controller already holds for ``partition_id``.
-
-        ``kv_retrieve_meta`` reports the fields produced on every requested
-        key, so probing all current keys returns the fields present on each
-        stored row. Fields missing from the result are still warmed.
-        """
-        listing = tq.kv_list(partition_id=partition_id).get(partition_id) or {}
-        if not listing:
-            return set()
-        meta = tq.get_client().kv_retrieve_meta(
-            keys=list(listing), partition_id=partition_id
-        )
-        return set(meta.field_schema)
+        """Field names the controller already holds metadata for in ``partition_id``."""
+        meta = _partition_meta(tq.get_client(), partition_id)
+        return set(meta.field_schema) if meta is not None else set()
 
     def claim_meta(
         self,

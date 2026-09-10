@@ -2448,7 +2448,6 @@ def test_alp_advantage_stage_preserves_raw_rewards_and_uses_occurrence_groups(
         k: []
         for k in (
             "rewards",
-            "sample_masks",
             "masked_advantages",
             "sequence_lengths",
             "num_mask_sample_filtered",
@@ -2541,7 +2540,6 @@ def _occurrence_advantage_controller(
         key: []
         for key in (
             "rewards",
-            "sample_masks",
             "masked_advantages",
             "sequence_lengths",
             "num_mask_sample_filtered",

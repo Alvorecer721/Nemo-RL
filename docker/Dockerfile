@@ -198,9 +198,6 @@ ENV UV_HTTP_TIMEOUT=60
 # Ensure DeepEP is built for H100 and B200 (also mcore inference unified memory API now invokes a torch API that requires these to be set)
 ENV TORCH_CUDA_ARCH_LIST="9.0 10.0"
 
-# Build HybridEP with inter-node transport support.
-ENV HYBRID_EP_MULTINODE=1
-
 # Ensure HybridEP/DeepEP JIT compilation can find nvcc at runtime
 ENV CUDA_HOME=/usr/local/cuda
 
@@ -241,7 +238,7 @@ COPY --from=nemo-rl --link \
 RUN --mount=type=ssh \
     --mount=type=secret,id=git_credentials \
     --mount=type=bind,from=uv-cache-seed,source=.,target=/tmp/uv-cache-seed <<"EOF" bash -exu
-CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}-${HYBRID_EP_MULTINODE}" | md5sum | cut -c1-12)
+CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}" | md5sum | cut -c1-12)
 SEED_KEY=$(cat /tmp/uv-cache-seed/.cache-key 2>/dev/null || echo "")
 if [ -n "$SEED_KEY" ] && [ "$SEED_KEY" != "$CACHE_KEY" ]; then
     echo "Cache key mismatch (base image, uv version, or build mode changed) — skipping stale seed"
@@ -347,7 +344,6 @@ set +e
 UV_CACHE_DIR=/root/.cache/uv \
     UV_PROJECT_ENVIRONMENT="${TRTLLM_BUILD_VENV}" \
     TRTLLM_WHEEL_CACHE_DIR=/root/.cache/trtllm-wheels \
-    UV_PROJECT_ENVIRONMENT=/tmp/trtllm-build-venv \
     uv sync --verbose --link-mode symlink --locked --extra trtllm --no-install-project \
     2>&1 | tee "$TRTLLM_SYNC_LOG" \
     | awk '/\[TRTLLM_CCACHE\]|Ninja progress:/ { print; fflush() }'

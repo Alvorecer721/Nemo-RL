@@ -655,7 +655,7 @@ def dpo_train(
             "no additional training is needed",
             flush=True,
         )
-        return
+        return DPOTrainStatus.COMPLETED
 
     policy.prepare_for_training()
 

@@ -502,7 +502,6 @@ class SingleControllerActor:
         self._current_epoch: int = actor_args.save_state.current_epoch
         self._step_log_dict: dict[str, list] = {
             "rewards": [],
-            "sample_masks": [],
             "masked_advantages": [],
             "alp_shaped_rewards": [],
             "alp_successes": [],
@@ -4343,13 +4342,8 @@ class SingleControllerActor:
                 rewards=rewards,
                 mask=mask,
                 repeated_batch=repeated_batch,
-                # Every rollout shapes its group's baseline, including rows the
-                # environment, overlong or logprob-error gates keep out of the
-                # loss through final_sample_mask: the certified Apertus and GLM
-                # runs trained this way, and a replayed stage reads the written
-                # mask back, so the baseline cannot depend on it. Upstream #3837
-                # passes valid_mask=final_sample_mask here; adopt that only with
-                # a matched comparison.
+                # Every rollout shapes its group's baseline; upstream #3837 passes
+                # valid_mask=final_sample_mask here (see the sync ledger).
                 **kwargs,
             )
             if self._is_ppo:
