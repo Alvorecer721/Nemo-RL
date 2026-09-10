@@ -23,6 +23,7 @@ import sys
 import tempfile
 import types
 import unittest
+import venv
 from pathlib import Path
 from unittest.mock import patch
 
@@ -194,6 +195,46 @@ class ActorEnvironmentTests(unittest.TestCase):
             result = self.run_cli("--profile", "apertus", script=standalone)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(result.stdout.splitlines()), 6)
+
+    def test_docker_manifest_invocation_without_python_on_path(self) -> None:
+        docker_lines = (
+            (ROOT / "docker/Dockerfile").read_text().replace("\\\n", "").splitlines()
+        )
+        invocation = next(
+            line
+            for line in docker_lines
+            if "nemo_rl/distributed/actor_environments.py" in line
+            and not line.startswith("COPY")
+        ).replace("/opt/actor_venvs.tsv", '"$manifest_output"')
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            prefix = fixture / "driver venv"
+            venv.EnvBuilder(with_pip=False).create(prefix)
+            empty_path = fixture / "empty-path"
+            empty_path.mkdir()
+            output = fixture / "actors.tsv"
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "--noprofile",
+                    "--norc",
+                    "-c",
+                    "SKIP_EXTRAS=(trtllm)\n" + invocation,
+                ],
+                cwd=ROOT,
+                env={
+                    "PATH": str(empty_path),
+                    "UV_PROJECT_ENVIRONMENT": str(prefix),
+                    "NRL_IMAGE_PROFILE": "apertus",
+                    "manifest_output": str(output),
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [line.split("\t") for line in output.read_text().splitlines()]
+        self.assertEqual({row[0].rsplit(".", 1)[1] for row in rows}, APERTUS)
+        self.assertTrue(all(row[1] == "deps" for row in rows))
 
     def test_registry_keeps_legacy_commands_and_system_override(self) -> None:
         for system in (False, True):

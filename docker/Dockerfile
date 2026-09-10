@@ -265,7 +265,7 @@ SKIP_EXTRAS=()
 [[ -z "${SKIP_VLLM_BUILD:-}" ]] || SKIP_EXTRAS+=(vllm)
 [[ -z "${SKIP_SGLANG_BUILD:-}" ]] || SKIP_EXTRAS+=(sglang)
 [[ -z "${SKIP_TRTLLM_BUILD:-}" ]] || SKIP_EXTRAS+=(trtllm)
-python3 nemo_rl/distributed/actor_environments.py \
+"${UV_PROJECT_ENVIRONMENT}/bin/python" nemo_rl/distributed/actor_environments.py \
     --profile "$NRL_IMAGE_PROFILE" all "${SKIP_EXTRAS[@]}" > /opt/actor_venvs.tsv
 test -s /opt/actor_venvs.tsv
 UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --no-install-project
