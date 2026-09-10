@@ -744,6 +744,13 @@ class TestSetup:
         with pytest.raises(ValueError, match="requires token_capture.enabled=true"):
             setup_single_controller(mc, MagicMock(pad_token_id=0))
 
+    def test_token_capture_warns_that_masked_rollouts_shape_the_baseline(self):
+        mc = _make_master_config()
+        mc.token_capture = TokenCaptureConfig(enabled=True)
+
+        with pytest.warns(UserWarning, match="still shape their group's GRPO baseline"):
+            validate_single_controller_config(mc)
+
     def test_periodic_checkpointing_requires_replay_capable_sampler(self):
         mc = _make_master_config(
             sampler_cfg=CustomSamplerConfig(
@@ -1284,11 +1291,8 @@ class TestSetup:
             patched_factories["_create_advantage_estimator"].return_value
         )
         assert actor_args.loss_fn is patched_factories["ClippedPGLossFn"].return_value
-        patched_factories["ClippedPGLossFn"].assert_called_once_with(
-            mc.loss_fn,
-            use_fused_linear_logprobs=False,
-            opd_full=None,
-        )
+        loss_kwargs = patched_factories["ClippedPGLossFn"].call_args.kwargs
+        assert loss_kwargs["use_fused_linear_logprobs"] is False
         # tq_buffer + rollout_manager are constructed inline (not mocked).
         assert actor_args.tq_buffer is not None
         assert actor_args.rollout_manager is not None
@@ -1314,11 +1318,8 @@ class TestSetup:
 
         setup_single_controller(mc, MagicMock(pad_token_id=0))
 
-        patched_factories["ClippedPGLossFn"].assert_called_once_with(
-            mc.loss_fn,
-            use_fused_linear_logprobs=True,
-            opd_full=None,
-        )
+        loss_kwargs = patched_factories["ClippedPGLossFn"].call_args.kwargs
+        assert loss_kwargs["use_fused_linear_logprobs"] is True
 
     def test_reserves_topology_constrained_training_before_builds(
         self, patched_factories

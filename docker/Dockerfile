@@ -241,7 +241,7 @@ RUN --mount=type=ssh \
 CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}" | md5sum | cut -c1-12)
 SEED_KEY=$(cat /tmp/uv-cache-seed/.cache-key 2>/dev/null || echo "")
 if [ -n "$SEED_KEY" ] && [ "$SEED_KEY" != "$CACHE_KEY" ]; then
-    echo "Cache key mismatch (base image, uv version, or build mode changed) — skipping stale seed"
+    echo "Cache key mismatch (base image or uv version changed) — skipping stale seed"
 elif [ -n "$SEED_KEY" ]; then
     echo "Seeding uv cache (key=${CACHE_KEY})"
     mkdir -p /root/.cache/uv

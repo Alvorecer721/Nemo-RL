@@ -25,7 +25,7 @@ from __future__ import annotations
 import inspect
 import json
 from typing import Callable
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -34,10 +34,12 @@ from tensordict import TensorDict
 
 transfer_queue = pytest.importorskip("transfer_queue")  # noqa: F841
 
+from nemo_rl.data_plane import build_data_plane_client
 from nemo_rl.data_plane.column_io import kv_first_write, read_columns
 from nemo_rl.data_plane.interfaces import DataPlaneClient, KVBatchMeta
 from nemo_rl.data_plane.schema import DP_TRAIN_FIELDS
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+from tests.unit.data_plane.conftest import _make_tq_cfg
 
 
 def _register_partition(client: DataPlaneClient) -> None:
@@ -116,9 +118,7 @@ def test_register_partition_uses_unique_schema_warmup_key(monkeypatch) -> None:
 
     monkeypatch.setattr(tq_adapter.tq, "kv_batch_put", fake_put)
     monkeypatch.setattr(tq_adapter.tq, "kv_clear", fake_clear)
-    # The controller does not know the partition yet, so nothing is tracked.
-    monkeypatch.setattr(tq_adapter, "_partition_meta", lambda client, pid: None)
-    monkeypatch.setattr(tq_adapter.tq, "get_client", lambda: object())
+    monkeypatch.setattr(tq_adapter, "_tracked_fields", lambda pid: set())
     # bootstrap=False only connects to an existing controller; stubbing that
     # lets the real __init__ run, so this test cannot drift from it.
     monkeypatch.setattr(tq_adapter, "_connect_existing", lambda: None)
@@ -177,47 +177,19 @@ def test_register_partition_uses_unique_schema_warmup_key(monkeypatch) -> None:
 def test_register_partition_skips_fields_the_controller_already_tracks(
     monkeypatch,
 ) -> None:
-    """A restored partition keeps its integer schemas.
-
-    After a TQ checkpoint restore the controller already holds field
-    metadata with the real dtypes, while a fresh adapter starts with an empty
-    warmup cache. Its float32 placeholder put is rejected by the controller
-    (``existing=torch.int64, incoming=torch.float32``), so the fields the
-    controller reports for the partition's rows must not be warmed again.
-    """
-    from types import SimpleNamespace
-
+    """Fields the controller already tracks are not warmed with a float32 placeholder."""
     from nemo_rl.data_plane.adapters import transfer_queue as tq_adapter
 
     put_calls = []
-    probed = []
-
-    def fake_partition_meta(client, partition_id):
-        probed.append(partition_id)
-        return SimpleNamespace(
-            field_schema={
-                "input_ids": {"dtype": torch.int64},
-                "routed_experts": {"dtype": torch.int16},
-            }
-        )
-
+    tracked = MagicMock(return_value={"input_ids", "routed_experts"})
     monkeypatch.setattr(
         tq_adapter.tq, "kv_batch_put", lambda **kwargs: put_calls.append(kwargs)
     )
     monkeypatch.setattr(tq_adapter.tq, "kv_clear", lambda **kwargs: None)
-    monkeypatch.setattr(tq_adapter, "_partition_meta", fake_partition_meta)
-    monkeypatch.setattr(tq_adapter.tq, "get_client", lambda: object())
+    monkeypatch.setattr(tq_adapter, "_tracked_fields", tracked)
     monkeypatch.setattr(tq_adapter, "_connect_existing", lambda: None)
 
-    client = tq_adapter.TQDataPlaneClient(
-        {
-            "enabled": True,
-            "impl": "transfer_queue",
-            "backend": "simple",
-            "claim_meta_poll_interval_s": 0.5,
-        },
-        bootstrap=False,
-    )
+    client = tq_adapter.TQDataPlaneClient(_make_tq_cfg("simple"), bootstrap=False)
     client.register_partition(
         partition_id="train",
         fields=["input_ids", "routed_experts", "advantages"],
@@ -225,7 +197,7 @@ def test_register_partition_skips_fields_the_controller_already_tracks(
         consumer_tasks=["train"],
     )
 
-    assert probed == ["train"]
+    tracked.assert_called_once_with("train")
     assert [list(call["fields"].keys()) for call in put_calls] == [["advantages"]]
 
     # Fields learned from the controller stay warm for this client.
@@ -260,7 +232,7 @@ def test_each_public_data_operation_marks_the_client_dirty(
     tq_client.kv_retrieve_keys.return_value = ["sample-0"]
     tq_client.check_consumption_status.return_value = True
     monkeypatch.setattr(tq_adapter.tq, "get_client", MagicMock(return_value=tq_client))
-    monkeypatch.setattr(tq_adapter, "_partition_meta", lambda client, pid: None)
+    monkeypatch.setattr(tq_adapter, "_tracked_fields", lambda pid: set())
     monkeypatch.setattr(tq_adapter.tq, "kv_batch_put", MagicMock())
     monkeypatch.setattr(
         tq_adapter.tq,
@@ -476,6 +448,46 @@ def test_smoke_round_trip(tq_client) -> None:
     assert tq_client.check_consumption_status("smoke", ["read"])
 
     tq_client.clear_samples(sample_ids=None, partition_id="smoke")
+
+
+def test_reregistration_over_stored_integer_rows_issues_no_placeholder(
+    tq_client,
+) -> None:
+    """A connect-only client re-registering over stored rows issues no float32 placeholder."""
+    from nemo_rl.data_plane.adapters import transfer_queue as tq_adapter
+
+    partition_id = "restored-int-schema"
+    sample_ids = ["r0", "r1"]
+    input_ids = torch.tensor([[11, 12, 13], [21, 22, 23]], dtype=torch.int64)
+    tq_client.register_partition(
+        partition_id=partition_id,
+        fields=["input_ids"],
+        num_samples=len(sample_ids),
+        consumer_tasks=["train"],
+    )
+    tq_client.put_samples(
+        sample_ids=sample_ids,
+        partition_id=partition_id,
+        fields=TensorDict({"input_ids": input_ids}, batch_size=[2]),
+    )
+
+    restored = build_data_plane_client(_make_tq_cfg("simple"), bootstrap=False)
+    with patch.object(
+        tq_adapter.tq, "kv_batch_put", wraps=tq_adapter.tq.kv_batch_put
+    ) as put:
+        restored.register_partition(
+            partition_id=partition_id,
+            fields=["input_ids"],
+            num_samples=len(sample_ids),
+            consumer_tasks=["train"],
+        )
+    put.assert_not_called()
+    out = restored.get_samples(
+        sample_ids=sample_ids, partition_id=partition_id, select_fields=["input_ids"]
+    )
+    assert out["input_ids"].dtype == torch.int64
+    assert torch.equal(out["input_ids"], input_ids)
+    tq_client.clear_samples(sample_ids=sample_ids, partition_id=partition_id)
 
 
 def test_smoke_round_trip_backends(tq_client_backends) -> None:

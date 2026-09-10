@@ -98,7 +98,7 @@ logged `dtype mismatch: existing=torch.int64, incoming=torch.float32`.
 fields it does not hold yet (`_tracked_fields`); an unknown partition yields
 no tracked fields. Regressions:
 `tests/unit/data_plane/test_tq_lifecycle.py::test_register_partition_skips_fields_the_controller_already_tracks`
-and `tests/unit/data_plane/test_restored_schema_warmup.py`.
+and `tests/unit/data_plane/test_tq_lifecycle.py::test_reregistration_over_stored_integer_rows_issues_no_placeholder` (real backend, connect-only second client).
 
 ## GLM-5.1 qualification baseline
 
@@ -148,7 +148,7 @@ Filled in as steps complete; job IDs and digests only after the runs exist.
 | NeMo-RL merge + relock | done: merge `7bae96802` on build tip `28f599e9f` (re-anchored after the CSCS layout reorganization), followed by `fix(data_plane)`, `fix(sc)`, `test(sync)`, `docs(sync)`, `test(infra)` |
 | Static checks | ruff check/format clean on every changed Python file |
 | Code review | `/code-review high 28f599e9f..HEAD`: 7 findings, all verified and fixed in `7197ac715` (HybridEP switch, TRT-LLM venv prefix, DPO early-exit status, orphaned `sample_masks` key, baseline comment and estimator docstring, TQ warmup stub, negative-filter test); a late cross-file trace reported the same three items against a pre-fix snapshot, nothing new |
-| CPU unit tests | job 3350447 (venv from the new lock inside the qualified 0.26 image): data plane 290 passed / 14 skipped, build 326 passed, controller 2862 passed / 1 failed (pre-existing recipe accounting); TQ regression red against the merge commit, green with the fix |
+| CPU unit tests | job 3350447 (venv from the new lock inside the qualified 0.26 image): data plane 290 passed / 14 skipped, build 326 passed, controller 2862 passed / 1 failed (pre-existing recipe accounting); TQ regression red against the merge commit, green with the fix; post-simplify re-run job 3352791 (same venv/image): red check fails on the merge commit, data plane 290 passed / 14 skipped, build 57 passed / 1 skipped, controller 253 passed |
 | Pins published | Core `c4df534e` and Bridge `3880d9e0` on `integrate/2026-09-10-upstream-sync` in both forks (ls-remote verified); NeMo branch pushed |
 | Image build / assembly / native gates | hermetic deps job 3350824 (1:02:23, key `173cfa6df799…`, tag `nemo-rl-apertus:vllm-0.26.0-7197ac71505b-4b083e73f774`); release job 3350826 (1:00:01) from `7197ac715`, digest `sha256:2b28f740…d8a20425`; assembly job 3351673 (7:31) -> `nemo-rl-apertus-vllm-0.26.0-7197ac71505b-4b083e73f774.sqsh` (40 GB, receipt/digest/fingerprints verified); native gate 3351743 passed (vLLM 0.26.0 API surface, TE 2.18.0+27486e03, NCCL-EP absent); workers gate 3351785 passed (stable-libtorch RMSNorm kernel, all six worker environments GPU-qualified) |
 | 70B initial + resume | initial job 3352055 (13:31, exit 0): 2 updates, 768 valid samples each, loss 0.097/0.143, grad norm 0.16/0.17, gen KL error 6e-4, step 112.8 s then 52.6 s, weight sync 3.0 s, step_2 saved (48 shards); resume job 3352056 (13:59, exit 0): loaded step_2, updates 3-4 (loss 0.085/0.108, grad norm 0.171/0.136), step_4 saved (48 shards, 1.02 TB), consumed samples 96 -> 192; `verify_resume_artifacts.py` PASS with zero TransferQueue dtype-mismatch lines; `compare_optimizer_counters.py` PASS: 16 param groups across 8 shards advanced 2 -> 4, sampled Adam tensors finite and changed. Records under `session/20260910_152226/qual70b/` |

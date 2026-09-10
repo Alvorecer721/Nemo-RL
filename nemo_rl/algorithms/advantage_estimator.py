@@ -24,8 +24,7 @@ This module provides different advantage estimation strategies:
 
 Every group-relative estimator (GRPO, GDPO, Reinforce++) accepts ``valid_mask``
 and must honor it: rows set to 0 do not vote in their siblings' baselines and
-get zero advantage. It defaults to all-ones; the SingleController leaves it at
-the default so every rollout shapes its group's baseline.
+get zero advantage. It defaults to all-ones.
 
 Reference papers:
 - ProRLv2: https://developer.nvidia.com/blog/scaling-llm-reinforcement-learning-with-prolonged-training-using-prorl-v2/

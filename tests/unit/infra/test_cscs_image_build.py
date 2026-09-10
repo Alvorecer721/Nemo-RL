@@ -329,21 +329,29 @@ class SiteProfileTests(unittest.TestCase):
         self.assertEqual(
             {actor.rsplit(".", 1)[1]: (stage, flags) for actor, stage, flags in rows},
             {
-                **{
-                    actor: ("deps", "--extra vllm")
-                    for actor in (
-                        "AsyncTrajectoryCollector",
-                        "ReplayBuffer",
-                        "SyncRolloutActor",
-                    )
-                },
+                "AsyncTrajectoryCollector": ("deps", "--extra vllm"),
+                "ReplayBuffer": ("deps", "--extra vllm"),
+                "SyncRolloutActor": ("deps", "--extra vllm"),
                 # Token capture imports nemo_gym inside the vLLM workers (#4009).
-                **{
-                    actor: ("deps", "--extra vllm --extra nemo_gym")
-                    for actor in ("VllmGenerationWorker", "VllmAsyncGenerationWorker")
-                },
+                "VllmGenerationWorker": ("deps", "--extra vllm --extra nemo_gym"),
+                "VllmAsyncGenerationWorker": ("deps", "--extra vllm --extra nemo_gym"),
                 "MegatronPolicyWorker": ("deps", "--extra mcore"),
             },
+        )
+
+
+class DockerfileSitePinTests(unittest.TestCase):
+    """The dependency stage stays free of upstream's HybridEP switch (#4038)."""
+
+    def test_hybridep_switch_stays_out_of_the_dependency_stage(self):
+        dockerfile = (
+            Path(__file__).resolve().parents[3] / "docker/Dockerfile"
+        ).read_text()
+        self.assertNotIn("HYBRID_EP_MULTINODE", dockerfile)
+        self.assertNotIn("libnvidia-ml-dev", dockerfile)
+        self.assertIn(
+            'CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}" | md5sum | cut -c1-12)',
+            dockerfile,
         )
 
 

@@ -152,6 +152,7 @@ def _make_impl(
     impl._policy_generation = generation
     impl._timeouts = timeouts if timeouts is not None else RolloutTimeouts()
     impl._deadline_registry = None
+    impl._cot_token_ids = None
     return impl
 
 

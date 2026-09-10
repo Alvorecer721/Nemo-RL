@@ -1409,6 +1409,13 @@ def validate_single_controller_config(master_config: MasterConfig) -> None:
             "token_capture.defer_routed_experts_to_policy requires "
             "token_capture.enabled=true"
         )
+    if token_capture_config.enabled:
+        warnings.warn(
+            "token_capture.enabled=true: rollouts with sample_mask 0, including "
+            "capture placeholders, still shape their group's GRPO baseline on "
+            "this line (upstream #3837's valid_mask is not adopted)",
+            stacklevel=2,
+        )
     if (
         token_capture_config.enabled
         and token_capture_config.num_reassembler_workers

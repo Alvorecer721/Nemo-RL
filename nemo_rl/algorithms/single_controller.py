@@ -4342,8 +4342,6 @@ class SingleControllerActor:
                 rewards=rewards,
                 mask=mask,
                 repeated_batch=repeated_batch,
-                # Every rollout shapes its group's baseline; upstream #3837 passes
-                # valid_mask=final_sample_mask here (see the sync ledger).
                 **kwargs,
             )
             if self._is_ppo:

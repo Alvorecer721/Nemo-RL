@@ -23,7 +23,7 @@ from nemo_rl.distributed.ray_actor_environment_registry import (
 from nemo_rl.utils.venvs import create_local_venv, finalize_prebuilt_venv
 
 
-def prefetch_venvs(filters=None, *, prebuilt: bool = False):
+def prefetch_venvs(filters=None, *, prebuilt: bool = False, max_attempts: int = 3):
     """Prefetch all virtual environments that will be used by workers.
 
     Args:
@@ -32,6 +32,8 @@ def prefetch_venvs(filters=None, *, prebuilt: bool = False):
                 be prefetched. If None, all venvs are prefetched.
         prebuilt: Finalize existing image workers with an offline frozen actor
                 sync, avoiding the base-environment switch and recording the result.
+        max_attempts: How many times to retry each venv build before recording
+                it as failed.
 
     Returns:
         The FQNs whose venv failed to build. Empty when everything succeeded.
@@ -48,9 +50,8 @@ def prefetch_venvs(filters=None, *, prebuilt: bool = False):
     prefetched = []
     failed = []
     venv_paths = {}
-    max_attempts = int(os.environ.get("NRL_VENV_PREFETCH_MAX_ATTEMPTS", "3"))
     if max_attempts < 1:
-        raise ValueError("NRL_VENV_PREFETCH_MAX_ATTEMPTS must be at least 1")
+        raise ValueError("max_attempts must be at least 1")
 
     # Group venvs by py_executable to avoid duplicating work
     venv_configs = {}
@@ -231,7 +232,9 @@ Examples:
     args = parser.parse_args()
 
     failed = prefetch_venvs(
-        filters=args.filters if args.filters else None, prebuilt=args.prebuilt
+        filters=args.filters if args.filters else None,
+        prebuilt=args.prebuilt,
+        max_attempts=int(os.environ.get("NRL_VENV_PREFETCH_MAX_ATTEMPTS", "3")),
     )
     # Exit non-zero if any venv failed to build. The per-actor loop above keeps
     # going after a failure so one broken venv does not hide the others, but the

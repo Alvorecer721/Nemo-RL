@@ -774,15 +774,17 @@ def _from_wire(td: TensorDict) -> TensorDict:
     return new_td
 
 
-def _partition_meta(client: Any, partition_id: str) -> Any:
-    """Ask the controller for the partition's own field map (``None`` if unknown).
+def _tracked_fields(partition_id: str) -> set[str]:
+    """Field names the controller already holds for ``partition_id`` (empty if unknown).
 
     The sync client only issues GET_PARTITION_META inside ``clear_partition``,
     so run its coroutine on the client's loop the way its bound sync methods do.
     """
-    return asyncio.run_coroutine_threadsafe(
+    client = tq.get_client()
+    meta = asyncio.run_coroutine_threadsafe(
         client._get_partition_meta(partition_id), client._loop
     ).result()
+    return set(meta.field_schema) if meta is not None else set()
 
 
 class TQDataPlaneClient(DataPlaneClient):
@@ -916,14 +918,10 @@ class TQDataPlaneClient(DataPlaneClient):
         if not fields:
             return
         self._mark_data_operation_started()
-        # A partition restored from a checkpoint (or written by another
-        # client) already holds field metadata with the real dtypes. The
-        # float32 placeholder below would be rejected for an integer field
-        # (``dtype mismatch: existing=torch.int64, incoming=torch.float32``),
-        # so every field the controller already tracks counts as warm.
-        known = self._tracked_fields(partition_id)
-        already.update(f for f in fields if f in known)
-        fields = [f for f in fields if f not in known]
+        # Fields the controller already tracks keep their stored dtypes; a
+        # float32 placeholder for an integer field would be rejected.
+        already |= _tracked_fields(partition_id)
+        fields = [f for f in fields if f not in already]
         if not fields:
             return
         # Use a unique KV key instead of ``client.put``'s default row id
@@ -948,11 +946,6 @@ class TQDataPlaneClient(DataPlaneClient):
         # failed put (mooncake's own retries already exhausted) poisons the
         # cache and a future retry of this call would wrongly skip warmup.
         already.update(fields)
-
-    def _tracked_fields(self, partition_id: str) -> set[str]:
-        """Field names the controller already holds metadata for in ``partition_id``."""
-        meta = _partition_meta(tq.get_client(), partition_id)
-        return set(meta.field_schema) if meta is not None else set()
 
     def claim_meta(
         self,
