@@ -1,0 +1,410 @@
+# Reference run: GLM-5.1 GRPO ready-first, 136 nodes (72 trainer TP2/PP18/EP16, 64 rollout), 10 steps
+# Source commit: b6ea7c17daf2
+# Slurm job: 3217663
+# Resolved from: recipe expanded at source commit b6ea7c17daf2 with the launcher environment; run 3217663 trained 10 steps and failed post-run route-trace validation
+# Upstream ref for annotation: 7ea279abfbeb698b092856d0dab61e7cf39bc909
+# Scrubbed prefixes: /capstor, /iopsstor, /users
+# Note: reference of what ran on the fork; not loadable by upstream as-is
+# Fork-only keys (absent from the upstream ref):
+#   - policy.generation.vllm_cfg.sleep_level
+#   - policy.megatron_cfg.checkpoint.ckpt_load_validate_sharding_integrity
+#   - policy.megatron_cfg.model_overrides.dsa_kernel_backend
+
+async_rl:
+  diagnostics: false
+  generation_fleet_health:
+    enabled: false
+  generation_router:
+    enabled: false
+  max_buffered_rollouts: 128
+  max_inflight_prompts: 32
+  min_groups_for_streaming_train: 16
+  recompute_kv_cache_after_weight_updates: false
+  rollout_failure:
+    backoff_base_s: 1.0
+    max_backoff_s: 30.0
+    max_consecutive_dropped_prompts: 0
+    max_data_attempts_per_prompt: 2
+    max_infra_attempts_per_prompt: 5
+    max_skipped_prompts: 0
+    min_step_batch_fraction: 0.9
+    native:
+      env_timeout_s: 600
+      generation_timeout_s: 3600
+    on_dropped_prompt: shrink
+  sampler:
+    max_staleness_versions: 1
+    name: ready_first
+  stall_watchdog:
+    gym_subprocess_check: false
+    interval_s: 30
+    stall_action: abort
+    stall_timeout_s: 4200
+checkpointing:
+  checkpoint_dir: <site>/disabled_checkpoints
+  checkpoint_must_save_by: null
+  enabled: false
+  higher_is_better: true
+  keep_top_k: 1
+  metric_name: null
+  model_save_format: safetensors
+  save_consolidated: false
+  save_optimizer: false
+  save_period: 100
+cluster:
+  gpus_per_node: 4
+  master_port_range_high: 1999
+  master_port_range_low: 1400
+  num_nodes: 136
+  segment_size: 4
+data:
+  default:
+    env_name: math
+    processor: math_hf_data_processor
+    prompt_file: null
+    system_prompt_file: null
+  max_input_seq_length: 512
+  num_workers: 1
+  shuffle: true
+  train:
+    dataset_name: DAPOMath17K
+    seed: 42
+    split_validation_size: 0.0
+  use_multiple_dataloader: false
+  validation: null
+data_plane:
+  backend: simple
+  claim_meta_poll_interval_s: 0.5
+  enabled: true
+  global_segment_size: 549755813888
+  impl: transfer_queue
+  local_buffer_size: 68719476736
+  num_storage_units: 2
+  storage_capacity: 1000000
+env:
+  math:
+    math_verify_impl: dapo_math_verify
+    num_workers: 32
+grpo:
+  adv_estimator:
+    minus_baseline: true
+    name: grpo
+    normalize_rewards: true
+    use_leave_one_out_baseline: true
+  advantage_clip_high: null
+  advantage_clip_low: null
+  async_grpo: null
+  batch_multiplier: 1
+  dynamic_sampling_max_gen_batches: 10
+  invalid_tool_call_advantage: null
+  malformed_thinking_advantage: null
+  max_num_epochs: 1
+  max_num_steps: 10
+  max_rollout_turns: 1
+  max_val_samples: 256
+  normalize_rewards: true
+  num_generations_per_prompt: 8
+  num_prompts_per_step: 16
+  overlong_filtering: false
+  reward_scaling:
+    enabled: false
+    source_max: 1.0
+    source_min: 0.0
+    target_max: 1.0
+    target_min: 0.0
+  reward_shaping:
+    enabled: false
+    max_response_length: 4096
+    overlong_buffer_length: 128
+    overlong_buffer_penalty: 1
+    stop_properly_penalty_coef: null
+  seed: 42
+  seq_logprob_error_threshold: null
+  skip_reference_policy_logprobs_calculation: true
+  stop_at_validation_metric: null
+  stop_at_validation_threshold: null
+  use_dynamic_sampling: false
+  use_leave_one_out_baseline: true
+  val_at_end: false
+  val_at_start: false
+  val_batch_size: 256
+  val_num_generations_per_prompt: 1
+  val_period: 0
+  val_start_at: -1
+logger:
+  gpu_monitoring:
+    collection_interval: 2
+    flush_interval: 2
+  log_dir: <site>/tb
+  mlflow:
+    experiment_name: grpo-dev
+    run_name: grpo-dev-logger
+    tracking_uri: http://localhost:5000
+  mlflow_enabled: false
+  monitor_gpus: true
+  num_val_samples_to_print: 0
+  swanlab:
+    name: grpo-dev-logger
+    project: grpo-dev
+  swanlab_enabled: false
+  tensorboard: {}
+  tensorboard_enabled: true
+  wandb:
+    log_nemo_gym_full_result_tables: false
+    name: glm51-r3-ready-first-136n-tp2-vllm-dp8
+    project: nemo-rl-glm
+  wandb_enabled: false
+loss_fn:
+  disable_ppo_ratio: false
+  force_on_policy_ratio: false
+  kl_input_clamp_value: 20.0
+  kl_output_clamp_value: 10.0
+  positive_example_nll_weight: 0.0
+  ratio_clip_c: null
+  ratio_clip_max: 0.2
+  ratio_clip_min: 0.2
+  reference_policy_kl_penalty: 0.0
+  reference_policy_kl_type: k3
+  sequence_level_importance_ratios: false
+  token_level_loss: true
+  truncated_importance_sampling_ratio: null
+  truncated_importance_sampling_ratio_min: null
+  truncated_importance_sampling_type: null
+  use_cispo: false
+  use_importance_sampling_correction: true
+  use_kl_in_reward: false
+  use_on_policy_kl_approximation: false
+on_policy_distillation: null
+policy:
+  draft:
+    aux_layer_indices: null
+    enabled: false
+    loss_weight: 0.1
+    model_name: null
+    num_layers: null
+  dtensor_cfg:
+    _v2: true
+    activation_checkpointing: false
+    automodel_kwargs: {}
+    context_parallel_size: 1
+    cpu_offload: false
+    custom_parallel_plan: null
+    enabled: false
+    lora_cfg:
+      alpha: 32
+      dim: 8
+      dropout: 0.0
+      dropout_position: post
+      enabled: false
+      exclude_modules: []
+      lora_A_init: xavier
+      match_all_linear: true
+      target_modules: []
+      use_triton: true
+    sequence_parallel: false
+    tensor_parallel_size: 1
+  dynamic_batching:
+    enabled: false
+    logprob_mb_tokens: 4096
+    sequence_length_round: 64
+    train_mb_tokens: 4096
+  generation:
+    backend: vllm
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 4
+        num_nodes: 64
+    max_new_tokens: 3584
+    mcore_generation_config:
+      block_size_tokens: 256
+      buffer_size_gb: 10
+      cuda_graph_impl: local
+      enable_chunked_prefill: true
+      enable_prefix_caching: false
+      expose_http_server: false
+      inference_cuda_graph_scope: block
+      kv_cache_management_mode: persist
+      materialize_only_last_token_logits: true
+      max_model_len: 4096
+      max_tokens: 16384
+      num_cuda_graphs: 4
+      num_speculative_tokens: 0
+      parsers: []
+      refit_backend: nccl
+      use_cuda_graphs_for_non_decode_steps: true
+    port_range_high: 4999
+    port_range_low: 3000
+    real_quant_export_cpu_offload: true
+    refit_cfg:
+      nixl:
+        backend_init_params: null
+        backend_name: UCX
+        device: cuda
+        release_after_refit: false
+        shard_expert_weights: false
+        update_weights_bucket_memory_ratio: 0.05
+    refit_transport: nccl_reshard
+    stop_strings: null
+    stop_token_ids: null
+    temperature: 1.0
+    top_k: null
+    top_p: 1.0
+    val_temperature: 1.0
+    val_top_k: null
+    val_top_p: 1.0
+    vllm_cfg:
+      async_engine: true
+      enable_vllm_metrics_logger: true
+      enforce_eager: true
+      expert_parallel_size: 32
+      gpu_memory_utilization: 0.6
+      http_refit_api_key_env_var: null
+      http_refit_server_port: null
+      kv_cache_dtype: auto
+      logprobs_mode: processed_logprobs
+      max_model_len: 4096
+      num_first_layers_in_bf16: 0
+      num_last_layers_in_bf16: 0
+      pipeline_parallel_size: 1
+      precision: bfloat16
+      reset_encoder_cache_after_weight_update: false
+      sleep_level: 1
+      tensor_parallel_size: 32
+      use_deep_gemm: false
+      use_tqdm: false
+      vllm_metrics_logger_interval: 0.5
+      zmq_refit_server_port: null
+    vllm_kwargs: {}
+  generation_batch_size: 32
+  hf_config_overrides: {}
+  logprob_batch_size: 1
+  logprob_chunk_size: 512
+  make_sequence_length_divisible_by: 2
+  max_grad_norm: 1.0
+  max_total_sequence_length: 4096
+  megatron_cfg:
+    activation_checkpointing: true
+    apply_rope_fusion: false
+    bias_activation_fusion: true
+    checkpoint:
+      async_save: true
+      ckpt_assume_constant_structure: true
+      ckpt_load_validate_sharding_integrity: false
+      fully_parallel_save: false
+    context_parallel_size: 1
+    cuda_graph_impl: none
+    cuda_graph_modules: []
+    cuda_graph_warmup_steps: 3
+    defer_fp32_logits: true
+    distributed_data_parallel_config:
+      data_parallel_sharding_strategy: optim_grads_params
+      grad_reduce_in_fp32: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      use_custom_fsdp: false
+    empty_unused_memory_level: 1
+    enabled: true
+    env_vars: null
+    expert_model_parallel_size: 16
+    expert_tensor_parallel_size: 1
+    fine_grained_activation_offloading: false
+    force_reconvert_from_hf: false
+    fp8_cfg:
+      enabled: false
+      fp8: e4m3
+      fp8_param: false
+      fp8_recipe: blockwise
+    freeze_moe_router: true
+    fused_linear_logprobs_chunk_size: 256
+    gradient_accumulation_fusion: false
+    model_overrides:
+      dsa_kernel_backend: none
+    moe_enable_deepep: false
+    moe_per_layer_logging: false
+    moe_permute_fusion: true
+    moe_router_bias_update_rate: 0.0
+    moe_router_dtype: fp64
+    moe_router_load_balancing_type: none
+    moe_shared_expert_overlap: false
+    moe_token_dispatcher_type: allgather
+    mtp_detach_heads: false
+    mtp_loss_scaling_factor: 0.0
+    mtp_num_layers: 0
+    mtp_use_repeated_layer: false
+    num_layers_in_first_pipeline_stage: 7
+    num_layers_in_last_pipeline_stage: 7
+    offload_modules: null
+    optimizer:
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-08
+      bf16: true
+      clip_grad: 1.0
+      fp16: false
+      lr: 5.0e-07
+      min_lr: 5.0e-08
+      optimizer: adam
+      optimizer_cpu_offload: false
+      optimizer_offload_fraction: 0.0
+      overlap_cpu_optimizer_d2h_h2d: false
+      params_dtype: float32
+      sgd_momentum: 0.9
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: true
+      weight_decay: 0.0
+    peft:
+      a2a_experimental: false
+      alpha: 32
+      dim: 8
+      dropout: 0.0
+      dropout_position: post
+      enabled: false
+      exclude_modules: []
+      lora_A_init_method: xavier
+      lora_B_init_method: zero
+      lora_dtype: None
+      target_modules: []
+    pipeline_dtype: bfloat16
+    pipeline_model_parallel_size: 18
+    recompute_granularity: full
+    recompute_modules: null
+    scheduler:
+      end_weight_decay: 0.0
+      lr_decay_iters: 1000
+      lr_decay_style: constant
+      lr_warmup_init: 5.0e-08
+      lr_warmup_iters: 2
+      start_weight_decay: 0.0
+      weight_decay_incr_style: constant
+    sequence_parallel: true
+    tensor_model_parallel_size: 2
+    use_fused_linear_logprobs: false
+    use_fused_weighted_squared_relu: false
+    use_gloo_process_groups: false
+  model_name: <site>/GLM-5.1
+  offload_optimizer_for_logprob: false
+  optimizer: null
+  precision: bfloat16
+  router_replay:
+    enabled: true
+  scheduler: null
+  sequence_packing:
+    algorithm: modified_first_fit_decreasing
+    enabled: false
+    logprob_mb_tokens: 4096
+    microbatch_order: packer
+    sequence_length_round: 64
+    train_mb_tokens: 4096
+  tokenizer:
+    chat_template_kwargs: null
+    name: <site>/GLM-5.1
+    use_fastokens: false
+  train_global_batch_size: 128
+  train_micro_batch_size: 1
+reward_penalties:
+  penalize_duplicated_reasoning: false
+  penalize_empty_final_answer: false
+  penalize_malformed_think_tag: false
+  penalize_unwanted_tokens: false
+  token_ids: null
