@@ -59,7 +59,7 @@ done
 
 mkdir -p "$(dirname "$RUN_LOG")"
 unset LD_PRELOAD
-srun --mpi=pmix --environment="$CONTAINER_ENV" --ntasks=1 \
+srun --mpi=pmix --environment="$CONTAINER_ENV" --chdir="$RUNTIME_REPO_DIR" --ntasks=1 \
   --gpus-per-task=4 --cpus-per-task="$SLURM_CPUS_PER_TASK" bash -c "
     set -euo pipefail
     export PYTHONUNBUFFERED=1

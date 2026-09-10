@@ -11,8 +11,8 @@
 	shallow = true
 [submodule "3rdparty/Gym-workspace/Gym"]
 	path = 3rdparty/Gym-workspace/Gym
-	url = https://github.com/swiss-ai/nemo-gym.git
-	branch = swissai-k8s
+	url = https://github.com/Anunay-Yadav/Gym.git
+	branch = ay/dev
 	shallow = true
 [submodule "3rdparty/kernels"]
 	path = 3rdparty/kernels
