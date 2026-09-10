@@ -108,7 +108,7 @@ cpu_imports = {
     "modelopt": ("modelopt",), "nemo_gym": ("nemo_gym",),
 }
 native_imports = {
-    "vllm": ("vllm._C",), "sglang": ("sgl_kernel",),
+    "vllm": ("vllm._C_stable_libtorch",), "sglang": ("sgl_kernel",),
     "mcore": ("transformer_engine.pytorch",),
     "trtllm": ("tensorrt_llm", "tensorrt_llm.bindings", "tensorrt_llm.llmapi.llm_args"),
 }

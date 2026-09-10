@@ -809,7 +809,12 @@ while [[ \$count -lt $num_retries ]]; do
 
   if [[ -n "$SETUP_COMMAND_FILE" ]] && [[ -f "$SETUP_COMMAND_FILE" ]]; then
     echo "[INFO] Running setup command from $SETUP_COMMAND_FILE..."
-    bash "$SETUP_COMMAND_FILE"
+    bash "$SETUP_COMMAND_FILE" || {
+      setup_rc=\$?
+      echo "[ERROR] Head setup failed (exit \$setup_rc); Ray will not start." >&2
+      touch "$LOG_DIR/ENDED"
+      exit "\$setup_rc"
+    }
   fi
   if cat <<EOFINNER | bash; then
 ray start --head \
@@ -1035,7 +1040,12 @@ while [[ \$count -lt $WORKER_NUM_RETRIES ]]; do
 
   if [[ -n "$SETUP_COMMAND_FILE" ]] && [[ -f "$SETUP_COMMAND_FILE" ]]; then
     echo "[INFO] Running setup command from $SETUP_COMMAND_FILE..."
-    bash "$SETUP_COMMAND_FILE"
+    bash "$SETUP_COMMAND_FILE" || {
+      setup_rc=\$?
+      echo "[ERROR] Worker setup failed (exit \$setup_rc); Ray will not start." >&2
+      touch "$LOG_DIR/ENDED"
+      exit "\$setup_rc"
+    }
   fi
   echo "[INFO][\$(date '+%Y-%m-%dT%H:%M:%S%z')] Worker \$SLURM_PROCID: starting Ray worker (attempt \$((count+1))/$WORKER_NUM_RETRIES)..."
   WORKER_BLOCK_ARG="--block"
