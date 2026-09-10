@@ -231,10 +231,25 @@ done
 # each layer while committing it. Keep that graph store allocation-local; the
 # registry below remains the durable cache across allocations.
 mkdir -p "$PODMAN_STORAGE_BASE/graphroot" "$PODMAN_STORAGE_BASE/runroot"
+# Use a reproducible helper rather than the host's fuse-overlayfs 1.1.0.
+# Newer releases fix directory lookup/iteration and deleted-file handling.
+# The profiled hardlink build hit lgetxattr ENOENT while committing a layer on
+# the host helper. A full image qualification is still required for this path.
+FUSE_OVERLAYFS_VERSION=1.18
+FUSE_OVERLAYFS_SHA256=82fed736197b2a881a822e5357b488796f654e8371ce8573a1592331510a0133
+FUSE_OVERLAYFS_BIN="$PODMAN_STORAGE_BASE/fuse-overlayfs"
+curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
+    --output "$FUSE_OVERLAYFS_BIN" \
+    "https://github.com/containers/fuse-overlayfs/releases/download/v${FUSE_OVERLAYFS_VERSION}/fuse-overlayfs-aarch64"
+printf '%s  %s\n' "$FUSE_OVERLAYFS_SHA256" "$FUSE_OVERLAYFS_BIN" | sha256sum --check -
+chmod 700 "$FUSE_OVERLAYFS_BIN"
+"$FUSE_OVERLAYFS_BIN" --version
 PODMAN_STORAGE_CONF="$PODMAN_STORAGE_BASE/storage.conf"
 printf '[storage]\ndriver = "overlay"\nrunroot = "%s"\ngraphroot = "%s"\n' \
     "$PODMAN_STORAGE_BASE/runroot" "$PODMAN_STORAGE_BASE/graphroot" \
     > "$PODMAN_STORAGE_CONF"
+printf '\n[storage.options.overlay]\nmount_program = "%s"\n' \
+    "$FUSE_OVERLAYFS_BIN" >> "$PODMAN_STORAGE_CONF"
 export CONTAINERS_STORAGE_CONF="$PODMAN_STORAGE_CONF"
 
 # Rootless Podman keeps its pause process under XDG_RUNTIME_DIR. A batch step

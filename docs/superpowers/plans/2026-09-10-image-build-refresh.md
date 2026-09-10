@@ -81,3 +81,18 @@ dependency cache. Do not bypass runtime fingerprints or change platform support.
   nodes (TP2/PP4), four rollout nodes (TP4/PP1), two initial updates, then two
   resumed updates with optimizer state. Run-specific launch artifacts stay in
   the ignored `.tmp/image-build-refresh` directory; they do not change the recipe.
+- Build 3346508 completed dependency compilation and all six worker warmups,
+  including TE 2.18, but Podman exited 125 while committing that layer:
+  `lgetxattr ... networkx/algorithms/bipartite/tests/__init__.py: no such file or directory`.
+  Build execution took 1,509 seconds; the allocation took 1,884 seconds.
+- The inspected host provides fuse-overlayfs 1.1.0. A seven-instruction,
+  network-free hardlink/removal reproduction passed with both that helper and
+  the official 1.18 ARM64 helper, so it did not reproduce or establish the exact
+  root cause. The next full build pins 1.18 in the allocation-private directory
+  and verifies its release SHA256 before execution. This is a mitigation under
+  validation, not a confirmed fix. No host packages or runtime dependencies change.
+- The actual helper setup was executed on the host: Podman reported the pinned
+  mount program, and a corrupted-download test stopped at checksum validation.
+  Shell syntax checks and an independent review passed. Upstream release notes
+  document directory iteration, lookup, and deleted-file fixes after 1.1.0:
+  https://github.com/containers/fuse-overlayfs/blob/v1.18/NEWS.
