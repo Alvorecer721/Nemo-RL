@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -146,6 +147,79 @@ def test_local_device_selection_rejects_wrong_device_assignment():
         )
 
 
+def test_duplicate_device_mapping_fails_before_communicator_initialization(
+    monkeypatch,
+):
+    probe = _load_probe()
+    config = probe.parse_args(["--stages", "2", "--streams", "1"])
+    duplicate_placements = [
+        {
+            "rank": 0,
+            "hostname": "node-a",
+            "slurm_node_id": 0,
+            "slurm_local_id": 0,
+            "cuda_device_index": 0,
+            "cuda_device_uuid": "gpu-a0",
+            "cuda_device_name": "GH200",
+        },
+        {
+            "rank": 1,
+            "hostname": "node-a",
+            "slurm_node_id": 0,
+            "slurm_local_id": 1,
+            "cuda_device_index": 1,
+            "cuda_device_uuid": "gpu-a0",
+            "cuda_device_name": "GH200",
+        },
+        {
+            "rank": 2,
+            "hostname": "node-b",
+            "slurm_node_id": 1,
+            "slurm_local_id": 0,
+            "cuda_device_index": 0,
+            "cuda_device_uuid": "gpu-b0",
+            "cuda_device_name": "GH200",
+        },
+    ]
+
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("SLURM_NODEID", "0")
+    monkeypatch.setenv("SLURM_LOCALID", "0")
+    monkeypatch.setattr(probe, "validate_runtime_environment", lambda *_: None)
+    monkeypatch.setattr(probe.dist, "init_process_group", lambda **_: None)
+    monkeypatch.setattr(probe.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(probe.dist, "get_world_size", lambda: config.world_size)
+    monkeypatch.setattr(probe.dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(probe.torch.cuda, "device_count", lambda: 4)
+    monkeypatch.setattr(probe.torch.cuda, "set_device", lambda _: None)
+    monkeypatch.setattr(
+        probe.torch.cuda,
+        "get_device_properties",
+        lambda _: SimpleNamespace(uuid="gpu-a0", name="GH200"),
+    )
+
+    def gather_placements(gathered, _local):
+        gathered[:] = duplicate_placements
+
+    monkeypatch.setattr(probe.dist, "all_gather_object", gather_placements)
+    monkeypatch.setattr(
+        probe,
+        "_collect_endpoints",
+        lambda *_: [("node-a", 1234), ("node-a", 1235)],
+    )
+    communicator_calls = []
+
+    def record_communicator_call(**_kwargs):
+        communicator_calls.append(True)
+        raise AssertionError("communicator initialization was reached")
+
+    monkeypatch.setattr(probe, "_build_groups", record_communicator_call)
+
+    with pytest.raises(RuntimeError, match="duplicate CUDA device"):
+        probe.run_probe(config)
+    assert not communicator_calls
+
+
 def test_launcher_uses_whole_node_visibility_and_slurm_local_id():
     runner = RUNNER_PATH.read_text()
 
@@ -228,6 +302,13 @@ def _rank_results(*, iterations=3, transfers=5):
             "mean_iteration_s": 0.2,
         },
     ]
+
+
+def test_device_placement_validation_accepts_unique_physical_devices():
+    probe = _load_probe()
+    config = probe.parse_args(["--stages", "2", "--streams", "1"])
+
+    probe.validate_device_placements(_rank_results(), config)
 
 
 def test_result_validation_requires_every_repeated_transfer_and_payload_check():

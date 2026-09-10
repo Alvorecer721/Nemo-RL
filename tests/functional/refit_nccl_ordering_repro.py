@@ -68,21 +68,26 @@ class ProbeConfig:
         return self.stages
 
 
-class RankResult(TypedDict):
-    """Completion evidence emitted by one distributed probe rank."""
+class RankPlacement(TypedDict):
+    """Slurm and physical CUDA placement selected by one probe rank."""
 
     rank: int
-    role: Literal["source", "receiver"]
-    stage: Optional[int]
-    completed_iterations: int
-    transfer_calls: int
-    validated_payloads: int
     hostname: str
     slurm_node_id: int
     slurm_local_id: int
     cuda_device_index: int
     cuda_device_uuid: str
     cuda_device_name: str
+
+
+class RankResult(RankPlacement):
+    """Completion evidence emitted by one distributed probe rank."""
+
+    role: Literal["source", "receiver"]
+    stage: Optional[int]
+    completed_iterations: int
+    transfer_calls: int
+    validated_payloads: int
     max_iteration_s: float
     mean_iteration_s: float
 
@@ -248,45 +253,74 @@ def _require_result_field(
         raise RuntimeError(f"rank {rank} {field}={observed!r}, expected {expected!r}")
 
 
+def validate_device_placements(
+    placements: Sequence[RankPlacement], config: ProbeConfig
+) -> None:
+    """Validate every rank's Slurm placement and selected physical GPU."""
+    if len(placements) != config.world_size:
+        raise RuntimeError(
+            f"received {len(placements)} device placements, "
+            f"expected {config.world_size}"
+        )
+    by_rank = {placement.get("rank"): placement for placement in placements}
+    if set(by_rank) != set(range(config.world_size)):
+        raise RuntimeError(
+            f"device placements are missing or duplicated: {sorted(by_rank)}"
+        )
+
+    for rank in range(config.world_size):
+        placement = by_rank[rank]
+        is_receiver = rank == config.receiver_rank
+        expected_node_id = 1 if is_receiver else 0
+        expected_local_id = 0 if is_receiver else rank
+        _require_result_field(
+            result=placement,
+            field="slurm_node_id",
+            expected=expected_node_id,
+            rank=rank,
+        )
+        _require_result_field(
+            result=placement,
+            field="slurm_local_id",
+            expected=expected_local_id,
+            rank=rank,
+        )
+        _require_result_field(
+            result=placement,
+            field="cuda_device_index",
+            expected=expected_local_id,
+            rank=rank,
+        )
+        for field in ("hostname", "cuda_device_uuid", "cuda_device_name"):
+            value = placement.get(field)
+            if not isinstance(value, str) or not value:
+                raise RuntimeError(f"rank {rank} has invalid {field}={value!r}")
+
+    slurm_placements = [
+        (placement["hostname"], placement["slurm_local_id"]) for placement in placements
+    ]
+    if len(set(slurm_placements)) != len(slurm_placements):
+        raise RuntimeError(f"duplicate placement in rank results: {slurm_placements}")
+    physical_devices = [
+        (placement["hostname"], placement["cuda_device_uuid"])
+        for placement in placements
+    ]
+    if len(set(physical_devices)) != len(physical_devices):
+        raise RuntimeError(f"duplicate CUDA device in rank results: {physical_devices}")
+
+
 def validate_rank_results(
     rank_results: Sequence[RankResult], config: ProbeConfig
 ) -> ProbeCoreResult:
     """Validate all rank completion records and return the final PASS payload."""
-    if len(rank_results) != config.world_size:
-        raise RuntimeError(
-            f"received {len(rank_results)} rank results, expected {config.world_size}"
-        )
-    by_rank = {result.get("rank"): result for result in rank_results}
-    if set(by_rank) != set(range(config.world_size)):
-        raise RuntimeError(f"rank results are missing or duplicated: {sorted(by_rank)}")
-
-    placements = [
-        (result.get("hostname"), result.get("slurm_local_id"))
-        for result in rank_results
-    ]
-    if len(set(placements)) != len(placements):
-        raise RuntimeError(f"duplicate placement in rank results: {placements}")
-    physical_devices = [
-        (result.get("hostname"), result.get("cuda_device_uuid"))
-        for result in rank_results
-    ]
-    if len(set(physical_devices)) != len(physical_devices):
-        raise RuntimeError(f"duplicate CUDA device in rank results: {physical_devices}")
+    validate_device_placements(rank_results, config)
+    by_rank = {result["rank"]: result for result in rank_results}
 
     expected_source_calls = config.iterations * config.transfers_per_stage
     for rank in range(config.stages):
         result = by_rank[rank]
         _require_result_field(result=result, field="role", expected="source", rank=rank)
         _require_result_field(result=result, field="stage", expected=rank, rank=rank)
-        _require_result_field(
-            result=result, field="slurm_node_id", expected=0, rank=rank
-        )
-        _require_result_field(
-            result=result, field="slurm_local_id", expected=rank, rank=rank
-        )
-        _require_result_field(
-            result=result, field="cuda_device_index", expected=rank, rank=rank
-        )
         _require_result_field(
             result=result,
             field="completed_iterations",
@@ -316,24 +350,6 @@ def validate_rank_results(
     )
     _require_result_field(
         result=receiver,
-        field="slurm_node_id",
-        expected=1,
-        rank=config.receiver_rank,
-    )
-    _require_result_field(
-        result=receiver,
-        field="slurm_local_id",
-        expected=0,
-        rank=config.receiver_rank,
-    )
-    _require_result_field(
-        result=receiver,
-        field="cuda_device_index",
-        expected=0,
-        rank=config.receiver_rank,
-    )
-    _require_result_field(
-        result=receiver,
         field="completed_iterations",
         expected=config.iterations,
         rank=config.receiver_rank,
@@ -351,10 +367,6 @@ def validate_rank_results(
         rank=config.receiver_rank,
     )
     for rank, result in by_rank.items():
-        for field in ("cuda_device_uuid", "cuda_device_name"):
-            value = result.get(field)
-            if not isinstance(value, str) or not value:
-                raise RuntimeError(f"rank {rank} has invalid {field}={value!r}")
         for field in ("max_iteration_s", "mean_iteration_s"):
             value = result.get(field)
             if (
@@ -416,6 +428,15 @@ def _reserve_endpoint() -> tuple[tuple[str, int], socket.socket]:
     reservation = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     reservation.bind(("", 0))
     return (socket.gethostname(), int(reservation.getsockname()[1])), reservation
+
+
+def _gather_and_validate_device_placements(
+    local_placement: RankPlacement, config: ProbeConfig
+) -> None:
+    gathered: list[Optional[RankPlacement]] = [None for _ in range(config.world_size)]
+    dist.all_gather_object(gathered, local_placement)
+    placements = [placement for placement in gathered if placement is not None]
+    validate_device_placements(placements, config)
 
 
 def _collect_endpoints(rank: int, config: ProbeConfig) -> list[tuple[str, int]]:
@@ -646,7 +667,7 @@ def _rank_result(
     rank: int,
     durations: Sequence[float],
     config: ProbeConfig,
-    device: DeviceIdentity,
+    placement: RankPlacement,
 ) -> RankResult:
     is_receiver = rank == config.receiver_rank
     return {
@@ -660,12 +681,12 @@ def _rank_result(
             * (config.stages if is_receiver else 1)
         ),
         "validated_payloads": config.iterations * config.stages if is_receiver else 0,
-        "hostname": socket.gethostname(),
-        "slurm_node_id": int(os.environ.get("SLURM_NODEID", "0")),
-        "slurm_local_id": int(os.environ.get("SLURM_LOCALID", str(rank))),
-        "cuda_device_index": device.index,
-        "cuda_device_uuid": device.uuid,
-        "cuda_device_name": device.name,
+        "hostname": placement["hostname"],
+        "slurm_node_id": placement["slurm_node_id"],
+        "slurm_local_id": placement["slurm_local_id"],
+        "cuda_device_index": placement["cuda_device_index"],
+        "cuda_device_uuid": placement["cuda_device_uuid"],
+        "cuda_device_name": placement["cuda_device_name"],
         "max_iteration_s": max(durations),
         "mean_iteration_s": sum(durations) / len(durations),
     }
@@ -710,23 +731,27 @@ def run_probe(config: ProbeConfig) -> None:
             uuid=properties.uuid,
             name=properties.name,
         )
+        placement: RankPlacement = {
+            "rank": rank,
+            "hostname": socket.gethostname(),
+            "slurm_node_id": slurm_node_id,
+            "slurm_local_id": slurm_local_id,
+            "cuda_device_index": device.index,
+            "cuda_device_uuid": device.uuid,
+            "cuda_device_name": device.name,
+        }
         print(
             "device_selection="
             + json.dumps(
                 {
-                    "cuda_device_index": device.index,
-                    "cuda_device_name": device.name,
-                    "cuda_device_uuid": device.uuid,
-                    "hostname": socket.gethostname(),
-                    "rank": rank,
-                    "slurm_local_id": slurm_local_id,
-                    "slurm_node_id": slurm_node_id,
+                    **placement,
                     "visible_device_count": visible_device_count,
                 },
                 sort_keys=True,
             ),
             flush=True,
         )
+        _gather_and_validate_device_placements(placement, config)
         endpoints = _collect_endpoints(rank, config)
         _build_groups(
             rank=rank,
@@ -786,7 +811,12 @@ def run_probe(config: ProbeConfig) -> None:
         gathered: list[Optional[RankResult]] = [None for _ in range(config.world_size)]
         dist.all_gather_object(
             gathered,
-            _rank_result(rank=rank, durations=durations, config=config, device=device),
+            _rank_result(
+                rank=rank,
+                durations=durations,
+                config=config,
+                placement=placement,
+            ),
         )
         if rank == 0:
             rank_results = [result for result in gathered if result is not None]
