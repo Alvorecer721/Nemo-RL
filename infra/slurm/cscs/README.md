@@ -120,22 +120,32 @@ the same fallback. Warm full-step means were 344.76 s for the overlay and 335.22
 for the reference on different sampled batches. These runs establish an
 operational fallback, not a speedup or native cross-node qualification.
 
-## Custom vLLM 0.25.1 GH200 image
+## GH200 images and build lifecycle
+
+The current source builds TE 2.18 and vLLM 0.26. The September 10 build-tooling
+candidate completed native GPU checks and a bounded 70B initial/resume smoke;
+see the [qualification record](../../../docs/superpowers/plans/2026-09-10-image-build-refresh.md#final-qualification-september-10)
+for its source, immutable digest, job IDs and the nonfatal TransferQueue resume
+warning. This candidate retains the existing dependency pins; full upstream
+synchronization remains a separate integration.
+
+### Historical vLLM 0.25.1 release
 
 The machine-local `docker/nemo_rl_vllm0251.toml` EDF selects the custom arm64
 image built from this checkout. It runs the baked `/opt/nemo-rl` tree and
 frozen environments under `/opt/ray_venvs`; it does not require checkout-local
 `.venv` or `venvs` directories.
 
-The current SquashFS is the clean upstream-sync release from
+The older EDF below selects the clean upstream-sync release from
 `3868458efa37288069ff3f1a2f0b892464c517e0`. The artifact includes the Apertus
 refit fixes and the upstream vLLM, SGLang, DTensor, Megatron, quantized-policy,
 trajectory, replay, and NeMo Gym worker environments.
 
-The EDF ships with the checkout and points at the certified production copy
+That EDF ships with the checkout and points at the certified historical copy
 below. The file is owner-only (`0600`); other users must build their own image.
 To run a different build, replace only its `image` value with the builder's
-reported `BUILD COMPLETE` path.
+reported `ASSEMBLY COMPLETE` path, then qualify the selected image. Do not infer
+the installed runtime version from an EDF filename or the current source tree.
 
 | Field | Value |
 | --- | --- |
