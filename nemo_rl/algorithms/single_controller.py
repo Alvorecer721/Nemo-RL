@@ -80,6 +80,7 @@ from nemo_rl.algorithms.async_utils.replay_buffer import (
 )
 from nemo_rl.algorithms.async_utils.staleness_sampler import (
     TransactionalAdmissionSampler,
+    WeightFifoSampler,
     create_sampler,
 )
 from nemo_rl.algorithms.grpo import (
@@ -2294,6 +2295,8 @@ class SingleControllerActor:
                 "min_groups_for_streaming_train must be in "
                 f"[1, {configured_target}], got {minimum}"
             )
+        if isinstance(self._sampler, WeightFifoSampler):
+            self._sampler.validate_group_count_multiple(group_count_multiple)
         select_groups = self._sampler.select
         if group_count_multiple != 1:
             # Custom samplers retain their old call when no alignment is needed.

@@ -36,6 +36,7 @@ from nemo_rl.algorithms.async_utils.replay_buffer import (
 )
 from nemo_rl.algorithms.async_utils.staleness_sampler import (
     BaseSampler,
+    WeightFifoSampler,
     WindowedSampler,
 )
 from nemo_rl.algorithms.grpo import GRPOConfig, _initial_grpo_save_state
@@ -2872,3 +2873,55 @@ def test_train_pump_legacy_custom_sampler_contract(multiple: int) -> None:
         with pytest.raises(ValueError, match="sampler.select must support"):
             asyncio.run(asyncio.wait_for(ctrl._train_pump(), timeout=1.0))
     assert ctrl._train_steps == 0
+
+
+def test_train_pump_rejects_weight_fifo_alignment_before_eviction_or_claims() -> None:
+    ctrl = _train_pump_controller(sampler=None)
+    ctrl._algo_cfg.num_prompts_per_step = 6
+    ctrl._trainer_version = 1
+    ctrl._trainer.get_train_group_count_multiple = lambda *args, **kwargs: 3
+    rows: set[str] = set()
+    cleared: list[str] = []
+
+    def clear_samples(*, sample_ids: list[str], **kwargs: Any) -> None:
+        cleared.extend(sample_ids)
+        rows.difference_update(sample_ids)
+
+    ctrl._dp_client.clear_samples = clear_samples
+    buffer = TQReplayBuffer(
+        ctrl._dp_client,
+        "rollout_data",
+        pad_value_dict={},
+        include_message_violation_fields=False,
+    )
+    buffer.set_data_plane_checkpoint_barrier(ctrl._data_plane_checkpoint_barrier)
+    ctrl._buffer = buffer
+    ctrl._sampler = WeightFifoSampler(buffer, max_staleness_versions=1)
+    for i, weight in enumerate([0, -1, 0, 1, 1, 1, 1, 1]):
+        group_id = f"fifo-{i}"
+        buffer.reserve(weight_version=weight, group_id=group_id)
+        sample_id = f"{group_id}_g0"
+        buffer.meta_list[-1] = KVBatchMeta(
+            partition_id="rollout_data",
+            task_name=None,
+            sample_ids=[sample_id],
+            sequence_lengths=[1],
+            tags=[{"weight_version": weight}],
+        )
+        buffer.ready_list[-1] = True
+        buffer.end_weight_list[-1] = weight
+        rows.add(sample_id)
+
+    async def exercise() -> None:
+        await buffer.claim_for_training([0])
+        with pytest.raises(
+            ValueError, match="WeightFifoSampler.*group_count_multiple=1"
+        ):
+            await asyncio.wait_for(ctrl._train_pump(), timeout=1.0)
+        assert buffer.training_owned_group_ids() == {"fifo-0"}
+        assert buffer.start_weight_list == [-1, 0, 1, 1, 1, 1, 1]
+        assert rows == {f"fifo-{i}_g0" for i in range(8)}
+        assert cleared == []
+        assert ctrl._train_steps == 0
+
+    asyncio.run(exercise())

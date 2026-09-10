@@ -792,7 +792,6 @@ NOT_A_SAMPLER_CLASS = object()
     [
         (WindowedSampler, {"max_staleness_versions": 1}),
         (ReadyFirstSampler, {"max_staleness_versions": 1}),
-        (WeightFifoSampler, {"max_staleness_versions": 1}),
         (InOrderSampler, {"max_lookahead_versions": 1}),
     ],
 )
@@ -862,3 +861,32 @@ def test_aligned_selection_waits_for_rounded_up_minimum() -> None:
         )
     ) == (None, 0)
     assert len(buffer.meta_list) == 5
+
+
+@pytest.mark.parametrize("multiple", [1, 3])
+def test_weight_fifo_rejects_alignment_that_can_strand_an_old_tail(
+    multiple: int,
+) -> None:
+    buffer = FakeBuffer()
+    buffer.add("old-tail", 0)
+    for i in range(5):
+        buffer.add(f"new-{i}", 1)
+    sampler = WeightFifoSampler(buffer, max_staleness_versions=1)
+    selection = sampler.select(
+        current_train_weight=1,
+        min_prompt_groups=1,
+        max_prompt_groups=6,
+        group_count_multiple=multiple,
+    )
+    if multiple == 3:
+        with pytest.raises(
+            ValueError, match="WeightFifoSampler.*group_count_multiple=1"
+        ):
+            _run(selection)
+        assert len(buffer.meta_list) == 6
+        assert buffer.remove_calls == []
+    else:
+        meta, count = _run(selection)
+        assert count == 1
+        assert meta.sample_ids == ["old-tail_g0"]
+        assert len(buffer.meta_list) == 5

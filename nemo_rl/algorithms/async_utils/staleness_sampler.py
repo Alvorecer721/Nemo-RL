@@ -538,6 +538,8 @@ class WeightFifoSampler(_GatedSampler):
 
     ``select`` drains the oldest in-window ``start_weight`` first and waits for
     that weight's batch to fill. Evict uses the weight window (default).
+    Group alignment beyond one is unsupported: per-version cohorts may leave
+    a tail that cannot advance training to the next eviction window.
     """
 
     # Committed groups retain start_weight, which is sufficient for selection.
@@ -546,6 +548,16 @@ class WeightFifoSampler(_GatedSampler):
     def __init__(self, buffer: TQReplayBuffer, *, max_staleness_versions: int) -> None:
         super().__init__(buffer, gate_window=max_staleness_versions)
         self.max_staleness_versions = max_staleness_versions
+
+    @staticmethod
+    def validate_group_count_multiple(group_count_multiple: int) -> None:
+        """Reject alignment that can strand a strict FIFO weight-version tail."""
+        if group_count_multiple != 1:
+            raise ValueError(
+                "WeightFifoSampler requires group_count_multiple=1: strict "
+                "weight-version FIFO cannot drain sub-quantum version tails. "
+                "Use compatible batching or a sampler that supports aligned selection."
+            )
 
     async def select(
         self,
@@ -558,6 +570,7 @@ class WeightFifoSampler(_GatedSampler):
         self._validate_group_bounds(
             min_prompt_groups, max_prompt_groups, group_count_multiple
         )
+        self.validate_group_count_multiple(group_count_multiple)
         min_valid_version = max(0, current_train_weight - self.max_staleness_versions)
         in_window = [
             weight
