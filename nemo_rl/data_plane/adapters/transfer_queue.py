@@ -903,11 +903,21 @@ class TQDataPlaneClient(DataPlaneClient):
         fields = [f for f in fields if f not in already]
         if not fields:
             return
+        self._mark_data_operation_started()
+        # A partition restored from a checkpoint (or written by another
+        # client) already holds field metadata with the real dtypes. The
+        # float32 placeholder below would be rejected for an integer field
+        # (``dtype mismatch: existing=torch.int64, incoming=torch.float32``),
+        # so every field the controller already tracks counts as warm.
+        known = self._tracked_fields(partition_id)
+        already.update(f for f in fields if f in known)
+        fields = [f for f in fields if f not in known]
+        if not fields:
+            return
         # Use a unique KV key instead of ``client.put``'s default row id
         # (``0@field`` at the Mooncake storage layer). Mooncake does not
         # support upsert, so repeated schema warmups can collide with
         # stale metadata from a previous registration.
-        self._mark_data_operation_started()
         schema_key = (
             f"__schema__:{partition_id}:{os.getpid()}:{id(self)}:{time.time_ns()}"
         )
@@ -926,6 +936,21 @@ class TQDataPlaneClient(DataPlaneClient):
         # failed put (mooncake's own retries already exhausted) poisons the
         # cache and a future retry of this call would wrongly skip warmup.
         already.update(fields)
+
+    def _tracked_fields(self, partition_id: str) -> set[str]:
+        """Field names the controller already holds for ``partition_id``.
+
+        ``kv_retrieve_meta`` reports the fields produced on every requested
+        key, so probing all current keys returns the fields present on each
+        stored row. Fields missing from the result are still warmed.
+        """
+        listing = tq.kv_list(partition_id=partition_id).get(partition_id) or {}
+        if not listing:
+            return set()
+        meta = tq.get_client().kv_retrieve_meta(
+            keys=list(listing), partition_id=partition_id
+        )
+        return set(meta.field_schema)
 
     def claim_meta(
         self,

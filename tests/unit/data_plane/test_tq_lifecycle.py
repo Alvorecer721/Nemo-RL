@@ -116,6 +116,8 @@ def test_register_partition_uses_unique_schema_warmup_key(monkeypatch) -> None:
 
     monkeypatch.setattr(tq_adapter.tq, "kv_batch_put", fake_put)
     monkeypatch.setattr(tq_adapter.tq, "kv_clear", fake_clear)
+    # An unknown partition has no rows, so nothing is tracked yet.
+    monkeypatch.setattr(tq_adapter.tq, "kv_list", lambda partition_id=None: {})
     # bootstrap=False only connects to an existing controller; stubbing that
     # lets the real __init__ run, so this test cannot drift from it.
     monkeypatch.setattr(tq_adapter, "_connect_existing", lambda: None)
@@ -169,6 +171,75 @@ def test_register_partition_uses_unique_schema_warmup_key(monkeypatch) -> None:
         {"keys": [schema_keys[0]], "partition_id": "obj-backend"},
         {"keys": [schema_keys[1]], "partition_id": "obj-backend"},
     ]
+
+
+def test_register_partition_skips_fields_the_controller_already_tracks(
+    monkeypatch,
+) -> None:
+    """A restored partition keeps its integer schemas.
+
+    After a TQ checkpoint restore the controller already holds field
+    metadata with the real dtypes, while a fresh adapter starts with an empty
+    warmup cache. Its float32 placeholder put is rejected by the controller
+    (``existing=torch.int64, incoming=torch.float32``), so the fields the
+    controller reports for the partition's rows must not be warmed again.
+    """
+    from types import SimpleNamespace
+
+    from nemo_rl.data_plane.adapters import transfer_queue as tq_adapter
+
+    put_calls = []
+    retrieved = []
+
+    class _Client:
+        def kv_retrieve_meta(self, *, keys, partition_id, create=False):
+            retrieved.append((tuple(keys), partition_id, create))
+            return SimpleNamespace(
+                field_schema={
+                    "input_ids": {"dtype": torch.int64},
+                    "routed_experts": {"dtype": torch.int16},
+                }
+            )
+
+    monkeypatch.setattr(
+        tq_adapter.tq, "kv_batch_put", lambda **kwargs: put_calls.append(kwargs)
+    )
+    monkeypatch.setattr(tq_adapter.tq, "kv_clear", lambda **kwargs: None)
+    monkeypatch.setattr(
+        tq_adapter.tq,
+        "kv_list",
+        lambda partition_id=None: {"train": {"row-0": {}, "row-1": {}}},
+    )
+    monkeypatch.setattr(tq_adapter.tq, "get_client", lambda: _Client())
+    monkeypatch.setattr(tq_adapter, "_connect_existing", lambda: None)
+
+    client = tq_adapter.TQDataPlaneClient(
+        {
+            "enabled": True,
+            "impl": "transfer_queue",
+            "backend": "simple",
+            "claim_meta_poll_interval_s": 0.5,
+        },
+        bootstrap=False,
+    )
+    client.register_partition(
+        partition_id="train",
+        fields=["input_ids", "routed_experts", "advantages"],
+        num_samples=2,
+        consumer_tasks=["train"],
+    )
+
+    assert retrieved == [(("row-0", "row-1"), "train", False)]
+    assert [list(call["fields"].keys()) for call in put_calls] == [["advantages"]]
+
+    # Fields learned from the controller stay warm for this client.
+    client.register_partition(
+        partition_id="train",
+        fields=["input_ids", "routed_experts"],
+        num_samples=2,
+        consumer_tasks=["train"],
+    )
+    assert len(put_calls) == 1
 
 
 def test_data_operation_guard_covers_the_full_interface() -> None:
