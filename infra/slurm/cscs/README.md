@@ -203,36 +203,79 @@ The build has two different stores:
   `OUTPUT_DIR` is the delivered Container Engine image and also survives the
   allocation.
 
-The launcher cleans interrupted Buildah containers before building, restores a
-pinned `registry:3` bootstrap image, waits for registry readiness, pushes the
-final OCI manifest, exports SquashFS, verifies its superblock, and checks the
-vLLM renderer/tokenizer/tool-parser import boundary. It reports elapsed time for
-each stage and storage bytes/inodes. Image assembly checks selected worker
-environments offline and writes `/opt/nemo-rl-image-qualification.json`.
+Build, assembly, and runtime qualification are separate operations:
 
-For a source-only release, the launcher verifies the current dependency
-fingerprint and resumes from the content-addressed hermetic image. Its embedded
-manifest must match the current lockfile, recursive submodule pins, actor profile,
-immutable base image, compiler settings, and dependency build inputs. Application-only
-changes can reuse this cache. The launcher first builds and persists `release-core`,
-then clears only its newly created private Podman graph, restores that exact core,
-and commits the final release layer before export. This keeps the broad build cache and the last delta from competing for
-the fixed 334 GiB `/tmp` mount.
+1. **Build:** `build_nemo_rl_image.slurm` owns every Dockerfile instruction,
+   compilation, package installation, worker finalization, and offline CPU check.
+   It publishes the completed OCI image and prints a `*.release.json` receipt.
+   The receipt records the immutable registry digest, source commit, dependency
+   manifest and runtime fingerprint. The builder does not export SquashFS.
+2. **Assembly:** `assemble_nemo_rl_image.slurm` requires that receipt. It pulls
+   the exact digest, checks the image labels and fingerprints, and exports it
+   using the verified local image ID (the installed Enroot parser does not accept
+   `@sha256` references). It performs no package installation or Dockerfile build.
+   Missing artifacts and mismatches fail without a rebuild fallback.
+3. **Qualification:** `qualify_nemo_rl_image.sh` runs the native vLLM/TE API
+   checks against an assembled image on a compute node. Training, distributed
+   refit and optimizer-resume qualification remain separate Slurm jobs.
 
-When dependencies change, use two allocations from the same clean source commit.
-The first invocation with `auto` builds and publishes only the hermetic target
-when the matching cache is absent, then exits successfully. A second invocation
-with `auto` finds and verifies that cache and assembles the release. No tag or
-fingerprint edit is needed between allocations. To queue both for a known rebuild:
+The assembly exporter must succeed. An allocation-local Docker compatibility
+helper handles only Enroot's cleanup call: it changes to `/` before invoking
+Podman, because the installed Enroot removes its working directory first.
+This prevents the reproduced `getcwd` cleanup failure while preserving genuine
+export and cleanup errors. No host packages or prepared-image files are changed.
+ `unsquashfs -no-progress -pf -` then reads
+metadata and decompresses all file data to discarded output, without storing a
+second extracted filesystem. Only after that succeeds is the final `.sqsh`
+name published atomically without overwriting another artifact. Build and
+assembly write separate timing logs. Offline worker checks performed during
+build are recorded in `/opt/nemo-rl-image-qualification.json`; they do not claim
+GPU or distributed training qualification.
+
+For a source-only release, the builder verifies the dependency fingerprint and
+resumes from the content-addressed hermetic image. It prepares and persists
+`release-core`, resets only its private Podman graph, then completes the final
+release and publishes its receipt. All of this remains on the build side of
+the handoff. Application changes do not invalidate the dependency cache.
+
+If dependencies changed, two build allocations are needed: the first `auto`
+invocation publishes the missing hermetic image and exits; the second finds
+that cache and prepares the complete release. A known dependency rebuild can
+be queued as follows from a clean, fully initialized repository:
 
 ```bash
-deps_job=$(sbatch --parsable --chdir="$PWD" --export=HERMETIC_CACHE_TAG=rebuild infra/slurm/cscs/build_nemo_rl_image.slurm)
-sbatch --dependency="afterok:$deps_job" --chdir="$PWD" infra/slurm/cscs/build_nemo_rl_image.slurm
+deps_job=$(sbatch --parsable --chdir="$PWD" --export="REPO_DIR=$PWD,HERMETIC_CACHE_TAG=rebuild" infra/slurm/cscs/build_nemo_rl_image.slurm)
+sbatch --dependency="afterok:$deps_job" --chdir="$PWD" --export="REPO_DIR=$PWD" infra/slurm/cscs/build_nemo_rl_image.slurm
 ```
 
-`PODMAN_STORAGE_BASE` must be a new absolute directory because the release path
-resets it; an existing directory is rejected. Do not move the overlay graph to Lustre; that filesystem does not
-provide the extended-attribute semantics Podman needs.
+After the build prints `PREPARED IMAGE BUILD COMPLETE`, set `RELEASE_RECEIPT`
+to the exact printed JSON path and submit assembly:
+
+```bash
+: "${RELEASE_RECEIPT:?Set this to the receipt printed by the successful build}"
+sbatch --chdir="$PWD" --export="REPO_DIR=$PWD,RELEASE_RECEIPT=$RELEASE_RECEIPT" infra/slurm/cscs/assemble_nemo_rl_image.slurm
+```
+
+An assembly retry uses the same receipt and image digest. Pass the original
+`CACHE_DIR` if it was overridden during build, and a different `OUTPUT_DIR`
+only when intentionally producing another copy. Assembly needs this repository's
+host tools, but does not require its application source/submodules to match the
+image; the receipt identifies the image being packaged. `REPO_DIR` is explicit
+because Slurm executes a spooled copy of the batch script.
+
+After assembly prints `ASSEMBLY COMPLETE`, run the separate native checks in a
+compute allocation with `SQSH_PATH` set to that image:
+
+```bash
+SQSH_PATH="$SQSH_PATH" bash infra/slurm/cscs/qualify_nemo_rl_image.sh
+```
+
+`PODMAN_STORAGE_BASE` must be a new absolute directory. Never move its overlay
+graph onto Lustre; keep only registry data and delivered artifacts there.
+Both entry points share the same private-store guard, pinned host helper and
+registry lock through `image_storage.sh`. The local registry endpoint exists
+only while its allocation is running, but the receipt's digest and registry
+blobs survive in `CACHE_DIR`.
 
 ### Failure and recovery ledger
 

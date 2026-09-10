@@ -45,7 +45,7 @@ class _ManifestFixture(unittest.TestCase):
                 "import hashlib, json\nfrom pathlib import Path\n"
                 "root = Path(__file__).resolve().parents[1]\n"
                 "print(json.dumps({p: hashlib.md5((root/p).read_bytes()).hexdigest() "
-                "for p in ['pyproject.toml', 'uv.lock']}))\n"
+                "for p in ['pyproject.toml', 'uv.lock', 'nemo_rl/distributed/actor_environments.py']}))\n"
             ),
             "nemo_rl/distributed/actor_environments.py": (
                 "import sys\nprofile = sys.argv[sys.argv.index('--profile') + 1]\n"
@@ -270,7 +270,7 @@ class ImageBuildManifestTests(_ManifestFixture):
                 self.tool.select_cache(mode, key, available=exists)
 
 
-class BuilderFlowTests(_ManifestFixture):
+class _BuilderFixture(_ManifestFixture):
     """Exercise the real launcher, replacing only container/storage services."""
 
     def setUp(self):
@@ -279,12 +279,19 @@ class BuilderFlowTests(_ManifestFixture):
         self.addCleanup(self.services.cleanup)
         self.external = Path(self.services.name)
         (self.repo / "tools/image_build_manifest.py").write_bytes(TOOL.read_bytes())
+        (self.repo / "tools/image_release_receipt.py").write_bytes(
+            (TOOL.parent / "image_release_receipt.py").read_bytes()
+        )
         launcher = TOOL.parents[1] / "infra/slurm/cscs/build_nemo_rl_image.slurm"
         helper = "#!/bin/sh\nexit 0\n"
         self.launcher = self.external / "build-image.slurm"
         # Exercise the real checksum guard against a small downloaded fixture.
-        self.launcher.write_text(
-            launcher.read_text().replace(
+        self.launcher.write_text(launcher.read_text())
+        (self.repo / "infra/slurm/cscs").mkdir(parents=True)
+        (self.repo / "infra/slurm/cscs/image_storage.sh").write_text(
+            (launcher.parent / "image_storage.sh")
+            .read_text()
+            .replace(
                 "82fed736197b2a881a822e5357b488796f654e8371ce8573a1592331510a0133",
                 hashlib.sha256(helper.encode()).hexdigest(),
             )
@@ -308,23 +315,58 @@ if name == 'curl':
         print(os.environ.get('FAKE_HTTP_STATUS', '404'), end='')
 elif name == 'podman':
     if args[0] == 'build':
+        if os.environ.get('FAKE_ASSEMBLY'):
+            raise SystemExit('Assembly must never invoke build')
         raise SystemExit(int(os.environ.get('FAKE_BUILD_EXIT', '0')))
+    elif args[0] == 'push' and '--digestfile' in args:
+        Path(args[args.index('--digestfile') + 1]).write_text('sha256:' + 'c' * 64)
+    elif args[0] == 'pull' and '@sha256:' in args[-1]:
+        raise SystemExit(int(os.environ.get('FAKE_PULL_EXIT', '0')))
+    elif args[:2] == ['image', 'inspect']:
+        receipt = json.loads(Path(os.environ['RELEASE_RECEIPT']).read_text())
+        print(json.dumps([{'Id': 'd' * 64, 'Os': 'linux', 'Architecture': 'arm64',
+            'RepoDigests': [receipt['image_ref']], 'Labels': {
+                'org.opencontainers.image.revision': receipt['source_commit'],
+                'org.opencontainers.image.source-inputs': receipt['build_inputs_sha256']}}]))
     elif args[0] == 'info':
         print(os.environ.get('FAKE_GRAPH_ROOT', os.environ['PODMAN_STORAGE_BASE'] + '/graphroot'))
     elif args[0] == 'run' and '/bin/cat' in args:
-        payload = json.loads((Path(os.environ['PODMAN_STORAGE_BASE']) / 'hermetic-manifest.json').read_text())
+        if os.environ.get('FAKE_ASSEMBLY'):
+            receipt = json.loads(Path(os.environ['RELEASE_RECEIPT']).read_text())
+            payload = receipt['hermetic_manifest']
+            if args[-1] == '/opt/nemo_rl_container_fingerprint':
+                payload = payload['inputs']['dependency_fingerprint']
+                if os.environ.get('FAKE_FINGERPRINT_MISMATCH'):
+                    payload = {}
+        else:
+            payload = json.loads((Path(os.environ['PODMAN_STORAGE_BASE']) / 'hermetic-manifest.json').read_text())
         if os.environ.get('FAKE_EMBEDDED_MODE') == 'mismatch':
             payload['inputs']['profile'] = 'wrong'
         print(json.dumps(payload))
 elif name == 'enroot':
     if args[0] == 'import':
         Path(args[args.index('-o') + 1]).write_text('fixture squashfs')
+        raise SystemExit(int(os.environ.get('FAKE_EXPORT_EXIT', '0')))
     else:
-        sys.stdin.read()
+        raise SystemExit('Qualification must be a separate phase')
+elif name == 'unsquashfs':
+    raise SystemExit(int(os.environ.get('FAKE_EXPORT_INVALID', '0')))
+elif name in {'uv', 'pip', 'gcc', 'nvcc'}:
+    raise SystemExit('Assembly must never install or compile')
 """
         )
         service_script.chmod(0o755)
-        for name in ["podman", "curl", "lfs", "enroot"]:
+        for name in [
+            "podman",
+            "curl",
+            "lfs",
+            "enroot",
+            "unsquashfs",
+            "uv",
+            "pip",
+            "gcc",
+            "nvcc",
+        ]:
             (self.external / name).symlink_to(service_script)
         self.environment = dict(os.environ) | {
             "PATH": f"{self.external}:{os.environ['PATH']}",
@@ -378,6 +420,8 @@ elif name == 'enroot':
             else []
         )
 
+
+class BuilderFlowTests(_BuilderFixture):
     def test_auto_miss_publishes_hermetic_and_stops_before_assembly(self):
         result = self.launch()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -389,17 +433,24 @@ elif name == 'enroot':
         self.assertFalse(any(call[0] == "enroot" for call in self.calls()))
         self.assertTrue(list((self.external / "cache/manifests").glob("*.json")))
 
-    def test_auto_hit_assembles_and_exports_after_embedded_manifest_verification(self):
+    def test_auto_hit_prepares_release_after_embedded_manifest_verification(self):
         result = self.launch(FAKE_HTTP_STATUS="200")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         builds = [call for call in self.calls() if call[:2] == ["podman", "build"]]
         self.assertEqual(len(builds), 2)
         self.assertIn("--target=release-core", builds[0])
         self.assertIn("--target=release", builds[1])
-        self.assertTrue(list((self.external / "images").glob("*.sqsh")))
+        self.assertTrue(list((self.external / "images").glob("*.release.json")))
         report = next((self.external / "images").glob("*.timings.log")).read_text()
-        self.assertIn("stage=squashfs-export", report)
+        self.assertNotIn("stage=squashfs-export", report)
         self.assertIn("stage=release-core-build", report)
+
+    def test_build_publishes_receipt_without_exporting_squashfs(self):
+        result = self.launch(FAKE_HTTP_STATUS="200")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(call[0] == "enroot" for call in self.calls()))
+        self.assertTrue(list((self.external / "images").glob("*.release.json")))
+        self.assertFalse(list((self.external / "images").glob("*.sqsh")))
 
     def test_mismatched_embedded_image_is_rejected_before_build(self):
         result = self.launch(FAKE_HTTP_STATUS="200", FAKE_EMBEDDED_MODE="mismatch")
@@ -452,8 +503,8 @@ elif name == 'enroot':
             PODMAN_STORAGE_BASE=str(self.external / "second-private-store"),
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("BUILD COMPLETE:", result.stdout)
-        self.assertTrue(list((self.external / "images").glob("*.sqsh")))
+        self.assertIn("PREPARED IMAGE BUILD COMPLETE:", result.stdout)
+        self.assertTrue(list((self.external / "images").glob("*.release.json")))
 
     def test_dirty_source_is_rejected_before_container_operations(self):
         (self.repo / "nemo_rl/application.py").write_text("dirty = True\n")
