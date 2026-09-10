@@ -1,0 +1,14 @@
+# Hosted Math-with-Judge smoke/probe variant. It preserves the Apertus Gym
+# probe settings and changes only the Gym resource configuration. The explicit
+# URL in math_with_judge_remote.yaml makes Gym skip local Math verifier startup
+# and call the hosted resource instead.
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe-gym.yaml
+
+env:
+  nemo_gym:
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/math_with_judge/configs/math_with_judge_remote.yaml
+
+logger:
+  log_dir: logs/grpo-apertus-gym-remote
