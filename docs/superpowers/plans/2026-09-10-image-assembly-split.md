@@ -56,6 +56,14 @@
   `cd /`; the narrow adapter resolved it without ignoring export errors.
 - Independent review found and resolved Slurm spooling paths, Enroot digest URI
   parsing, and partial-export acceptance. Final review: LGTM.
-- The complete production candidate remains in image-build-refresh at source
-  2a044e94d. Its export and 70B initial/resume qualification are separate pending
-  validation; the small fixture does not establish training correctness.
+- Full production-image validation subsequently passed: assembly 3348587,
+  native GPU workers 3348656, initial 70B updates 3348662, and resumed updates
+  3348663. Source image `2a044e94d` was reused unchanged. The initial run saved
+  step 2; the resume completed steps 3 and 4 and saved step 4.
+- Assembly took 420 script seconds without compilation or dependency install.
+  Both training jobs exited 0:0 with finite metrics and 48 nonempty DCP shards
+  per saved checkpoint. This is bounded correctness qualification, not a
+  throughput benchmark or complete optimizer-tensor parity test.
+- One nonfatal TransferQueue restored-schema dtype warning occurred on resume;
+  the relevant runtime path is unchanged by this branch. Exact evidence and
+  scope are recorded in `2026-09-10-image-build-refresh.md` alongside this plan.
