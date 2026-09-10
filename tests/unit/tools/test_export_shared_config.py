@@ -178,3 +178,29 @@ def test_upstream_identifiers_from_git_rejects_unknown_ref(tool, tmp_path):
     _init_repo(tmp_path, {"nemo_rl/a.py": "num_prompts_per_step = 1\n"})
     with pytest.raises(RuntimeError, match="git grep failed"):
         tool.upstream_identifiers_from_git(tmp_path, "no-such-ref")
+
+
+def test_load_resolved_recipe_registers_nemo_rl_resolvers(tool, tmp_path):
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text("policy:\n  train_mb_tokens: ${mul:2,3}\n")
+    cfg = tool.load_resolved(config=None, recipe=recipe)
+    assert cfg["policy"]["train_mb_tokens"] == 6
+
+
+def test_upstream_identifiers_from_git_keeps_short_names(tool, tmp_path):
+    _init_repo(tmp_path, {"nemo_rl/a.py": "lr = 1\n"})
+    assert "lr" in tool.upstream_identifiers_from_git(tmp_path, "HEAD")
+
+
+SNAPSHOT_DIR = REPO_ROOT / "docs" / "reference-configs"
+
+
+@pytest.mark.parametrize("snapshot", sorted(SNAPSHOT_DIR.glob("*.yaml")) or [None])
+def test_reference_snapshots_have_provenance_headers(snapshot):
+    assert snapshot is not None, "no snapshots committed under docs/reference-configs"
+    text = snapshot.read_text()
+    head, body = text.split("\n\n", 1)
+    assert head.startswith("# Reference run: ")
+    assert "# Source commit: " in head and "# Slurm job: " in head
+    assert "/capstor" not in body and "/iopsstor" not in body and "/users/" not in body
+    assert isinstance(yaml.safe_load(body), dict)

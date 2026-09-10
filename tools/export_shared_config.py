@@ -26,7 +26,7 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 DEFAULT_SCRUB_PREFIXES = ("/capstor", "/iopsstor", "/users")
-_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def scrub(config: dict, prefixes: tuple[str, ...]) -> dict:
@@ -76,16 +76,24 @@ def render(config: dict, provenance: dict[str, str], fork_only: list[str]) -> st
     return "\n".join(lines) + "\n\n" + body
 
 
-def _resolved_container(path: Path) -> dict:
+def _load_module(name: str, path: Path):
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location(
-        "config_cli", Path(__file__).resolve().with_name("config_cli.py")
-    )
-    config_cli = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(config_cli)
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _resolved_container(path: Path) -> dict:
     from omegaconf import OmegaConf
 
+    tools_dir = Path(__file__).resolve().parent
+    config_cli = _load_module("config_cli", tools_dir / "config_cli.py")
+    nemo_rl_config = _load_module(
+        "nemo_rl_utils_config", tools_dir.parent / "nemo_rl" / "utils" / "config.py"
+    )
+    nemo_rl_config.register_omegaconf_resolvers()
     return OmegaConf.to_container(config_cli.load_config(str(path)), resolve=True)
 
 
