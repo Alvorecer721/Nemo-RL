@@ -35,7 +35,7 @@ REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/boot
 PHASE=${PHASE:-build}
 BASE_SQSH=${BASE_SQSH:?set BASE_SQSH to the release SquashFS to extend}
 VLLM_VERSION=0.26.0
-OVERLAY_NEGATIVE_FILTERS=${OVERLAY_NEGATIVE_FILTERS:-"trtllm dynamo nemo_gym"}
+NRL_IMAGE_PROFILE=${NRL_IMAGE_PROFILE:-apertus}
 EXPECTED_TE=${EXPECTED_TE:-2.18.0+27486e03}
 GATE_VENVS="\
 nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker \
@@ -111,7 +111,7 @@ BUILD_INPUTS_SHA256=$(
         printf 'commit\0%s\0' "$SOURCE_COMMIT"
         printf 'submodules\0%s\0' "$SUBMODULE_STATUS"
         printf 'base_release\0%s\0' "$BASE_TAG"
-        printf 'overlay_negative_filters\0%s\0' "$OVERLAY_NEGATIVE_FILTERS"
+        printf 'image_profile\0%s\0' "$NRL_IMAGE_PROFILE"
         printf 'platform\0linux/arm64\0'
     } | sha256sum | cut -d' ' -f1
 )
@@ -228,7 +228,7 @@ podman build \
     --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
     --build-arg "NEMO_RL_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
     --build-arg "NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64" \
-    --build-arg "OVERLAY_NEGATIVE_FILTERS=$OVERLAY_NEGATIVE_FILTERS" \
+    --build-arg "NRL_IMAGE_PROFILE=$NRL_IMAGE_PROFILE" \
     --tag "$IMAGE" \
     "$SOURCE_CONTEXT"
 

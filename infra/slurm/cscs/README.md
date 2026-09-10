@@ -95,6 +95,11 @@ its corresponding image must also exist in the persistent local registry.
 The build checks that inherited submodule pins match before regenerating the
 dependency fingerprint and synchronizing worker environments. Retain the source/image fingerprint checks when running
 the resulting image with a checkout overlay.
+Both the base-image and overlay launchers default to `NRL_IMAGE_PROFILE=apertus`:
+six environments covering vLLM generation, Megatron policy training, and rollout
+controllers. Set `NRL_IMAGE_PROFILE=full` to include the other backends. The overlay
+does not build TRT-LLM; use the base-image launcher with `BUILD_TRTLLM=1` and the
+full profile when that backend is needed.
 
 `docker/nemo_rl_vllm026_ncclext.toml` selects the built overlay. The bounded
 probe is `AP_VARIANT=8b-smoke bash infra/slurm/cscs/autoresearch/submit_apertus_bench.sh`: three nodes, two updates,
@@ -180,8 +185,10 @@ Useful environment overrides are `SCRATCH_ROOT`, `CACHE_DIR`, `OUTPUT_DIR`,
 `PODMAN_STORAGE_BASE`. `CUSTOM_SETUP_FNAME` is empty by default because CSCS
 launches SquashFS images through Pyxis/Enroot and does not need Apptainer
 inside the image; set it explicitly only for a nested-container use case.
-`HERMETIC_CACHE_TAG=rebuild` deliberately rebuilds all dependencies instead of
-resuming the pinned hermetic image. The default architecture is arm64/GH200,
+`HERMETIC_CACHE_TAG=auto` is the default: reuse dependencies only when the
+generated manifest matches, otherwise build and publish the hermetic image.
+`HERMETIC_CACHE_TAG=rebuild` forces the hermetic stage. An explicit digest is
+accepted only when it matches the generated key. The default architecture is arm64/GH200,
 the NGC base is digest-pinned, and Transformer Engine is limited to
 `NVTE_CUDA_ARCHS=90`.
 
@@ -199,23 +206,32 @@ The build has two different stores:
 The launcher cleans interrupted Buildah containers before building, restores a
 pinned `registry:3` bootstrap image, waits for registry readiness, pushes the
 final OCI manifest, exports SquashFS, verifies its superblock, and checks the
-vLLM renderer/tokenizer/tool-parser import boundary.
+vLLM renderer/tokenizer/tool-parser import boundary. It reports elapsed time for
+each stage and storage bytes/inodes. Image assembly checks selected worker
+environments offline and writes `/opt/nemo-rl-image-qualification.json`.
 
 For a source-only release, the launcher verifies the current dependency
-fingerprint and resumes from the content-addressed hermetic image. It first
-builds and persists `release-core`, which contains the generation and training
-workers. It then clears only the allocation-local Podman graph, restores that
-exact core into the fresh graph, and commits the final control/Gym delta before
-export. This keeps the broad build cache and the last delta from competing for
+fingerprint and resumes from the content-addressed hermetic image. Its embedded
+manifest must match the current lockfile, recursive submodule pins, actor profile,
+immutable base image, compiler settings, and dependency build inputs. Application-only
+changes can reuse this cache. The launcher first builds and persists `release-core`,
+then clears only its newly created private Podman graph, restores that exact core,
+and commits the final release layer before export. This keeps the broad build cache and the last delta from competing for
 the fixed 334 GiB `/tmp` mount.
 
-When dependencies change, treat the rebuild as two allocations. First run with
-`HERMETIC_CACHE_TAG=rebuild`. The launcher builds and publishes only the
-hermetic target under its dependency fingerprint, prints the exact tag and
-digests to pin, and exits successfully without entering release assembly.
-Replace the pinned tag, fingerprint, and digests with those values, commit the
-change, and start the two-phase release assembly from a clean allocation-local
-Podman store. Do not move the overlay graph to Lustre; that filesystem does not
+When dependencies change, use two allocations from the same clean source commit.
+The first invocation with `auto` builds and publishes only the hermetic target
+when the matching cache is absent, then exits successfully. A second invocation
+with `auto` finds and verifies that cache and assembles the release. No tag or
+fingerprint edit is needed between allocations. To queue both for a known rebuild:
+
+```bash
+deps_job=$(sbatch --parsable --chdir="$PWD" --export=HERMETIC_CACHE_TAG=rebuild infra/slurm/cscs/build_nemo_rl_image.slurm)
+sbatch --dependency="afterok:$deps_job" --chdir="$PWD" infra/slurm/cscs/build_nemo_rl_image.slurm
+```
+
+`PODMAN_STORAGE_BASE` must be a new absolute directory because the release path
+resets it; an existing directory is rejected. Do not move the overlay graph to Lustre; that filesystem does not
 provide the extended-attribute semantics Podman needs.
 
 ### Failure and recovery ledger

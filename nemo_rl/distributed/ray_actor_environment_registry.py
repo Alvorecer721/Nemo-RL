@@ -13,8 +13,15 @@
 # limitations under the License.
 
 import os
+import tomllib
+from pathlib import Path
 
-from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES
+from nemo_rl.distributed.actor_environments import (
+    ACTOR_ENVIRONMENTS,
+    VLLM_CONTROLLER_ACTORS,
+)
+from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES, git_root
+from nemo_rl.modelopt.registry import MODELOPT_ACTOR_REGISTRY
 
 USE_SYSTEM_EXECUTABLE = os.environ.get("NEMO_RL_PY_EXECUTABLES_SYSTEM", "0") == "1"
 VLLM_EXECUTABLE = (
@@ -29,44 +36,55 @@ MCORE_EXECUTABLE = (
 TRTLLM_EXECUTABLE = (
     PY_EXECUTABLES.SYSTEM if USE_SYSTEM_EXECUTABLE else PY_EXECUTABLES.TRTLLM
 )
-ACTOR_ENVIRONMENT_REGISTRY: dict[str, str] = {
-    "nemo_rl.environments.bracket_math_environment.BracketMathEnvironment": PY_EXECUTABLES.SYSTEM,
-    "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker": VLLM_EXECUTABLE,
-    "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker": VLLM_EXECUTABLE,
-    "nemo_rl.models.generation.sglang.sglang_worker.SGLangGenerationWorker": SGLANG_EXECUTABLE,
-    "nemo_rl.models.generation.dynamo.dynamo_worker.DynamoVllmWorker": PY_EXECUTABLES.SYSTEM,
-    "nemo_rl.models.policy.workers.dtensor_policy_worker.DTensorPolicyWorker": PY_EXECUTABLES.FSDP,
-    "nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2": PY_EXECUTABLES.AUTOMODEL,
-    "nemo_rl.models.value.workers.dtensor_value_worker_v2.DTensorValueWorkerV2": PY_EXECUTABLES.AUTOMODEL,
-    "nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker": MCORE_EXECUTABLE,
-    "nemo_rl.models.value.workers.megatron_value_worker.MegatronValueWorker": MCORE_EXECUTABLE,
-    "nemo_rl.models.generation.trtllm.trtllm_worker_async.TrtllmAsyncGenerationWorker": TRTLLM_EXECUTABLE,
-    "nemo_rl.environments.math_environment.MathEnvironment": PY_EXECUTABLES.SYSTEM,
-    "nemo_rl.environments.math_environment.MathMultiRewardEnvironment": PY_EXECUTABLES.SYSTEM,
-    "nemo_rl.environments.vlm_environment.VLMEnvironment": PY_EXECUTABLES.SYSTEM,
-    "nemo_rl.environments.single_turn_verifier_environment.SingleTurnVerifierEnvironment": PY_EXECUTABLES.SYSTEM,
-    "nemo_rl.environments.code_environment.CodeEnvironment": PY_EXECUTABLES.SYSTEM,
-    "nemo_rl.environments.reward_model_environment.RewardModelEnvironment": PY_EXECUTABLES.SYSTEM,
-    "nemo_rl.environments.code_jaccard_environment.CodeJaccardEnvironment": PY_EXECUTABLES.SYSTEM,
-    "nemo_rl.environments.games.sliding_puzzle.SlidingPuzzleEnv": PY_EXECUTABLES.SYSTEM,
-    # AsyncTrajectoryCollector needs vLLM environment to handle exceptions from VllmGenerationWorker
-    "nemo_rl.algorithms.async_utils.AsyncTrajectoryCollector": PY_EXECUTABLES.VLLM,
-    # ReplayBuffer needs vLLM environment to handle trajectory data from VllmGenerationWorker
-    "nemo_rl.algorithms.async_utils.ReplayBuffer": PY_EXECUTABLES.VLLM,
-    # SyncRolloutActor doesn't import vllm directly — policy_generation is a
-    # Ray actor handle. The VLLM env is needed because (1) transfer_queue is
-    # bundled into the VLLM venv (and the policy training venvs), and the
-    # actor writes flattened tensors to TQ via dp_client.put_samples;
-    # (2) same-node colocation with VllmGenerationWorker avoids duplicate
-    # venv caches.
-    "nemo_rl.experience.sync_rollout_actor.SyncRolloutActor": PY_EXECUTABLES.VLLM,
-    "nemo_rl.environments.tools.retriever.RAGEnvironment": PY_EXECUTABLES.SYSTEM,
-    "nemo_rl.environments.nemo_gym.NemoGym": PY_EXECUTABLES.NEMO_GYM,
+_EXECUTABLES_BY_EXTRAS = {
+    ("vllm",): VLLM_EXECUTABLE,
+    ("sglang",): SGLANG_EXECUTABLE,
+    ("fsdp",): PY_EXECUTABLES.FSDP,
+    ("automodel",): PY_EXECUTABLES.AUTOMODEL,
+    ("mcore",): MCORE_EXECUTABLE,
+    ("trtllm",): TRTLLM_EXECUTABLE,
+    ("nemo_gym",): PY_EXECUTABLES.NEMO_GYM,
 }
 
-from nemo_rl.modelopt.registry import MODELOPT_ACTOR_REGISTRY
 
-ACTOR_ENVIRONMENT_REGISTRY.update(MODELOPT_ACTOR_REGISTRY)
+def _reject_undeclared_extras() -> None:
+    """Fail on an invalid manifest before any actor venv is created."""
+    with (Path(git_root) / "pyproject.toml").open("rb") as project_file:
+        declared = tomllib.load(project_file)["project"]["optional-dependencies"]
+    required = {
+        extra for extras in ACTOR_ENVIRONMENTS.values() for extra in extras or ()
+    }
+    undeclared = required - declared.keys()
+    if undeclared:
+        raise ValueError(
+            f"Actor environments use undeclared extras: {sorted(undeclared)}"
+        )
+
+
+def _actor_python_env(actor: str, extras: list[str] | None) -> str:
+    """Resolve shared extras through the existing runtime executable constants."""
+    if extras is None:
+        return PY_EXECUTABLES.SYSTEM
+    if "modelopt" in extras:
+        return MODELOPT_ACTOR_REGISTRY[actor]
+    if actor in VLLM_CONTROLLER_ACTORS and extras == ["vllm"]:
+        return PY_EXECUTABLES.VLLM
+    try:
+        return _EXECUTABLES_BY_EXTRAS[tuple(extras)]
+    except KeyError as error:
+        raise ValueError(
+            f"No runtime executable for {actor} with extras {extras}"
+        ) from error
+
+
+_reject_undeclared_extras()
+
+# Image profiles filter build rows only. All registered actors remain available
+# at runtime, including system actors and workers omitted from a smaller image.
+ACTOR_ENVIRONMENT_REGISTRY: dict[str, str] = {
+    actor: _actor_python_env(actor, extras)
+    for actor, extras in ACTOR_ENVIRONMENTS.items()
+}
 
 
 def get_actor_python_env(actor_class_fqn: str) -> str:
