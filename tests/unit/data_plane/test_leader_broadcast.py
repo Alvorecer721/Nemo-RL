@@ -20,6 +20,7 @@ Runs on CPU (gloo) so it stays in the no-GPU Tier 1 lane.
 from __future__ import annotations
 
 import os
+import time
 from functools import partial
 
 import pytest
@@ -227,9 +228,28 @@ def _tensor_round_trip_body(rank: int, *, source_device: str = "cpu") -> None:
     data = BatchedDataDict(expected) if rank == 0 else None
     original_strides = {key: tensor.stride() for key, tensor in expected.items()}
 
-    out = _broadcast_batched_data_dict(
-        data, is_leader=(rank == 0), src=0, group=dist.group.WORLD
-    )
+    real_broadcast = dist.broadcast
+    observed_wire: list[tuple[torch.dtype, int]] = []
+
+    def observe_broadcast(tensor, *args, **kwargs):
+        observed_wire.append((tensor.dtype, tensor.numel() * tensor.element_size()))
+        return real_broadcast(tensor, *args, **kwargs)
+
+    dist.broadcast = observe_broadcast
+    try:
+        out = _broadcast_batched_data_dict(
+            data, is_leader=(rank == 0), src=0, group=dist.group.WORLD
+        )
+    finally:
+        dist.broadcast = real_broadcast
+
+    assert len(observed_wire) == len(expected)
+    for (key, logical), (wire_dtype, wire_bytes) in zip(
+        expected.items(), observed_wire, strict=True
+    ):
+        if logical.dtype == torch.int16:
+            assert wire_dtype == torch.uint8, key
+            assert wire_bytes == 2 * logical.numel(), key
 
     assert out.keys() == expected.keys()
     for key, tensor in expected.items():
@@ -244,8 +264,8 @@ def _tensor_round_trip_body(rank: int, *, source_device: str = "cpu") -> None:
             assert actual.stride() == original_strides[key], key
 
 
-def test_leader_broadcast_preserves_tensor_values_layout_and_dtype(tmp_path):
-    """Collectives preserve scalars, empty fields and strided tensor values."""
+def test_leader_broadcast_preserves_tensors_and_uses_int16_byte_wire(tmp_path):
+    """Collectives preserve tensor values while int16 rides as exact bytes."""
     _run_two_ranks(_tensor_round_trip_body, str(tmp_path / "init_tensors"))
 
 
@@ -287,26 +307,42 @@ def test_get_replica_group_default_is_none():
 
 
 def _nccl_int16_worker(rank: int, world_size: int) -> None:
-    if rank == 0:
-        data = BatchedDataDict({"routed_experts": _noncontiguous_int16_routes()})
-    else:
-        data = None
+    logical = (
+        torch.arange(-32768, 32768, dtype=torch.int32)
+        .to(torch.int16)
+        .repeat(16)
+        .reshape(1024, 1024)
+        .T
+    )
+    assert not logical.is_contiguous()
+    original = logical.clone()
+    data = BatchedDataDict({"routed_experts": logical}) if rank == 0 else None
 
+    dist.barrier()
+    torch.cuda.synchronize()
+    started = time.perf_counter()
     out = _broadcast_batched_data_dict(
         data,
         is_leader=(rank == 0),
         src=0,
         group=dist.group.WORLD,
     )
+    torch.cuda.synchronize()
+    elapsed_ms = (time.perf_counter() - started) * 1000
 
-    expected = _noncontiguous_int16_routes()
     assert out["routed_experts"].device.type == "cpu"
     assert out["routed_experts"].dtype == torch.int16
-    assert torch.equal(out["routed_experts"], expected)
+    assert torch.equal(out["routed_experts"], original)
+    if rank == 0:
+        assert out["routed_experts"] is logical
+        print(
+            "NCCL int16 leader broadcast: "
+            f"{logical.numel() * logical.element_size()} bytes in {elapsed_ms:.3f} ms"
+        )
 
 
 def test_leader_broadcast_int16_round_trip_nccl(distributed_test_runner):
-    """NCCL transport handles non-contiguous Router Replay routes."""
+    """NCCL reports parity and timing for a 2 MiB non-contiguous route tensor."""
     distributed_test_runner(_nccl_int16_worker, world_size=2, backend="nccl")
 
 

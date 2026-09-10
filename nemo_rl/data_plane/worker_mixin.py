@@ -88,9 +88,9 @@ def _broadcast_batched_data_dict(
     descriptor (per-key dtype/shape) ships via ``broadcast_object_list``
     first, then each tensor's data ships via ``broadcast`` on its
     transport device. Gloo and NCCL do not support ``torch.int16``, so those
-    tensors are widened losslessly to int32 and narrowed after receipt. The leader
-    supplies ``data``; non-leaders pass ``None`` and get an empty
-    BatchedDataDict filled in-place.
+    tensors ride the collective as contiguous byte views of their logical
+    storage. The leader supplies ``data``; non-leaders pass ``None`` and get
+    an empty BatchedDataDict filled in-place.
     """
     # NCCL groups can only broadcast CUDA tensors; pick the broadcast
     # device from the group backend so CPU TQ outputs are moved to GPU
@@ -192,19 +192,17 @@ def _broadcast_batched_data_dict(
         if kind == "tensor":
             dtype_str, shape, src_device = entry[2], entry[3], entry[4]
             dtype = getattr(torch, dtype_str.split(".")[-1])
-            # NCCL has no int16 ("Short") type; ship as int32 and narrow back
-            # (routed_experts rides TQ as int16).
-            wire_dtype = torch.int32 if dtype == torch.int16 else dtype
             if is_leader:
                 # Collectives send storage order, so normalize strided inputs.
                 # Keep the leader's original tensor and device in ``out``.
-                tensor = out[key].to(device=bcast_device, dtype=wire_dtype).contiguous()
+                tensor = out[key].to(device=bcast_device).contiguous()
             else:
-                tensor = torch.empty(shape, dtype=wire_dtype, device=bcast_device)
-            torch.distributed.broadcast(tensor, src=src, group=group)
+                tensor = torch.empty(shape, dtype=dtype, device=bcast_device)
+            wire = (
+                tensor.reshape(-1).view(torch.uint8) if dtype == torch.int16 else tensor
+            )
+            torch.distributed.broadcast(wire, src=src, group=group)
             if not is_leader:
-                if tensor.dtype != dtype:
-                    tensor = tensor.to(dtype)
                 if torch.device(src_device).type != torch.device(bcast_device).type:
                     tensor = tensor.to(src_device)
                 out[key] = tensor
