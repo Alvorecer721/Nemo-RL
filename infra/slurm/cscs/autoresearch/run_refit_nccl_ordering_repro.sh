@@ -4,6 +4,25 @@
 
 set -euo pipefail
 
+classify_arm_status() {
+  local exit_code=$1
+  local validation_exit_code=$2
+  local arm_log=$3
+  if [[ $exit_code -eq 0 && $validation_exit_code -eq 0 ]]; then
+    echo pass
+  elif [[ $exit_code -eq 124 ]] || grep -Fq 'deadline exceeded' "$arm_log"; then
+    echo timeout
+  else
+    echo error
+  fi
+}
+
+if [[ ${1:-} == --classify-status ]]; then
+  [[ $# -eq 4 ]] || { echo "usage: $0 --classify-status EXIT VALIDATION_EXIT LOG" >&2; exit 2; }
+  classify_arm_status "$2" "$3" "$4"
+  exit 0
+fi
+
 REPO_DIR=${REFIT_REPRO_REPO_DIR:?}
 EXPECTED_HEAD=${REFIT_REPRO_EXPECTED_HEAD:?}
 CONTAINER_ENV=${REFIT_REPRO_CONTAINER_ENV:?}
@@ -99,20 +118,19 @@ run_arm() {
       --export=ALL \
       --kill-on-bad-exit=1 \
       --cpu-bind=none \
-      --gpu-bind=closest \
+      --gpu-bind=none \
       --distribution=block:block \
       --nodes=2 \
       --ntasks="$world_size" \
       --ntasks-per-node="$stages" \
       --gpus-per-node=4 \
-      --gpus-per-task=1 \
       --cpus-per-task=16 \
       --environment="$CONTAINER_ENV" \
       /bin/bash -lc '
         set -euo pipefail
         export RANK=$SLURM_PROCID
         export WORLD_SIZE=$SLURM_NTASKS
-        export LOCAL_RANK=0
+        export LOCAL_RANK=$SLURM_LOCALID
         export PYTHONPATH='"$REPO_DIR"'
         if (( SLURM_PROCID < '"$stages"' )); then
           [[ $SLURM_NODEID -eq 0 && $SLURM_LOCALID -eq $SLURM_PROCID ]]
@@ -166,14 +184,7 @@ run_arm() {
     set -e
   fi
 
-  if [[ $exit_code -eq 0 && $validation_exit_code -eq 0 ]]; then
-    status=pass
-  elif grep -Fq 'deadline exceeded' "$arm_log" || \
-       [[ $exit_code -eq 124 || $exit_code -eq 137 || $exit_code -eq 143 ]]; then
-    status=timeout
-  else
-    status=error
-  fi
+  status=$(classify_arm_status "$exit_code" "$validation_exit_code" "$arm_log")
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$arm" "$stages" "$streams" "$exit_code" "$validation_exit_code" "$status" \
     >>"$RUN_DIR/results.tsv"

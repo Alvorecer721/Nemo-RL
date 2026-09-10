@@ -80,6 +80,9 @@ class RankResult(TypedDict):
     hostname: str
     slurm_node_id: int
     slurm_local_id: int
+    cuda_device_index: int
+    cuda_device_uuid: str
+    cuda_device_name: str
     max_iteration_s: float
     mean_iteration_s: float
 
@@ -102,6 +105,15 @@ class ProbeResult(ProbeCoreResult):
     """Launcher-visible result emitted only after communicator teardown."""
 
     teardown: Literal["complete"]
+
+
+@dataclass(frozen=True)
+class DeviceIdentity:
+    """Physical CUDA device selected by one Slurm task."""
+
+    index: int
+    uuid: str
+    name: str
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> ProbeConfig:
@@ -164,6 +176,43 @@ def validate_runtime_environment(
         raise RuntimeError("NRL_XFERDTENSOR_GOLDEN must not enable the golden path")
 
 
+def select_local_device(
+    *,
+    rank: int,
+    config: ProbeConfig,
+    slurm_node_id: int,
+    slurm_local_id: int,
+    requested_local_rank: int,
+    visible_device_count: int,
+) -> int:
+    """Validate the two-node Slurm placement and return its CUDA device index."""
+    if rank < 0 or rank >= config.world_size:
+        raise RuntimeError(f"rank {rank} is outside world size {config.world_size}")
+    is_receiver = rank == config.receiver_rank
+    expected_node_id = 1 if is_receiver else 0
+    expected_local_id = 0 if is_receiver else rank
+    if slurm_node_id != expected_node_id:
+        raise RuntimeError(
+            f"rank {rank} has SLURM_NODEID={slurm_node_id}, expected {expected_node_id}"
+        )
+    if slurm_local_id != expected_local_id:
+        raise RuntimeError(
+            f"rank {rank} has SLURM_LOCALID={slurm_local_id}, "
+            f"expected {expected_local_id}"
+        )
+    if requested_local_rank != slurm_local_id:
+        raise RuntimeError(
+            f"rank {rank} has LOCAL_RANK={requested_local_rank}, but "
+            f"SLURM_LOCALID={slurm_local_id}"
+        )
+    if requested_local_rank < 0 or requested_local_rank >= visible_device_count:
+        raise RuntimeError(
+            f"rank {rank} selected CUDA device {requested_local_rank}, but only "
+            f"{visible_device_count} devices are visible"
+        )
+    return requested_local_rank
+
+
 def fill_payload(tensor: torch.Tensor, *, stage: int, iteration: int) -> None:
     """Fill a tensor with an exactly representable, element-varying BF16 pattern."""
     indices = torch.arange(tensor.numel(), device=tensor.device, dtype=torch.int32)
@@ -217,6 +266,12 @@ def validate_rank_results(
     ]
     if len(set(placements)) != len(placements):
         raise RuntimeError(f"duplicate placement in rank results: {placements}")
+    physical_devices = [
+        (result.get("hostname"), result.get("cuda_device_uuid"))
+        for result in rank_results
+    ]
+    if len(set(physical_devices)) != len(physical_devices):
+        raise RuntimeError(f"duplicate CUDA device in rank results: {physical_devices}")
 
     expected_source_calls = config.iterations * config.transfers_per_stage
     for rank in range(config.stages):
@@ -228,6 +283,9 @@ def validate_rank_results(
         )
         _require_result_field(
             result=result, field="slurm_local_id", expected=rank, rank=rank
+        )
+        _require_result_field(
+            result=result, field="cuda_device_index", expected=rank, rank=rank
         )
         _require_result_field(
             result=result,
@@ -270,6 +328,12 @@ def validate_rank_results(
     )
     _require_result_field(
         result=receiver,
+        field="cuda_device_index",
+        expected=0,
+        rank=config.receiver_rank,
+    )
+    _require_result_field(
+        result=receiver,
         field="completed_iterations",
         expected=config.iterations,
         rank=config.receiver_rank,
@@ -287,6 +351,10 @@ def validate_rank_results(
         rank=config.receiver_rank,
     )
     for rank, result in by_rank.items():
+        for field in ("cuda_device_uuid", "cuda_device_name"):
+            value = result.get(field)
+            if not isinstance(value, str) or not value:
+                raise RuntimeError(f"rank {rank} has invalid {field}={value!r}")
         for field in ("max_iteration_s", "mean_iteration_s"):
             value = result.get(field)
             if (
@@ -574,7 +642,11 @@ def _run_receiver(
 
 
 def _rank_result(
-    *, rank: int, durations: Sequence[float], config: ProbeConfig
+    *,
+    rank: int,
+    durations: Sequence[float],
+    config: ProbeConfig,
+    device: DeviceIdentity,
 ) -> RankResult:
     is_receiver = rank == config.receiver_rank
     return {
@@ -591,6 +663,9 @@ def _rank_result(
         "hostname": socket.gethostname(),
         "slurm_node_id": int(os.environ.get("SLURM_NODEID", "0")),
         "slurm_local_id": int(os.environ.get("SLURM_LOCALID", str(rank))),
+        "cuda_device_index": device.index,
+        "cuda_device_uuid": device.uuid,
+        "cuda_device_name": device.name,
         "max_iteration_s": max(durations),
         "mean_iteration_s": sum(durations) / len(durations),
     }
@@ -616,15 +691,42 @@ def run_probe(config: ProbeConfig) -> None:
             raise RuntimeError(
                 f"expected world size {config.world_size}, got {world_size}"
             )
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+        slurm_node_id = int(os.environ.get("SLURM_NODEID", "-1"))
+        slurm_local_id = int(os.environ.get("SLURM_LOCALID", "-1"))
         visible_device_count = torch.cuda.device_count()
-        if visible_device_count != 1 or local_rank != 0:
-            raise RuntimeError(
-                "the Slurm launcher must expose exactly one GPU per rank at "
-                f"LOCAL_RANK=0, got {visible_device_count} GPUs and "
-                f"LOCAL_RANK={local_rank}"
-            )
+        local_rank = select_local_device(
+            rank=rank,
+            config=config,
+            slurm_node_id=slurm_node_id,
+            slurm_local_id=slurm_local_id,
+            requested_local_rank=local_rank,
+            visible_device_count=visible_device_count,
+        )
         torch.cuda.set_device(local_rank)
+        properties = torch.cuda.get_device_properties(local_rank)
+        device = DeviceIdentity(
+            index=local_rank,
+            uuid=properties.uuid,
+            name=properties.name,
+        )
+        print(
+            "device_selection="
+            + json.dumps(
+                {
+                    "cuda_device_index": device.index,
+                    "cuda_device_name": device.name,
+                    "cuda_device_uuid": device.uuid,
+                    "hostname": socket.gethostname(),
+                    "rank": rank,
+                    "slurm_local_id": slurm_local_id,
+                    "slurm_node_id": slurm_node_id,
+                    "visible_device_count": visible_device_count,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
         endpoints = _collect_endpoints(rank, config)
         _build_groups(
             rank=rank,
@@ -683,7 +785,8 @@ def run_probe(config: ProbeConfig) -> None:
 
         gathered: list[Optional[RankResult]] = [None for _ in range(config.world_size)]
         dist.all_gather_object(
-            gathered, _rank_result(rank=rank, durations=durations, config=config)
+            gathered,
+            _rank_result(rank=rank, durations=durations, config=config, device=device),
         )
         if rank == 0:
             rank_results = [result for result in gathered if result is not None]

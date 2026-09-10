@@ -5,6 +5,7 @@
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +15,14 @@ import torch
 
 PROBE_PATH = (
     Path(__file__).resolve().parents[2] / "functional" / "refit_nccl_ordering_repro.py"
+)
+RUNNER_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "infra"
+    / "slurm"
+    / "cscs"
+    / "autoresearch"
+    / "run_refit_nccl_ordering_repro.sh"
 )
 
 
@@ -94,6 +103,57 @@ def test_runtime_requires_explicit_python_transport_and_matching_stream_count():
             probe.validate_runtime_environment(config, invalid)
 
 
+def test_local_device_selection_uses_slurm_local_id_with_whole_node_visibility():
+    probe = _load_probe()
+    config = probe.parse_args(["--stages", "2", "--streams", "1"])
+
+    assert (
+        probe.select_local_device(
+            rank=1,
+            config=config,
+            slurm_node_id=0,
+            slurm_local_id=1,
+            requested_local_rank=1,
+            visible_device_count=4,
+        )
+        == 1
+    )
+    assert (
+        probe.select_local_device(
+            rank=2,
+            config=config,
+            slurm_node_id=1,
+            slurm_local_id=0,
+            requested_local_rank=0,
+            visible_device_count=4,
+        )
+        == 0
+    )
+
+
+def test_local_device_selection_rejects_wrong_device_assignment():
+    probe = _load_probe()
+    config = probe.parse_args(["--stages", "2", "--streams", "1"])
+
+    with pytest.raises(RuntimeError, match="LOCAL_RANK=0.*SLURM_LOCALID=1"):
+        probe.select_local_device(
+            rank=1,
+            config=config,
+            slurm_node_id=0,
+            slurm_local_id=1,
+            requested_local_rank=0,
+            visible_device_count=4,
+        )
+
+
+def test_launcher_uses_whole_node_visibility_and_slurm_local_id():
+    runner = RUNNER_PATH.read_text()
+
+    assert "--gpu-bind=none" in runner
+    assert "--gpus-per-task" not in runner
+    assert "export LOCAL_RANK=$SLURM_LOCALID" in runner
+
+
 def test_payload_pattern_covers_elements_and_varies_by_iteration():
     probe = _load_probe()
     payload = torch.empty(6, dtype=torch.bfloat16)
@@ -129,6 +189,9 @@ def _rank_results(*, iterations=3, transfers=5):
             "hostname": "node-a",
             "slurm_node_id": 0,
             "slurm_local_id": 0,
+            "cuda_device_index": 0,
+            "cuda_device_uuid": "gpu-a0",
+            "cuda_device_name": "GH200",
             "max_iteration_s": 0.2,
             "mean_iteration_s": 0.1,
         },
@@ -142,6 +205,9 @@ def _rank_results(*, iterations=3, transfers=5):
             "hostname": "node-a",
             "slurm_node_id": 0,
             "slurm_local_id": 1,
+            "cuda_device_index": 1,
+            "cuda_device_uuid": "gpu-a1",
+            "cuda_device_name": "GH200",
             "max_iteration_s": 0.2,
             "mean_iteration_s": 0.1,
         },
@@ -155,6 +221,9 @@ def _rank_results(*, iterations=3, transfers=5):
             "hostname": "node-b",
             "slurm_node_id": 1,
             "slurm_local_id": 0,
+            "cuda_device_index": 0,
+            "cuda_device_uuid": "gpu-b0",
+            "cuda_device_name": "GH200",
             "max_iteration_s": 0.3,
             "mean_iteration_s": 0.2,
         },
@@ -200,6 +269,8 @@ def test_result_validation_requires_every_repeated_transfer_and_payload_check():
         (2, "role", "source", "role"),
         (2, "hostname", "node-a", "duplicate placement"),
         (1, "slurm_node_id", 1, "slurm_node_id"),
+        (1, "cuda_device_index", 0, "cuda_device_index"),
+        (1, "cuda_device_uuid", "gpu-a0", "duplicate CUDA device"),
     ],
 )
 def test_result_validation_rejects_incomplete_or_ambiguous_results(
@@ -249,3 +320,36 @@ def test_log_validation_rejects_exit_zero_without_a_complete_pass_record(tmp_pat
     result["teardown"] = "complete"
     log.write_text("noise\nREFIT_ORDER_REPRO=PASS " + json.dumps(result) + "\n")
     assert probe.validate_result_log(log, config) == result
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "validation_exit_code", "log_text", "expected"),
+    [
+        (0, 0, "REFIT_ORDER_REPRO_LOG=VALID\n", "pass"),
+        (124, -1, "terminated\n", "timeout"),
+        (143, -1, "peer terminated\n", "error"),
+        (143, -1, "refit: deadline exceeded\n", "timeout"),
+        (0, -1, "validation failed\n", "error"),
+    ],
+)
+def test_launcher_classifies_only_real_deadlines_as_timeouts(
+    tmp_path, exit_code, validation_exit_code, log_text, expected
+):
+    log = tmp_path / "arm.log"
+    log.write_text(log_text)
+
+    completed = subprocess.run(
+        [
+            str(RUNNER_PATH),
+            "--classify-status",
+            str(exit_code),
+            str(validation_exit_code),
+            str(log),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == expected
