@@ -335,9 +335,12 @@ class SiteProfileTests(unittest.TestCase):
                         "AsyncTrajectoryCollector",
                         "ReplayBuffer",
                         "SyncRolloutActor",
-                        "VllmGenerationWorker",
-                        "VllmAsyncGenerationWorker",
                     )
+                },
+                # Token capture imports nemo_gym inside the vLLM workers (#4009).
+                **{
+                    actor: ("deps", "--extra vllm --extra nemo_gym")
+                    for actor in ("VllmGenerationWorker", "VllmAsyncGenerationWorker")
                 },
                 "MegatronPolicyWorker": ("deps", "--extra mcore"),
             },
