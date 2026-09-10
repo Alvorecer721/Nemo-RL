@@ -309,6 +309,7 @@ apertus-traps-and-invariants.md
 apertus-xielu.md
 guides/sft.md
 guides/dpo.md
+guides/nemotron-omni-mpo.md
 guides/dapo.md
 guides/lora.md
 guides/cispo.md

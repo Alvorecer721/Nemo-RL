@@ -148,6 +148,9 @@ ENV RAY_USAGE_STATS_ENABLED=0
 # There is severe contention and performance issues with this enabled considering our dependencies are so large and occasionally
 # need to be compiled, so NeMo RL has an implementation in nemo_rl/utils/venv.py that does it once per node as opposed to once per task.
 ENV RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
+# Set once here: `hermetic` and `release` both derive from `base`, so they inherit it.
+# The worker-venv prefetch in the hermetic stage reads it -- do not re-declare it in a
+# later stage, or the value the prefetch uses and the value the image ships can drift.
 ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
 ENV NEMO_GYM_VENV_DIR=/opt/gym_venvs
 
@@ -195,6 +198,9 @@ ENV UV_HTTP_TIMEOUT=60
 # Ensure DeepEP is built for H100 and B200 (also mcore inference unified memory API now invokes a torch API that requires these to be set)
 ENV TORCH_CUDA_ARCH_LIST="9.0 10.0"
 
+# Build HybridEP with inter-node transport support.
+ENV HYBRID_EP_MULTINODE=1
+
 # Ensure HybridEP/DeepEP JIT compilation can find nvcc at runtime
 ENV CUDA_HOME=/usr/local/cuda
 
@@ -235,10 +241,10 @@ COPY --from=nemo-rl --link \
 RUN --mount=type=ssh \
     --mount=type=secret,id=git_credentials \
     --mount=type=bind,from=uv-cache-seed,source=.,target=/tmp/uv-cache-seed <<"EOF" bash -exu
-CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}" | md5sum | cut -c1-12)
+CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}-${HYBRID_EP_MULTINODE}" | md5sum | cut -c1-12)
 SEED_KEY=$(cat /tmp/uv-cache-seed/.cache-key 2>/dev/null || echo "")
 if [ -n "$SEED_KEY" ] && [ "$SEED_KEY" != "$CACHE_KEY" ]; then
-    echo "Cache key mismatch (base image or uv version changed) — skipping stale seed"
+    echo "Cache key mismatch (base image, uv version, or build mode changed) — skipping stale seed"
 elif [ -n "$SEED_KEY" ]; then
     echo "Seeding uv cache (key=${CACHE_KEY})"
     mkdir -p /root/.cache/uv
@@ -333,9 +339,15 @@ TRTLLM_BUILD_VENV=/tmp/nemo-rl-build-trtllm
 rm -rf "${TRTLLM_BUILD_VENV}"
 uv venv --seed "${TRTLLM_BUILD_VENV}"
 set +e
+# Build TRT-LLM into a throwaway venv instead of the main one:
+# the main venv is fully hardlinked from the dependency layer,
+# and churning it here would copy files up into this layer.
+# The throwaway venv must be symlink-mode: hardlinks to files in the dependency layer's uv
+# cache make overlayfs copy them up into this layer, and the copies outlive the rm -rf below.
 UV_CACHE_DIR=/root/.cache/uv \
     UV_PROJECT_ENVIRONMENT="${TRTLLM_BUILD_VENV}" \
     TRTLLM_WHEEL_CACHE_DIR=/root/.cache/trtllm-wheels \
+    UV_PROJECT_ENVIRONMENT=/tmp/trtllm-build-venv \
     uv sync --verbose --link-mode symlink --locked --extra trtllm --no-install-project \
     2>&1 | tee "$TRTLLM_SYNC_LOG" \
     | awk '/\[TRTLLM_CCACHE\]|Ninja progress:/ { print; fflush() }'
@@ -371,7 +383,6 @@ find /root/.cache/uv -type d -path "*ray/_private/runtime_env/agent/thirdparty_f
 EOF
 
 ENV PATH="/opt/nemo_rl_venv/bin:$PATH"
-ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
 
 # Custom setup layer (override with: --build-context custom-setup=<dir> --build-arg CUSTOM_SETUP_FNAME=<script>)
 # To skip: --build-arg CUSTOM_SETUP_FNAME=
@@ -403,9 +414,6 @@ RUN if [ -n "${NEMO_RL_HERMETIC_MANIFEST_B64:-}" ]; then \
 FROM hermetic AS release-core
 
 # Re-declare build args for this stage
-ARG SKIP_VLLM_BUILD
-ARG SKIP_SGLANG_BUILD
-ARG SKIP_TRTLLM_BUILD
 ARG BUILD_DYNAMO
 ARG DYNAMO_PYTHON_VERSION=3.12.11
 ARG ETCD_VERSION=v3.5.21
@@ -431,7 +439,6 @@ LABEL org.opencontainers.image.revision="${NEMO_RL_COMMIT}"
 LABEL org.opencontainers.image.base.name="${BASE_IMAGE}"
 LABEL org.opencontainers.image.source-inputs="${NEMO_RL_BUILD_INPUTS_SHA256}"
 
-ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
 ENV NEMO_RL_DYNAMO_VENV_DIR=/opt/dynamo_venv
 
 # AWS EFA OFI plugin discovery (p4d / p5 / p5en multi-node NCCL via SRD).
@@ -476,7 +483,7 @@ FROM release-core AS release
 
 ARG NEMO_GYM_PREFETCH_CONFIGS=
 ARG NEMO_GYM_CUDA=cu130
-ARG NEMO_GYM_VLLM_VERSION=0.24.0
+ARG NEMO_GYM_VLLM_VERSION=0.25.1
 ARG NEMO_RL_BUILD_FINGERPRINT_B64
 ARG RC_DATE=00.00
 ARG TARGETARCH
@@ -484,7 +491,11 @@ ARG TARGETARCH
 # Prefetch NeMo Gym internal venvs (gym servers like code_gen, math_with_judge, etc.)
 # into the image. Gated on NEMO_GYM_PREFETCH_CONFIGS (no-op by default). Runs after the
 # source COPY above so examples/nemo_gym/prefetch_venvs.py is present.
-# Gym pins vllm==0.24.0; override it to vLLM's default prebuilt CUDA wheel so Gym's venvs share
+# UV_LINK_MODE=symlink below applies to this outer `uv run` only. The gym server venvs
+# themselves are built in hardlink mode: examples/nemo_gym/prefetch_venvs.py pins
+# UV_LINK_MODE=hardlink in the Gym actor's runtime_env, because Gym's setup scripts shell
+# out to `uv pip install --no-cache`, which uv refuses to combine with symlink installs.
+# Gym pins vllm==0.25.1; override it to vLLM's default prebuilt CUDA wheel so Gym's venvs share
 # RL's torch/nvidia stack. UV_TORCH_BACKEND keeps torch on the same CUDA backend.
 RUN <<"EOF" bash -exu
 if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
