@@ -29,6 +29,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from nemo_rl.algorithms.async_utils.replay_buffer import DataPlaneCheckpointBarrier
 from nemo_rl.algorithms.async_utils.staleness_sampler import (
+    BaseSampler,
     CustomSamplerConfig,
     InOrderSampler,
     InOrderSamplerConfig,
@@ -784,3 +785,80 @@ class PropertyCapabilitySampler:
 
 
 NOT_A_SAMPLER_CLASS = object()
+
+
+@pytest.mark.parametrize(
+    "sampler_type,kwargs",
+    [
+        (WindowedSampler, {"max_staleness_versions": 1}),
+        (ReadyFirstSampler, {"max_staleness_versions": 1}),
+        (WeightFifoSampler, {"max_staleness_versions": 1}),
+        (InOrderSampler, {"max_lookahead_versions": 1}),
+    ],
+)
+def test_aligned_selection_retains_unselected_group_metrics(
+    sampler_type: type[BaseSampler], kwargs: dict[str, int]
+) -> None:
+    buffer = FakeBuffer()
+    for i in range(25):
+        buffer.add(str(i), 0, target_step=0, rollout_metrics={"group": float(i)})
+    sampler = sampler_type(buffer, **kwargs)
+    meta, count = _run(
+        sampler.select(
+            current_train_weight=0,
+            min_prompt_groups=24,
+            max_prompt_groups=48,
+            group_count_multiple=3,
+        )
+    )
+    assert count == 24
+    assert meta.extra_info[ROLLOUT_METRICS] == [{"group": float(i)} for i in range(24)]
+    assert buffer.meta_list[0].sample_ids == ["24_g0"]
+    assert buffer.meta_list[0].extra_info[ROLLOUT_METRICS] == [{"group": 24.0}]
+    assert buffer.remove_calls == [(list(range(24)), False)]
+
+
+@pytest.mark.parametrize(
+    "minimum,maximum,multiple",
+    [
+        (1, 10, 0),
+        (1, 10, -1),
+        (1, 10, 1.5),
+        (1, 10, True),
+        (4, 5, 3),
+        (1, 2, 3),
+    ],
+)
+def test_alignment_rejects_impossible_bounds_without_claiming(
+    minimum: int, maximum: int, multiple: float
+) -> None:
+    buffer = FakeBuffer()
+    buffer.add("ready", 0)
+    sampler = WindowedSampler(buffer, max_staleness_versions=1)
+    with pytest.raises(ValueError, match="group_count_multiple|aligned"):
+        _run(
+            sampler.select(
+                current_train_weight=0,
+                min_prompt_groups=minimum,
+                max_prompt_groups=maximum,
+                group_count_multiple=multiple,
+            )
+        )
+    assert len(buffer.meta_list) == 1
+    assert buffer.remove_calls == []
+
+
+def test_aligned_selection_waits_for_rounded_up_minimum() -> None:
+    buffer = FakeBuffer()
+    for i in range(5):
+        buffer.add(str(i), 0)
+    sampler = WindowedSampler(buffer, max_staleness_versions=1)
+    assert _run(
+        sampler.select(
+            current_train_weight=0,
+            min_prompt_groups=4,
+            max_prompt_groups=9,
+            group_count_multiple=3,
+        )
+    ) == (None, 0)
+    assert len(buffer.meta_list) == 5

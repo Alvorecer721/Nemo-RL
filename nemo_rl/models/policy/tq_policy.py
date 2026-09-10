@@ -29,12 +29,13 @@ no key minting). Workers fetch their slice from TQ via
 
 from __future__ import annotations
 
+import math
 import warnings
 from collections import Counter, defaultdict
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import ray
 
@@ -486,6 +487,53 @@ class TQPolicy(TQDriverMixin, Policy):
     #   abort_train_step                    — drop accumulators, no opt.step
     #
     # ``train_from_meta`` is unchanged and remains the sync entrypoint.
+
+    def get_train_group_count_multiple(
+        self,
+        generations_per_prompt: int,
+        *,
+        policy_logprobs_required: bool,
+        reference_logprobs_required: bool,
+    ) -> int:
+        """Return the minimal whole-group quantum for streamed training.
+
+        All metadata dispatches require equal sample counts across the actual
+        policy DP ranks. Fixed worker iterators additionally require complete
+        microbatches on each rank; packed/dynamic iterators consume the driver's
+        bin plan instead of the configured sample microbatch size. Policy and
+        reference logprobs share this policy's DP topology and logprob batch
+        size. Teacher enrichment runs before selection and does not dispatch
+        the selected training chunk.
+        """
+        if type(generations_per_prompt) is not int or generations_per_prompt < 1:
+            raise ValueError(
+                "generations_per_prompt must be a positive integer, got "
+                f"{generations_per_prompt!r}"
+            )
+        dp_world = self.sharding_annotations.get_axis_size("data_parallel")
+        if type(dp_world) is not int or dp_world < 1:
+            raise ValueError(
+                f"data_parallel size must be a positive integer, got {dp_world!r}"
+            )
+        sample_multiple: int = int(dp_world)
+        stages: list[
+            tuple[str, Literal["train_micro_batch_size", "logprob_batch_size"]]
+        ] = [("train_mb_tokens", "train_micro_batch_size")]
+        if policy_logprobs_required or reference_logprobs_required:
+            stages.append(("logprob_mb_tokens", "logprob_batch_size"))
+        for tokens_key, batch_key in stages:
+            spa, dba = self._packing_args(tokens_key)
+            if spa is None and dba is None:
+                micro_batch_size = self.cfg[batch_key]
+                if type(micro_batch_size) is not int or micro_batch_size < 1:
+                    raise ValueError(
+                        f"{batch_key} must be a positive integer, got {micro_batch_size!r}"
+                    )
+                sample_multiple = int(
+                    math.lcm(sample_multiple, dp_world * micro_batch_size)
+                )
+        common_samples = int(math.gcd(sample_multiple, generations_per_prompt))
+        return int(sample_multiple) // common_samples
 
     def begin_train_step(
         self,

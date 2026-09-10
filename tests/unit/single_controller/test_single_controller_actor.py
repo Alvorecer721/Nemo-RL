@@ -30,8 +30,14 @@ from nemo_rl.algorithms.advantage_estimator import (
     AdvEstimatorConfig,
     GRPOAdvantageEstimator,
 )
-from nemo_rl.algorithms.async_utils.replay_buffer import DataPlaneCheckpointBarrier
-from nemo_rl.algorithms.async_utils.staleness_sampler import BaseSampler
+from nemo_rl.algorithms.async_utils.replay_buffer import (
+    DataPlaneCheckpointBarrier,
+    TQReplayBuffer,
+)
+from nemo_rl.algorithms.async_utils.staleness_sampler import (
+    BaseSampler,
+    WindowedSampler,
+)
 from nemo_rl.algorithms.grpo import GRPOConfig, _initial_grpo_save_state
 from nemo_rl.algorithms.loss import ClippedPGLossConfig
 from nemo_rl.algorithms.metric_utils import SetupTimingMetrics
@@ -1198,6 +1204,11 @@ class _EmptyBuffer:
 
 
 class _NoOpTrainer:
+    def get_train_group_count_multiple(
+        self, generations_per_prompt: int, **kwargs: bool
+    ) -> int:
+        return 1
+
     def prepare_for_lp_inference(self, keep_train_buffers: bool = False) -> None:
         del keep_train_buffers
 
@@ -1664,6 +1675,7 @@ def test_train_pump_rejects_step_with_no_valid_training_chunks() -> None:
     ctrl._master_config.grpo.num_prompts_per_step = 1
     ctrl._advantage_stage = AsyncMock(return_value=(meta, False))
     trainer = MagicMock(spec=_NoOpTrainer)
+    trainer.get_train_group_count_multiple.return_value = 1
     ctrl._trainer = trainer
 
     with pytest.raises(
@@ -1705,6 +1717,7 @@ def test_train_pump_skips_empty_chunk_and_trains_later_valid_chunk(
         ]
     )
     trainer = MagicMock(spec=_NoOpTrainer)
+    trainer.get_train_group_count_multiple.return_value = 1
     trainer.finish_train_step.return_value = {}
     ctrl._trainer = trainer
     ctrl._sync_weights = AsyncMock(return_value=0)
@@ -2177,6 +2190,7 @@ def test_train_pump_freezes_the_policy_during_critic_warmup(
         ctrl._rollout_permitted = asyncio.Event()
         ctrl._rollout_permitted.set()
     trainer = MagicMock(spec=_NoOpTrainer)
+    trainer.get_train_group_count_multiple.return_value = 1
     ctrl._trainer = trainer
     ctrl._advantage_stage = AsyncMock(return_value=(meta, True))
     monkeypatch.setattr(single_controller.ray, "cluster_resources", lambda: {})
@@ -2214,6 +2228,7 @@ def test_train_pump_trains_the_policy_once_warmup_is_over(monkeypatch, capsys) -
     ctrl._trainer_version = 1
     ctrl._algo_cfg.max_num_steps = 2
     trainer = MagicMock(spec=_NoOpTrainer)
+    trainer.get_train_group_count_multiple.return_value = 1
     trainer.finish_train_step.return_value = {}
     ctrl._trainer = trainer
     ctrl._advantage_stage = AsyncMock(return_value=(meta, True))
@@ -2701,3 +2716,159 @@ def test_occurrence_advantages_are_invariant_to_permutation_chunks_and_replay(
         chunk_advantages, chunk_mask = run(indices)
         torch.testing.assert_close(chunk_advantages, expected_advantages[indices])
         assert torch.equal(chunk_mask, expected_mask[indices])
+
+
+@pytest.mark.parametrize("target,dropped", [(47, 0), (48, 1)])
+def test_train_pump_rejects_unaligned_target_before_selection(
+    target: int, dropped: int
+) -> None:
+    sampler = _EmptySampler()
+    ctrl = _train_pump_controller(sampler=sampler)
+    ctrl._algo_cfg.num_prompts_per_step = target
+    ctrl._batch_shortfall = {0: dropped}
+    ctrl._trainer.get_train_group_count_multiple = lambda *args, **kwargs: 3
+    with pytest.raises(
+        ValueError if dropped == 0 else RuntimeError, match="multiple of 3"
+    ):
+        asyncio.run(asyncio.wait_for(ctrl._train_pump(), timeout=1.0))
+    assert ctrl._train_steps == 0
+
+
+@pytest.mark.parametrize("drop_tail", [False, True])
+def test_aligned_streaming_preserves_claims_and_optimizer_step(
+    monkeypatch: pytest.MonkeyPatch, drop_tail: bool
+) -> None:
+    ctrl = _train_pump_controller(sampler=None)
+    ctrl._algo_cfg.num_prompts_per_step = 48
+    ctrl._algo_cfg.num_generations_per_prompt = 16
+    ctrl._async_cfg.min_groups_for_streaming_train = 24
+    buffer = TQReplayBuffer(
+        ctrl._dp_client,
+        "rollout_data",
+        pad_value_dict={},
+        include_message_violation_fields=False,
+    )
+    buffer.set_data_plane_checkpoint_barrier(ctrl._data_plane_checkpoint_barrier)
+    ctrl._buffer = buffer
+    ctrl._sampler = WindowedSampler(buffer, max_staleness_versions=1)
+    ctrl._sync_weights = AsyncMock(return_value=0)
+    ctrl._logger = MagicMock()
+    monkeypatch.setattr(single_controller.ray, "cluster_resources", lambda: {})
+    rows = set()
+    cleared = []
+
+    def add_groups(start: int, stop: int) -> None:
+        for i in range(start, stop):
+            group_id = f"group-{i}"
+            buffer.reserve(weight_version=0, target_step=0, group_id=group_id)
+            ids = [f"{group_id}_g{j}" for j in range(16)]
+            buffer.meta_list[-1] = KVBatchMeta(
+                partition_id="rollout_data",
+                task_name=None,
+                sample_ids=ids,
+                sequence_lengths=[1] * 16,
+                tags=[{"weight_version": 0}] * 16,
+                extra_info={ROLLOUT_METRICS: [{"group_index": float(i)}]},
+            )
+            buffer.ready_list[-1] = True
+            buffer.end_weight_list[-1] = 0
+            rows.update(ids)
+
+    def clear_samples(*, sample_ids: list[str], **kwargs: Any) -> None:
+        cleared.extend(sample_ids)
+        rows.difference_update(sample_ids)
+
+    ctrl._dp_client.clear_samples = clear_samples
+    add_groups(0, 25)
+    calls = []
+    trained_ids = []
+    geometry_calls = []
+
+    class Trainer(_NoOpTrainer):
+        def get_train_group_count_multiple(
+            self, generations_per_prompt: int, **kwargs: bool
+        ) -> int:
+            geometry_calls.append((generations_per_prompt, kwargs))
+            return 3
+
+        def begin_train_step(self, loss_fn: Any) -> None:
+            calls.append("begin")
+
+        def train_microbatches_from_meta(
+            self, meta: KVBatchMeta, **kwargs: Any
+        ) -> None:
+            calls.append("train")
+            assert len(meta.sample_ids) == 384
+            trained_ids.extend(meta.sample_ids)
+            assert len(buffer.training_owned_group_ids()) == len(trained_ids) // 16
+            # An open-step snapshot must own every canonical row, including
+            # accumulated groups and the still-selectable tail, exactly once.
+            state = buffer.metadata_state_dict(
+                saved_capacity=48,
+                additional_groups=buffer.training_owned_replay_groups(),
+            )
+            snapshot_ids = [
+                sid for group in state["groups"] for sid in group["meta"].sample_ids
+            ]
+            assert len(snapshot_ids) == len(set(snapshot_ids)) == len(rows)
+            assert set(snapshot_ids) == rows
+            if calls.count("train") == 1:
+                assert buffer.meta_list[0].sample_ids == [
+                    f"group-24_g{j}" for j in range(16)
+                ]
+                assert buffer.meta_list[0].extra_info[ROLLOUT_METRICS] == [
+                    {"group_index": 24.0}
+                ]
+                if drop_tail:
+                    ctrl._batch_shortfall[0] = 1
+                else:
+                    add_groups(25, 48)
+
+        def finish_train_step(self) -> dict[str, Any]:
+            assert len(buffer.training_owned_group_ids()) == 48
+            assert len(rows) == 768
+            calls.append("finish")
+            return {}
+
+    ctrl._trainer = Trainer()
+    if drop_tail:
+        with pytest.raises(RuntimeError, match="multiple of 3"):
+            asyncio.run(asyncio.wait_for(ctrl._train_pump(), timeout=2.0))
+        assert calls == ["begin", "train"]
+        assert len(buffer.training_owned_group_ids()) == 24
+        assert len(rows) == 400
+        assert cleared == []
+        assert len(buffer) == 1
+    else:
+        asyncio.run(asyncio.wait_for(ctrl._train_pump(), timeout=2.0))
+        assert calls == ["begin", "train", "train", "finish"]
+        assert ctrl._train_steps == 1
+        assert len(trained_ids) == len(set(trained_ids)) == 768
+        assert len(cleared) == 768 and set(cleared) == set(trained_ids)
+        assert buffer.training_owned_group_ids() == set()
+        assert rows == set()
+        assert len(buffer) == 0
+    assert len(geometry_calls) == 1
+    assert geometry_calls[0] == (
+        16,
+        {"policy_logprobs_required": False, "reference_logprobs_required": False},
+    )
+
+
+@pytest.mark.parametrize("multiple", [1, 3])
+def test_train_pump_legacy_custom_sampler_contract(multiple: int) -> None:
+    class LegacySampler(_EmptySampler):
+        async def select(
+            self, *, current_train_weight, min_prompt_groups, max_prompt_groups
+        ):
+            return None, 0
+
+    ctrl = _train_pump_controller(sampler=LegacySampler())
+    ctrl._algo_cfg.num_prompts_per_step = 48
+    ctrl._trainer.get_train_group_count_multiple = lambda *args, **kwargs: multiple
+    if multiple == 1:
+        asyncio.run(asyncio.wait_for(ctrl._train_pump(), timeout=1.0))
+    else:
+        with pytest.raises(ValueError, match="sampler.select must support"):
+            asyncio.run(asyncio.wait_for(ctrl._train_pump(), timeout=1.0))
+    assert ctrl._train_steps == 0

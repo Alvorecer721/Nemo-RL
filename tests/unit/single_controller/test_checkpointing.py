@@ -145,6 +145,15 @@ class _FakeTrainer:
         self.save_calls: list[dict[str, Any]] = []
         self.finalize_calls: int = 0
 
+    def get_train_group_count_multiple(
+        self,
+        generations_per_prompt: int,
+        *,
+        policy_logprobs_required: bool,
+        reference_logprobs_required: bool,
+    ) -> int:
+        return 1
+
     def prepare_for_lp_inference(self, keep_train_buffers: bool = False) -> None:
         del keep_train_buffers
 
@@ -1322,27 +1331,32 @@ class TestPeriodicRolloutCheckpoint:
         assert (snapshot / ROLLOUT_RECOVERY_STATE_FILENAME).is_file()
         assert not (snapshot / "policy").exists()
 
+    @pytest.mark.parametrize("group_count", [1, 24])
     def test_snapshot_reindexes_rows_owned_by_active_streamed_step(
-        self, tmp_path: Path
+        self, tmp_path: Path, group_count: int
     ):
         actor = self._actor(tmp_path)
-        claimed_meta = KVBatchMeta(
-            partition_id=_PARTITION_ID,
-            task_name=None,
-            sample_ids=["claimed-group_g0"],
-            sequence_lengths=[16],
-            tags=[{"weight_version": 0}],
-        )
         actor._buffer.training_claims = [
             {
-                "meta": claimed_meta,
+                "meta": KVBatchMeta(
+                    partition_id=_PARTITION_ID,
+                    task_name=None,
+                    sample_ids=[f"claimed-group-{i}_g{j}" for j in range(16)],
+                    sequence_lengths=[16] * 16,
+                    tags=[{"weight_version": 0}] * 16,
+                ),
                 "start_weight": 0,
                 "end_weight": 0,
                 "target_step": 0,
-                "group_id": "claimed-group",
+                "group_id": f"claimed-group-{i}",
             }
+            for i in range(group_count)
         ]
-        actor._dp_client.sample_ids = list(claimed_meta.sample_ids)
+        actor._dp_client.sample_ids = [
+            sid
+            for group in actor._buffer.training_claims
+            for sid in group["meta"].sample_ids
+        ]
 
         try:
             assert asyncio.run(actor._save_rollout_checkpoint(force=True))
@@ -1363,9 +1377,9 @@ class TestPeriodicRolloutCheckpoint:
             snapshot / REPLAY_BUFFER_METADATA_FILENAME,
             weights_only=False,
         )
-        assert manifest["rolled_back_train_group_count"] == 1
+        assert manifest["rolled_back_train_group_count"] == group_count
         assert [group["group_id"] for group in replay_state["groups"]] == [
-            "claimed-group"
+            f"claimed-group-{i}" for i in range(group_count)
         ]
 
     def test_snapshot_skips_optimizer_commit_window(self, tmp_path: Path):

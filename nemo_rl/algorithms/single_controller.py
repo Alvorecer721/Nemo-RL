@@ -41,7 +41,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -96,6 +98,7 @@ from nemo_rl.algorithms.single_controller_utils.config import (
     algo_config,
     is_ppo_run,
 )
+from nemo_rl.algorithms.single_controller_utils.rewards import apply_grouped_alp
 from nemo_rl.algorithms.single_controller_utils.rollout_checkpoint import (
     ROLLOUT_SNAPSHOT_MANIFEST_FILENAME,
     ROLLOUT_SNAPSHOT_SCHEMA_VERSION,
@@ -106,7 +109,6 @@ from nemo_rl.algorithms.single_controller_utils.rollout_checkpoint import (
     prepare_snapshot_paths,
     prune_bootstrap_snapshots,
 )
-from nemo_rl.algorithms.single_controller_utils.rewards import apply_grouped_alp
 from nemo_rl.algorithms.single_controller_utils.setup import SingleControllerActorArgs
 from nemo_rl.algorithms.single_controller_utils.utils import (
     aggregate_step_metrics,
@@ -2178,7 +2180,9 @@ class SingleControllerActor:
             flush=True,
         )
 
-    def _target_groups_for_step(self, step: int) -> int:
+    def _target_groups_for_step(
+        self, step: int, *, group_count_multiple: int = 1
+    ) -> int:
         """How many prompt groups this step should train on, after dropped prompts.
 
         ``num_prompts_per_step`` is the target; groups stamped for this step that were
@@ -2218,6 +2222,14 @@ class SingleControllerActor:
                 "prompts, or the drop budgets are set too high to catch it: they are "
                 "run-scoped and cannot bound how short a single step gets."
             )
+        if target % group_count_multiple:
+            raise RuntimeError(
+                f"training step {step} lost {dropped} prompt group(s), leaving "
+                f"{target}, which must be a multiple of {group_count_multiple} "
+                "for the active training/logprob dispatches. Cannot split or "
+                "discard the remaining groups; replace dropped prompts or use "
+                "compatible batching. Existing training claims remain recoverable."
+            )
         return target
 
     async def _train_pump(self) -> None:
@@ -2228,7 +2240,7 @@ class SingleControllerActor:
             1. Select the rollouts to train on.
                 a. sampler.evict drops stale groups from the buffer and clears their
                     TQ rows.
-                b. sampler.select returns K prompt groups, or None, and removes them from
+                b. sampler.select returns K aligned prompt groups, or None, and claims them from
                     the buffer. The DP rows survive, already training-shaped because the
                     buffer wrote them that way at rollout time.
                 c. One _buffer_capacity permit is released per group that left the buffer.
@@ -2263,6 +2275,46 @@ class SingleControllerActor:
         still advances, and the sampler's lookahead is widened while the policy is
         frozen.
         """
+        # Derive geometry once per pump, before eviction or selection. These are
+        # backend dispatch constraints, not a GPU-count approximation.
+        group_count_multiple = self._trainer.get_train_group_count_multiple(
+            self._algo_cfg.num_generations_per_prompt,
+            policy_logprobs_required=self._policy_logprobs_required,
+            reference_logprobs_required=self._reference_logprobs_required,
+        )
+        configured_target = self._algo_cfg.num_prompts_per_step
+        if configured_target < 1 or configured_target % group_count_multiple:
+            raise ValueError(
+                f"num_prompts_per_step={configured_target} must be a positive "
+                f"multiple of {group_count_multiple} for the active dispatches"
+            )
+        minimum = self._async_cfg.min_groups_for_streaming_train
+        if minimum < 1 or minimum > configured_target:
+            raise ValueError(
+                "min_groups_for_streaming_train must be in "
+                f"[1, {configured_target}], got {minimum}"
+            )
+        select_groups = self._sampler.select
+        if group_count_multiple != 1:
+            # Custom samplers retain their old call when no alignment is needed.
+            # Inspect only at this extension boundary so an unsupported signature
+            # fails before the pump can evict or claim anything.
+            try:
+                inspect.signature(select_groups).bind(
+                    current_train_weight=self._trainer_version,
+                    min_prompt_groups=minimum,
+                    max_prompt_groups=configured_target,
+                    group_count_multiple=group_count_multiple,
+                )
+            except TypeError as error:
+                raise ValueError(
+                    "sampler.select must support keyword-only group_count_multiple "
+                    f"for backend alignment (multiple of {group_count_multiple})"
+                ) from error
+            select_groups = functools.partial(
+                select_groups, group_count_multiple=group_count_multiple
+            )
+
         policy_training_start_step = (
             self._algo_cfg.policy_training_start_step if self._is_ppo else 0
         )
@@ -2292,7 +2344,7 @@ class SingleControllerActor:
                 # step can be dropped while the pump is already waiting for it, which is
                 # precisely the case that would otherwise wait forever.
                 while groups_dispatched < self._target_groups_for_step(
-                    version_during_step
+                    version_during_step, group_count_multiple=group_count_multiple
                 ):
                     # ---- 1. Select the rollouts to train on ----
                     with self._timer.time("exposed_generation"):
@@ -2319,7 +2371,8 @@ class SingleControllerActor:
                         # not a batch the sampler can be asked for -- select() rejects
                         # a min below 1 -- so close the step instead.
                         target_groups = self._target_groups_for_step(
-                            version_during_step
+                            version_during_step,
+                            group_count_multiple=group_count_multiple,
                         )
                         max_prompt_groups = target_groups - groups_dispatched
                         if max_prompt_groups <= 0:
@@ -2334,7 +2387,7 @@ class SingleControllerActor:
                         training_claim_ids_before = (
                             self._buffer.training_owned_group_ids()
                         )
-                        train_meta, num_groups = await self._sampler.select(
+                        train_meta, num_groups = await select_groups(
                             current_train_weight=self._trainer_version,
                             min_prompt_groups=min_prompt_groups,
                             max_prompt_groups=max_prompt_groups,

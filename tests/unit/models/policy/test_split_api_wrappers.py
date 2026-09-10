@@ -182,6 +182,7 @@ def _make_tq_policy() -> tuple[TQPolicy, MagicMock]:
     # opd_full off, as __init__ leaves it when the config block is absent.
     p._opd_full_field = None
     p.flops_tracker = None
+    p.dp_client = MagicMock()
     wg = MagicMock()
     wg.run_all_workers_single_data.return_value = ["f0", "f1"]
     p.worker_group = wg
@@ -382,3 +383,70 @@ class TestTQPolicyOPDFullColumn:
 
         fields = p.dp_client.register_partition.call_args.kwargs["fields"]
         assert fields == list(DP_TRAIN_FIELDS)
+
+
+@pytest.mark.parametrize(
+    "mode,train_mbs,logprob_mbs,policy_lp,reference_lp,expected",
+    [
+        ("fixed", 2, 5, False, False, 3),
+        ("fixed", 2, 5, True, False, 15),
+        ("fixed", 2, 5, False, True, 15),
+        ("fixed", 2, 5, True, True, 15),
+        ("fixed", 8, 6, True, True, 9),
+        ("packed", 8, 5, True, True, 3),
+        ("dynamic", 8, 5, True, True, 3),
+    ],
+)
+def test_streaming_group_quantum_uses_active_dispatch_constraints(
+    mode: str,
+    train_mbs: int,
+    logprob_mbs: int,
+    policy_lp: bool,
+    reference_lp: bool,
+    expected: int,
+) -> None:
+    p, _ = _make_tq_policy()
+    p.sharding_annotations.get_axis_size.return_value = 6
+    p.cfg.update(train_micro_batch_size=train_mbs, logprob_batch_size=logprob_mbs)
+    packing = {"fixed": (None, None), "packed": ({}, None), "dynamic": (None, {})}[mode]
+    with patch.object(TQPolicy, "_packing_args", return_value=packing):
+        assert (
+            p.get_train_group_count_multiple(
+                16,
+                policy_logprobs_required=policy_lp,
+                reference_logprobs_required=reference_lp,
+            )
+            == expected
+        )
+
+
+@pytest.mark.parametrize("generations", [0, -1, 1.5, True])
+def test_streaming_group_quantum_rejects_invalid_group_sizes(
+    generations: float,
+) -> None:
+    p, _ = _make_tq_policy()
+    with pytest.raises(ValueError, match="generations_per_prompt"):
+        p.get_train_group_count_multiple(
+            generations,
+            policy_logprobs_required=False,
+            reference_logprobs_required=False,
+        )
+
+
+def test_streaming_group_quantum_distinguishes_train_and_logprob_packing() -> None:
+    p, _ = _make_tq_policy()
+    p.sharding_annotations.get_axis_size.return_value = 6
+    p.cfg.update(train_micro_batch_size=8, logprob_batch_size=5)
+    with patch.object(
+        TQPolicy,
+        "_packing_args",
+        side_effect=lambda key: ({}, None)
+        if key == "train_mb_tokens"
+        else (None, None),
+    ):
+        assert (
+            p.get_train_group_count_multiple(
+                16, policy_logprobs_required=True, reference_logprobs_required=False
+            )
+            == 15
+        )
