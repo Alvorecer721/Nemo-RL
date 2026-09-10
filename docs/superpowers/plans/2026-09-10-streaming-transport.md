@@ -61,14 +61,17 @@
 
 - [x] Review each task against its specification and fix substantive findings.
 - [x] Run the union of relevant tests once on the combined source; run lint, format and diff checks. Re-run only after changes/failures justify it.
-- [ ] Qualify Gloo broadcast and the bounded NCCL/refit tests when infrastructure is available. Match dependency fingerprint before larger 70B streaming/GLM parity jobs; keep unrun gates explicit.
-- [ ] Obtain independent whole-branch review. Record commits, source/image identity, tests and limitations. Update existing issues #32/#39 with actual evidence; keep them open until their qualification criteria are met.
+- [x] Qualify Gloo broadcast and the bounded NCCL/refit tests when infrastructure is available. Match dependency fingerprint before larger 70B streaming/GLM parity jobs; keep unrun gates explicit.
+- [x] Obtain independent whole-branch review. Record commits, source/image identity, tests and limitations. Update existing issues #32/#39 with actual evidence; keep them open until their qualification criteria are met.
 
 ## Validation recorded September 10
 
 Implementation commits: `d987cc6c6` (streaming), `b56199d73` (strict FIFO
 preflight), `b36dcb1f7` (byte transport), `2c8939cfc` (refit probes).
-Each task passed independent review. No production refit synchronization changed.
+Each task passed independent review. The whole-branch review's two probe/launcher
+findings were corrected in `0313dead8`; its scoped final re-review passed.
+Earlier probe corrections are `01cffffa6` and `f4a8933f1`. No production refit
+synchronization changed, and no change was merged to main.
 
 - Combined source at `2c8939cfc`: 468 tests passed, one skip, 74.94 seconds.
   The skipped Megatron split-state module needs `megatron.bridge`, absent from
@@ -78,15 +81,41 @@ Each task passed independent review. No production refit synchronization changed
   also log upstream Transformers Qwen2VL output-docstring messages.
 - Changed-file Ruff lint/format, per-task Pyrefly and whitespace checks passed.
   Lockfiles, actor environments and submodule pins match base `7197ac715`.
-- Two-GPU NCCL broadcast job `3351386` completed: three tests passed on GH200.
-  Scratch runtime: Python 3.13.14, Torch 2.11.0+cu130, Ray 2.56.1, NCCL 2.28.9.
-  Exact values and byte payloads passed for CPU and CUDA sources. One 2 MiB
-  transfer measured 9.743 ms; no matched baseline or throughput gain is established.
-- Standalone refit job `3351750` was submitted from immutable `2c8939cfc`:
-  two nodes, trainer stages 2/4, one/two streams, 40 iterations, eight transfers
-  per stage, 2 MiB payloads. Results are pending.
-- Native release-image assembly, native preflight, the 70B streaming/resume
-  gate, GLM Router Replay/logprob parity and representative performance remain open.
+- The final amended probe test file passed all 35 tests after focused red/green
+  checks for the two native-launch failures. Its Ruff, Pyrefly, Bash syntax and
+  whitespace checks passed. These are scoped results, not a repeated combined run.
+- Two-GPU NCCL broadcast job `3351386` passed three tests in the scratch
+  environment. Matching-image job `3352071` also passed all three tests in
+  64.18 seconds (allocation 1m41s), with explicit source/container fingerprint
+  equality and baked-worker validation. Source `2c8939cfc` carried the unchanged
+  byte implementation `b36dcb1f7`. Python 3.13.14, Torch 2.11.0+cu130, GH200.
+  Exact values and byte payloads passed for CPU and CUDA sources.
+- The byte logs' `torch.cuda.nccl.version()` value, 2.28.9, reports
+  [compile-time headers](https://github.com/pytorch/pytorch/blob/v2.11.0/torch/csrc/cuda/nccl.cpp#L449-L453),
+  not the loaded runtime. Single 2 MiB observations were 9.743 ms (scratch)
+  and 9.617 ms (native); no matched baseline or throughput gain is established.
+- Matching-image refit job `3352507`, source `0313dead8`, completed `0:0` in
+  4m15s and released both nodes. All four arms passed: trainer stages 2/4,
+  one/two streams, 40 iterations, eight transfers per stage, 2 MiB payloads.
+  Logs establish the actual 2+1/4+1 rank placement, distinct physical GPUs,
+  3,840 transfer pairs, 480 full-payload checks and completed teardown.
+  Loaded runtime: NCCL 2.30.7+cuda13.3 over AWS Libfabric. Python xferdtensor
+  was forced; rollout PP1, no M2N/NCCL-EP activation. No synchronization race
+  was reproduced by this bounded matrix.
+- Image for both native checks:
+  `nemo-rl-apertus-vllm-0.26.0-7197ac71505b-4b083e73f774.sqsh`.
+  Assembly and native preflight are complete. The real 70B streaming/resume,
+  numerical normalization, GLM Router Replay/logprob parity and representative
+  performance gates remain open. This probe does not qualify those workloads.
+- Previous refit jobs failed before transfers: `3351750` exposed all four
+  GPUs per task; `3352111` revealed a non-JSON-serializable CUDA UUID and
+  balanced 3+2 task placement. The reviewed corrections normalize the UUID,
+  map Slurm local ranks to GPUs, validate uniqueness before NCCL setup and
+  request packed Slurm placement. Failure logs are retained.
+- Existing issues were updated without duplicates:
+  [streaming #32](https://github.com/Alvorecer721/Nemo-RL/issues/32#issuecomment-5623803237)
+  and [byte transport #39](https://github.com/Alvorecer721/Nemo-RL/issues/39#issuecomment-5623811336).
+  Site/job evidence remains local; both issues remain open for the model gates.
 
 ## Decisions and limits
 
