@@ -143,10 +143,10 @@ Filled in as steps complete; job IDs and digests only after the runs exist.
 |---|---|
 | Core merge | done, `c4df534e`; MLA import regression passes locally |
 | Bridge merge | done, `3880d9e0`; Bridge unit/pre-commit checks pending (container) |
-| NeMo-RL merge + relock | done, merge commit on `sync/2026-09-10-upstream-c49d53e` |
+| NeMo-RL merge + relock | done: merge `7bae96802` on build tip `28f599e9f` (re-anchored after the CSCS layout reorganization), followed by `fix(data_plane)`, `fix(sc)`, `test(sync)`, `docs(sync)`, `test(infra)` |
 | Static checks | ruff check/format clean on every changed Python file |
-| CPU unit tests | pending (environment from the new lock) |
-| Pins published | pending |
-| Image build / assembly / native gates | pending |
+| CPU unit tests | job 3350447 (venv from the new lock inside the qualified 0.26 image): data plane 290 passed / 14 skipped, build 326 passed, controller 2862 passed / 1 failed (pre-existing recipe accounting); TQ regression red against the merge commit, green with the fix |
+| Pins published | Core `c4df534e` and Bridge `3880d9e0` on `integrate/2026-09-10-upstream-sync` in both forks (ls-remote verified); NeMo branch pushed |
+| Image build / assembly / native gates | dependency rebuild job 3350563 submitted from `6b8d6d1cf`; release build, assembly and gates pending |
 | 70B initial + resume | pending |
 | GLM-5.1 10-step probe | pending |
