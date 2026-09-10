@@ -27,6 +27,11 @@ RUNNER_PATH = (
 )
 
 
+class _CudaUuidLike:
+    def __str__(self):
+        return "gpu-a0"
+
+
 def _load_probe():
     assert PROBE_PATH.is_file(), f"missing refit probe: {PROBE_PATH}"
     spec = importlib.util.spec_from_file_location(
@@ -195,10 +200,12 @@ def test_duplicate_device_mapping_fails_before_communicator_initialization(
     monkeypatch.setattr(
         probe.torch.cuda,
         "get_device_properties",
-        lambda _: SimpleNamespace(uuid="gpu-a0", name="GH200"),
+        lambda _: SimpleNamespace(uuid=_CudaUuidLike(), name="GH200"),
     )
 
-    def gather_placements(gathered, _local):
+    def gather_placements(gathered, local):
+        assert local["cuda_device_uuid"] == "gpu-a0"
+        json.dumps(local)
         gathered[:] = duplicate_placements
 
     monkeypatch.setattr(probe.dist, "all_gather_object", gather_placements)
@@ -225,6 +232,7 @@ def test_launcher_uses_whole_node_visibility_and_slurm_local_id():
 
     assert "--gpu-bind=none" in runner
     assert "--gpus-per-task" not in runner
+    assert "--distribution=block:block,Pack" in runner
     assert "export LOCAL_RANK=$SLURM_LOCALID" in runner
 
 

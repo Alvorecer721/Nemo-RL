@@ -728,7 +728,7 @@ def run_probe(config: ProbeConfig) -> None:
         properties = torch.cuda.get_device_properties(local_rank)
         device = DeviceIdentity(
             index=local_rank,
-            uuid=properties.uuid,
+            uuid=str(properties.uuid),
             name=properties.name,
         )
         placement: RankPlacement = {

@@ -119,7 +119,7 @@ run_arm() {
       --kill-on-bad-exit=1 \
       --cpu-bind=none \
       --gpu-bind=none \
-      --distribution=block:block \
+      --distribution=block:block,Pack \
       --nodes=2 \
       --ntasks="$world_size" \
       --ntasks-per-node="$stages" \
