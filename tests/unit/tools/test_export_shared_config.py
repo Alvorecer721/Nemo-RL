@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +32,31 @@ def tool():
     sys.modules["export_shared_config"] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _init_repo(path, files):
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    for name, text in files.items():
+        target = path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+        check=True,
+    )
 
 
 def test_scrub_replaces_site_paths_and_keeps_basename(tool):
@@ -86,3 +112,69 @@ def test_render_header_lists_provenance_and_fork_only_keys(tool):
     assert "#   - a.x" in head
     assert yaml.safe_load(body) == {"a": {"x": "<site>/m"}, "b": 1}
     assert body.index("a:") < body.index("b:")
+
+
+def test_load_resolved_recipe_follows_defaults_and_env(tool, tmp_path, monkeypatch):
+    base = tmp_path / "base.yaml"
+    base.write_text("policy:\n  model_name: base\n  train_micro_batch_size: 2\n")
+    leaf = tmp_path / "leaf.yaml"
+    leaf.write_text("defaults: ./base.yaml\npolicy:\n  model_name: ${oc.env:AP_CKPT}\n")
+    monkeypatch.setenv("AP_CKPT", "/capstor/models/ap")
+    cfg = tool.load_resolved(config=None, recipe=leaf)
+    assert cfg["policy"] == {
+        "model_name": "/capstor/models/ap",
+        "train_micro_batch_size": 2,
+    }
+
+
+def test_load_resolved_requires_exactly_one_input(tool, tmp_path):
+    with pytest.raises(ValueError, match="exactly one"):
+        tool.load_resolved(config=None, recipe=None)
+
+
+def test_cli_writes_scrubbed_annotated_yaml(tool, tmp_path):
+    resolved = tmp_path / "config.yaml"
+    resolved.write_text(
+        "grpo:\n  num_prompts_per_step: 48\n  cot_think_token_ids: [32, 33]\n"
+        "policy:\n  model_name: /capstor/store/models/ap1p5-70b\n"
+    )
+    idents = tmp_path / "idents.txt"
+    idents.write_text("grpo\nnum_prompts_per_step\npolicy\nmodel_name\n")
+    out = tmp_path / "out.yaml"
+    rc = tool.main(
+        [
+            "--config",
+            str(resolved),
+            "--upstream-identifiers",
+            str(idents),
+            "--source-commit",
+            "7197ac71505b",
+            "--job-id",
+            "3352055",
+            "--reference-run",
+            "70B GSM8K",
+            "--resolved-from",
+            "checkpoint step_2/config.yaml",
+            "--output",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    text = out.read_text()
+    head, body = text.split("\n\n", 1)
+    assert "# Slurm job: 3352055" in head
+    assert "#   - grpo.cot_think_token_ids" in head
+    assert "# Scrubbed prefixes: /capstor, /iopsstor, /users" in head
+    assert "<site>/ap1p5-70b" in body and "/capstor" not in body
+
+
+def test_upstream_identifiers_from_git_reads_the_ref(tool, tmp_path):
+    _init_repo(tmp_path, {"nemo_rl/a.py": "num_prompts_per_step = 1\n"})
+    idents = tool.upstream_identifiers_from_git(tmp_path, "HEAD")
+    assert "num_prompts_per_step" in idents and "cot_think_token_ids" not in idents
+
+
+def test_upstream_identifiers_from_git_rejects_unknown_ref(tool, tmp_path):
+    _init_repo(tmp_path, {"nemo_rl/a.py": "num_prompts_per_step = 1\n"})
+    with pytest.raises(RuntimeError, match="git grep failed"):
+        tool.upstream_identifiers_from_git(tmp_path, "no-such-ref")
