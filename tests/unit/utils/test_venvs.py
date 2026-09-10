@@ -115,6 +115,54 @@ def test_non_uv_worker_keeps_exact_base_sync(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("failure", [None, "sync", "inventory"])
+def test_prebuilt_finalization_selects_actor_and_gates_readiness(tmp_path, failure):
+    """Finalize the actor directly and mark ready only after recording its state."""
+    actor = "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker"
+    command = "uv run --locked --extra vllm"
+    worker = tmp_path / actor
+    (worker / "bin").mkdir(parents=True)
+    (worker / "bin/python").touch()
+    dependency = worker / "dependency"
+    dependency.write_text("prepared backend version")
+    marker = worker / VENV_READY_MARKER
+    marker.write_text("stale")
+
+    def execute(cmd, **kwargs):
+        if cmd[1] == "sync":
+            assert "--frozen" in cmd and "--offline" in cmd
+            assert "--extra" in cmd and "vllm" in cmd
+            assert kwargs["env"]["UV_PROJECT_ENVIRONMENT"] == str(worker)
+            if failure == "sync":
+                raise RuntimeError("dependency mismatch")
+        elif cmd[1].endswith("venv_inventory.py"):
+            assert cmd[0] == str(worker / "bin/python") and cmd[2] == "record"
+            if failure == "inventory":
+                raise RuntimeError("inventory write failed")
+        else:
+            raise AssertionError(f"Unexpected mutating command: {cmd}")
+        assert kwargs["env"]["UV_OFFLINE"] == "1"
+        assert kwargs["env"]["UV_LINK_MODE"] == "copy"
+
+    with patch.object(venvs_module.subprocess, "run", execute):
+        if failure:
+            with pytest.raises(RuntimeError):
+                venvs_module.finalize_prebuilt_venv(command, actor)
+            assert not marker.exists()
+        else:
+            result = venvs_module.finalize_prebuilt_venv(command, actor)
+            assert result == str(worker / "bin/python")
+            assert venvs_module.venv_is_current(marker, command)
+    assert dependency.read_text() == "prepared backend version"
+
+
+def test_prebuilt_finalization_rejects_missing_worker(tmp_path):
+    actor = "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker"
+    with pytest.raises(FileNotFoundError):
+        venvs_module.finalize_prebuilt_venv("uv run --locked --extra vllm", actor)
+    assert not (tmp_path / actor / VENV_READY_MARKER).exists()
+
+
 def test_actor_runtime_env_prepends_pinned_uv_to_path(monkeypatch, tmp_path):
     uv_executable = tmp_path / "uv"
     uv_executable.touch(mode=0o755)

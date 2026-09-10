@@ -210,6 +210,26 @@ class NemoWorkerTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("image_workers", SCRIPT)
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
+        shutil.copyfile(
+            ROOT / "nemo_rl/utils/venv_inventory.py",
+            self.source / "nemo_rl/utils/venv_inventory.py",
+        )
+        metadata = self.source / "fixture_dependency-1.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: fixture-dependency\nVersion: 1.0\n")
+        (metadata / "WHEEL").write_text("Wheel-Version: 1.0\nTag: py3-none-any\n")
+        (metadata / "RECORD").write_text("fixture.py,sha256=abc,12\n")
+        self.record_inventory()
+
+    def record_inventory(self, extras=()):
+        command = [
+            str(self.prefix / "bin/python"),
+            str(self.source / "nemo_rl/utils/venv_inventory.py"),
+            "record",
+        ]
+        for extra in extras:
+            command.extend(["--extra", extra])
+        subprocess.run(command, env=self.environment, check=True, capture_output=True)
 
     def check(self, extras="", **kwargs):
         with (
@@ -247,11 +267,13 @@ class NemoWorkerTests(unittest.TestCase):
                 self.assertIn("fingerprint", report["error"].lower())
 
     def test_missing_deferred_trt_backend_cannot_pass_actor_import(self):
+        self.record_inventory(["trtllm"])
         report = self.check("trtllm")
         self.assertFalse(report["passed"], report)
         self.assertIn("tensorrt_llm", report["error"])
 
     def test_trt_native_import_is_explicitly_deferred_on_cpu(self):
+        self.record_inventory(["trtllm"])
         (self.source / "tensorrt_llm.py").write_text(
             "raise RuntimeError('native initializer requires GPU qualification')\n"
         )

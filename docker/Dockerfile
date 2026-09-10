@@ -462,13 +462,14 @@ EOF
 # Potentially not necessary if the repo is passed in as a complete repository (w/ full git history),
 # so do a quick check before trying to unshallow.
 RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
-# Every dependency is already materialized. Install the project and write the
-# frozen wrappers/readiness markers using exactly the same selected actor list.
+# Finish the frozen actor environments and record their installed inventories.
+# Copy mode for this small release delta avoids replacing overlay hardlinks;
+# the expensive dependency layer retains its shared files. No base-only sync.
 # Offline mode makes a missing dependency fail here rather than at job startup.
 RUN <<"EOF" bash -exu -o pipefail
 mapfile -t actors < <(cut -f1 /opt/actor_venvs.tsv)
 (( ${#actors[@]} > 0 ))
-UV_OFFLINE=1 UV_LINK_MODE=hardlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs "${actors[@]}"
+UV_OFFLINE=1 uv run --no-sync python -m nemo_rl.utils.prefetch_venvs --prebuilt "${actors[@]}"
 EOF
 
 FROM release-core AS release

@@ -134,6 +134,54 @@ def venv_is_current(ready_marker: Path, py_executable: str) -> bool:
         return False
 
 
+def finalize_prebuilt_venv(py_executable: str, venv_name: str) -> str:
+    """Finish an image worker using its exact frozen backend environment.
+
+    A base sync replaces backend-constrained dependencies, then the actor sync
+    replaces them again. Sync the actor directly and use copies for the small
+    release delta: cross-layer hardlink replacements can fail with EINVAL.
+    Record the successful frozen installation before declaring the worker ready.
+    """
+    from nemo_rl.distributed.actor_environments import ACTOR_ENVIRONMENTS
+
+    extras = ACTOR_ENVIRONMENTS.get(venv_name)
+    if extras is None:
+        raise ValueError(f"No prebuilt dependency environment declared for {venv_name}")
+    worker = Path(os.environ.get("NEMO_RL_VENV_DIR", DEFAULT_VENV_DIR)) / venv_name
+    marker = worker / VENV_READY_MARKER
+    marker.unlink(missing_ok=True)
+    python = worker / "bin/python"
+    if not python.is_file():
+        raise FileNotFoundError(f"Prebuilt worker interpreter is missing: {python}")
+
+    env = {
+        **os.environ,
+        "UV_PROJECT_ENVIRONMENT": str(worker),
+        "UV_OFFLINE": "1",
+        "UV_LINK_MODE": "copy",
+    }
+    command = [
+        os.environ.get("UV", "uv"),
+        "sync",
+        "--offline",
+        "--frozen",
+        "--directory",
+        git_root,
+    ]
+    inventory = [
+        str(python),
+        str(Path(git_root) / "nemo_rl/utils/venv_inventory.py"),
+        "record",
+    ]
+    for extra in extras:
+        command.extend(["--extra", extra])
+        inventory.extend(["--extra", extra])
+    subprocess.run(command, env=env, check=True)
+    subprocess.run(inventory, env=env, check=True)
+    _mark_venv_ready(marker, py_executable)
+    return str(python)
+
+
 def add_hf_modules_cache_to_pythonpath(env_vars: dict[str, str]) -> dict[str, str]:
     """Make Hugging Face ``trust_remote_code`` modules importable by Ray actors."""
     result = env_vars.copy()

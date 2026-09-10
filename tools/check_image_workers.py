@@ -79,8 +79,7 @@ if actor.startswith("nemo_rl."):
     if not venv_is_current(marker, get_actor_python_env(actor)):
         raise RuntimeError(f"Missing or stale worker readiness marker: {marker}")
 
-    command = [os.environ.get("UV", "uv"), "sync", "--offline", "--frozen",
-               "--check", "--no-install-project", "--inexact", "--directory", str(source)]
+    command = [sys.executable, str(source / "nemo_rl/utils/venv_inventory.py"), "verify"]
     for extra in extras:
         command.extend(["--extra", extra])
     checked = subprocess.run(command, capture_output=True, text=True, timeout=int(timeout))
@@ -89,7 +88,7 @@ if actor.startswith("nemo_rl."):
     locked_dependencies = True
 
 # Top-level specs catch a missing deferred backend without importing its GPU
-# initialization path. uv --check above verifies the installed locked versions.
+# initialization path. The inventory above verifies the frozen installation.
 backend_modules = {
     "vllm": "vllm", "sglang": "sglang", "mcore": "megatron",
     "automodel": "nemo_automodel", "fsdp": "torch",

@@ -14,6 +14,7 @@
 
 """Host-only tests for dependency cache identities and selection."""
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -278,7 +279,16 @@ class BuilderFlowTests(_ManifestFixture):
         self.addCleanup(self.services.cleanup)
         self.external = Path(self.services.name)
         (self.repo / "tools/image_build_manifest.py").write_bytes(TOOL.read_bytes())
-        self.launcher = TOOL.parents[1] / "infra/slurm/cscs/build_nemo_rl_image.slurm"
+        launcher = TOOL.parents[1] / "infra/slurm/cscs/build_nemo_rl_image.slurm"
+        helper = "#!/bin/sh\nexit 0\n"
+        self.launcher = self.external / "build-image.slurm"
+        # Exercise the real checksum guard against a small downloaded fixture.
+        self.launcher.write_text(
+            launcher.read_text().replace(
+                "82fed736197b2a881a822e5357b488796f654e8371ce8573a1592331510a0133",
+                hashlib.sha256(helper.encode()).hexdigest(),
+            )
+        )
         service_script = self.external / "service"
         service_script.write_text(
             f"#!{sys.executable}\n"
@@ -289,7 +299,12 @@ args = sys.argv[1:]
 with open(os.environ['FAKE_LOG'], 'a') as log:
     log.write(json.dumps([name, *args]) + '\\n')
 if name == 'curl':
-    if '--write-out' in args:
+    if '--output' in args and any('fuse-overlayfs/releases/' in arg for arg in args):
+        payload = os.environ['FAKE_FUSE_HELPER']
+        if os.environ.get('FAKE_FUSE_CORRUPT'):
+            payload += 'corrupted'
+        Path(args[args.index('--output') + 1]).write_text(payload)
+    elif '--write-out' in args:
         print(os.environ.get('FAKE_HTTP_STATUS', '404'), end='')
 elif name == 'podman':
     if args[0] == 'build':
@@ -326,6 +341,7 @@ elif name == 'enroot':
             "NRL_IMAGE_PROFILE": "apertus",
             "BUILD_TRTLLM": "0",
             "FAKE_LOG": str(self.external / "calls.jsonl"),
+            "FAKE_FUSE_HELPER": helper,
         }
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(
@@ -401,7 +417,17 @@ elif name == 'enroot':
         result = self.launch(FAKE_GRAPH_ROOT="/home/shared/containers")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unexpected Podman graph", result.stderr)
-        self.assertEqual([call[:2] for call in self.calls()], [["podman", "info"]])
+        self.assertEqual(
+            [call[:2] for call in self.calls() if call[0] == "podman"],
+            [["podman", "info"]],
+        )
+        self.assertFalse(any(call[0] == "enroot" for call in self.calls()))
+
+    def test_corrupted_overlay_helper_is_rejected_before_container_operations(self):
+        result = self.launch(FAKE_FUSE_CORRUPT="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("FAILED", result.stdout)
+        self.assertFalse(any(call[0] in {"podman", "enroot"} for call in self.calls()))
 
     def test_existing_store_and_unsupported_profile_combination_fail_early(self):
         Path(self.environment["PODMAN_STORAGE_BASE"]).mkdir()

@@ -96,3 +96,30 @@ dependency cache. Do not bypass runtime fingerprints or change platform support.
   Shell syntax checks and an independent review passed. Upstream release notes
   document directory iteration, lookup, and deleted-file fixes after 1.1.0:
   https://github.com/containers/fuse-overlayfs/blob/v1.18/NEWS.
+- Build 3346566 passed and published the hermetic dependency image in 3,511
+  allocation seconds. Its generated cache key remains
+  `c942b5ec4023a984b48ffe867687d2576ca78b5b7deb9b972eef0e4868be0649`.
+- Release 3346567 failed after 2,130 allocation seconds at worker finalization.
+  The general venv provisioner first selects base dependencies, then the actor
+  extra, switching tilelang/protobuf versions twice. Its cross-layer hardlink
+  replacements failed with EINVAL. This was reproduced with one actor using
+  the release's cached parent image and no network access.
+- The corrected image-only finalizer runs the actor's frozen offline sync
+  directly, with copy mode for the release delta. All six actors passed against
+  the cached parent: CUDA wheels were reused, and only Bridge/Core's small
+  Python packages rebuilt (15.78 seconds). Before/after dependency versions
+  matched; all wrappers, readiness markers and inventory checks passed.
+- Qualification compares a package inventory recorded after successful frozen
+  synchronization, alongside the existing source fingerprint, readiness and
+  native-import gates. The prior `uv sync --check` incorrectly required installer
+  convergence despite upstream wheel-tag, local-version and freshness quirks.
+  Inventories reject missing metadata or duplicate distributions, record
+  METADATA/WHEEL/RECORD/direct URL hashes, Python/prefix/extras, and are readable
+  by non-root runtime users. No dependency pins or static metadata are changed.
+- The stale causal-conv1d, Mamba and fast-hadamard static version hints were
+  observed during diagnosis; reconciling them belongs in a separate dependency
+  change. The custom lock validator explored during diagnosis was discarded.
+- Finalization validation passed: 89 focused tests and 24 subtests, Ruff checks,
+  all six real worker environments, and independent review. Builder fixtures now
+  exercise the pinned helper checksum, including rejection of corrupt downloads.
+  Release export and 70B initial/resume qualification remain pending.
