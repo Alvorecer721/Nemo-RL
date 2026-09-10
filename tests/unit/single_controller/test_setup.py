@@ -538,6 +538,7 @@ def test_rollout_recovery_functional_config_resolves_to_runtime_contract(
         "grpo.val_period=-1",
         "grpo.val_at_start=false",
         "grpo.async_grpo=null",
+        "grpo.calculate_advantages_on_gpu=false",
         "policy.train_global_batch_size=8",
         "policy.train_micro_batch_size=1",
         "cluster.gpus_per_node=2",
@@ -1286,6 +1287,7 @@ class TestSetup:
         patched_factories["ClippedPGLossFn"].assert_called_once_with(
             mc.loss_fn,
             use_fused_linear_logprobs=False,
+            opd_full=None,
         )
         # tq_buffer + rollout_manager are constructed inline (not mocked).
         assert actor_args.tq_buffer is not None
@@ -1315,6 +1317,7 @@ class TestSetup:
         patched_factories["ClippedPGLossFn"].assert_called_once_with(
             mc.loss_fn,
             use_fused_linear_logprobs=True,
+            opd_full=None,
         )
 
     def test_reserves_topology_constrained_training_before_builds(

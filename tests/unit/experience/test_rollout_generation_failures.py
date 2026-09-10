@@ -555,6 +555,8 @@ def _make_gym_impl(
     impl._reward_penalty_config = None
     # Effort-level reward shaping is off unless env.nemo_gym.effort_levels is set.
     impl._effort_config = None
+    # Generation-quality metrics need the reasoning delimiters only when configured.
+    impl._cot_token_ids = None
     return impl
 
 

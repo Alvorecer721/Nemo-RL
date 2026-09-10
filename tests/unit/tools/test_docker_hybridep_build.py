@@ -14,7 +14,13 @@
 
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).parents[3]
+pytestmark = pytest.mark.skip(
+    reason="The CSCS image defers multi-node HybridEP (upstream #4038); "
+    "see docs/superpowers/specs/2026-09-10-upstream-sync-ledger.md"
+)
 DOCKERFILES = (
     (REPO_ROOT / "docker/Dockerfile", True),
     (REPO_ROOT / "docker/Dockerfile.ngc_pytorch", False),

@@ -291,7 +291,9 @@ class TestPrefetchVenvs:
             assert "Prefetched: 2" in captured.out
             assert "Failed: 1" in captured.out
 
-    def test_prefetch_venvs_returns_the_failed_actors(self, prefetch_venvs_func):
+    def test_prefetch_venvs_returns_the_failed_actors(
+        self, prefetch_venvs_func, monkeypatch
+    ):
         """A failed venv is reported to the caller, not just printed.
 
         This runs during the image build. Before this returned anything, a venv
@@ -299,6 +301,7 @@ class TestPrefetchVenvs:
         the build went green and the actor only died the first time someone
         launched it.
         """
+        monkeypatch.setenv("NRL_VENV_PREFETCH_MAX_ATTEMPTS", "1")
         with patch(
             "nemo_rl.utils.prefetch_venvs.create_local_venv"
         ) as mock_create_venv:
