@@ -2443,10 +2443,12 @@ def test_alp_advantage_stage_preserves_raw_rewards_and_uses_occurrence_groups(
     ctrl._teacher_logprobs_required = False
     ctrl._is_ppo = False
     ctrl._message_level_advantage_penalties_enabled = False
+    ctrl._data_plane_checkpoint_barrier = DataPlaneCheckpointBarrier()
     ctrl._step_log_dict = {
         k: []
         for k in (
             "rewards",
+            "sample_masks",
             "masked_advantages",
             "sequence_lengths",
             "num_mask_sample_filtered",
@@ -2534,10 +2536,12 @@ def _occurrence_advantage_controller(
     ctrl._teacher_logprobs_required = False
     ctrl._is_ppo = False
     ctrl._message_level_advantage_penalties_enabled = False
+    ctrl._data_plane_checkpoint_barrier = DataPlaneCheckpointBarrier()
     ctrl._step_log_dict = {
         key: []
         for key in (
             "rewards",
+            "sample_masks",
             "masked_advantages",
             "sequence_lengths",
             "num_mask_sample_filtered",

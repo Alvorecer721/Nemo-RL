@@ -4343,10 +4343,13 @@ class SingleControllerActor:
                 rewards=rewards,
                 mask=mask,
                 repeated_batch=repeated_batch,
-                # Real validity (token-capture placeholders carry sample_mask 0,
-                # and mask_sample/overlong/seq-logprob-error rows are folded in
-                # via final_sample_mask) instead of the hardwired all-ones.
-                valid_mask=final_sample_mask,
+                # Every rollout shapes its group's baseline, including rows the
+                # environment, overlong or logprob-error gates keep out of the
+                # loss through final_sample_mask: the certified Apertus and GLM
+                # runs trained this way, and a replayed stage reads the written
+                # mask back, so the baseline cannot depend on it. Upstream #3837
+                # passes valid_mask=final_sample_mask here; adopt that only with
+                # a matched comparison.
                 **kwargs,
             )
             if self._is_ppo:
@@ -4381,7 +4384,6 @@ class SingleControllerActor:
 
         response_advantages = torch.masked_select(advantages, mask.bool())
         self._step_log_dict["rewards"].append(raw_rewards.detach().cpu())
-        self._step_log_dict["sample_masks"].append(final_sample_mask.detach().cpu())
         if self._teacher_logprobs_required:
             valid = response_advantages.detach().double()
             self._opd_stat_sum += float(valid.sum())
