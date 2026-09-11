@@ -20,7 +20,6 @@ data:
     dataset_name: NemoGymDataset
     data_path: examples/nemo_gym/apertus/math_with_judge_example_agent.jsonl
     repeat: 8
-    split_validation_size: null
   validation:
     data_path: examples/nemo_gym/apertus/math_with_judge_example_agent.jsonl
   default:

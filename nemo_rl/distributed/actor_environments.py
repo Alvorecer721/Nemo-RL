@@ -29,9 +29,17 @@ import sys
 
 ACTOR_ENVIRONMENTS: dict[str, list[str] | None] = {
     "nemo_rl.environments.bracket_math_environment.BracketMathEnvironment": None,
-    "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker": ["vllm"],
+    # vLLM workers always get vllm + nemo_gym. Token capture (token_capture.enabled)
+    # imports nemo_gym inside the worker, and worker venvs are cached by actor class
+    # name -- a venv prebuilt with plain "vllm" is reused as-is, so the extras have to
+    # be fixed here rather than swapped in at runtime.
+    "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker": [
+        "vllm",
+        "nemo_gym",
+    ],
     "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker": [
-        "vllm"
+        "vllm",
+        "nemo_gym",
     ],
     "nemo_rl.models.generation.sglang.sglang_worker.SGLangGenerationWorker": ["sglang"],
     "nemo_rl.models.generation.dynamo.dynamo_worker.DynamoVllmWorker": None,
@@ -46,6 +54,7 @@ ACTOR_ENVIRONMENTS: dict[str, list[str] | None] = {
         "mcore"
     ],
     "nemo_rl.models.value.workers.megatron_value_worker.MegatronValueWorker": ["mcore"],
+    "nemo_rl.data.energon.sft_worker.SFTMegatronPolicyWorker": ["mcore"],
     "nemo_rl.models.generation.trtllm.trtllm_worker_async.TrtllmAsyncGenerationWorker": [
         "trtllm"
     ],
@@ -86,16 +95,6 @@ ACTOR_ENVIRONMENTS: dict[str, list[str] | None] = {
         "mcore",
     ],
 }
-
-# These existing controllers do not honor NEMO_RL_PY_EXECUTABLES_SYSTEM. Keep that
-# runtime behavior while sharing their image selection and declared dependencies.
-VLLM_CONTROLLER_ACTORS = frozenset(
-    {
-        "nemo_rl.algorithms.async_utils.AsyncTrajectoryCollector",
-        "nemo_rl.algorithms.async_utils.ReplayBuffer",
-        "nemo_rl.experience.sync_rollout_actor.SyncRolloutActor",
-    }
-)
 
 
 def _build_stage(extras: list[str]) -> str:

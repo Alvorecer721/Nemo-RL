@@ -95,7 +95,7 @@ def test_base_sync_retains_actor_extra_until_exact_worker_sync(tmp_path):
     assert calls[2][1:6] == ["run", "--exact", "--locked", "--extra", "vllm"]
 
 
-def test_non_uv_worker_keeps_exact_base_sync(tmp_path):
+def test_non_uv_worker_command_runs_verbatim(tmp_path):
     calls = []
 
     def record_run(cmd, **kwargs):
@@ -105,8 +105,7 @@ def test_non_uv_worker_keeps_exact_base_sync(tmp_path):
     with patch.object(venvs_module.subprocess, "run", record_run):
         create_local_venv("python -V", "demo.Worker")
 
-    assert calls[1][1] == "sync"
-    assert "--inexact" not in calls[1]
+    assert calls[1][1:3] == ["sync", "--inexact"]
     assert calls[2] == [
         "python",
         "-V",

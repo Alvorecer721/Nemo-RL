@@ -29,6 +29,8 @@ generation:
     sleep_level: 1  # vLLM sleep mode used when the evaluation engine is suspended.
     max_model_len: 2048
     enforce_eager: False
+    # false: use NeMo-RL's legacy refit loader; true: opt into vLLM reload_weights.
+    refit_with_reload_api: false
   colocated:
     # true: generation shares training GPUs
     # false: uses dedicated generation resources

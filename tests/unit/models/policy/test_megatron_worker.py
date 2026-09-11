@@ -46,6 +46,18 @@ from tests.unit.test_utils import SimpleLossFn
 pytestmark = pytest.mark.mcore
 
 
+def _disable_opd_full(worker) -> None:
+    """Set the opd_full attributes to the state __init__ gives them when off.
+
+    These doubles are built with ``object.__new__``, so every attribute the
+    paths under test read has to be set here by hand.
+    """
+    worker._opd_full_enabled = False
+    worker._opd_full_lm_head_lifecycle = None
+    worker._opd_full_teacher_lm_head = None
+    worker._opd_full_teacher_checkpoint_path = None
+
+
 def test_model_owned_packing_capability_is_detected():
     from nemo_rl.models.policy.workers.megatron_policy_worker import (
         _model_self_packs_for_cp,
@@ -149,19 +161,122 @@ def test_model_cp_slicing_capability_is_detected():
     assert not _model_slices_context_parallel_inputs(object())
 
 
-def test_model_cp_slicing_accepts_transfer_queue_setup(monkeypatch):
-    """Media-before-CP models are served by the leader-broadcast fetch.
+def test_model_cp_slicing_accepts_data_plane_setup():
+    """Models that slice CP inputs themselves are no longer fenced off here.
 
-    ``_fetch`` broadcasts one DP slice across the replica group (TP x CP x PP
-    siblings of a DP rank), so every CP sibling gets identical full THD rows and
-    the model applies its own post-embedding slice. Setup used to reject these
-    models outright; the contract is satisfied, so it must not.
+    ``setup_data_plane`` used to reject them outright. The train path now
+    forwards ``model_slices_context_parallel_inputs`` into
+    ``get_microbatch_iterator``, so such a worker builds a client like any
+    other. The second call pins the documented idempotence.
+    """
+    from nemo_rl.data_plane.adapters.local import LocalDataPlaneClient
+    from nemo_rl.data_plane.interfaces import LocalDataPlaneConfig
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        MegatronPolicyWorkerImpl,
+    )
+
+    worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
+    worker.model_slices_context_parallel_inputs = True
+    worker._dp_client = None
+
+    worker.setup_data_plane(LocalDataPlaneConfig())
+    client = worker._dp_client
+    assert isinstance(client, LocalDataPlaneClient)
+
+    worker.setup_data_plane(LocalDataPlaneConfig())
+    assert worker._dp_client is client
+
+
+def _opd_full_teacher_worker(model_config):
+    """A teacher double whose only live attribute is its model config.
+
+    The guard runs before the timer, the model and the microbatch iterator, so
+    none of them need to exist.
     """
     from nemo_rl.models.policy.workers.megatron_policy_worker import (
         MegatronPolicyWorkerImpl,
     )
 
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    worker.model = SimpleNamespace(config=model_config)
+    return worker
+
+
+class _PastTheGuard(Exception):
+    """Raised by the sentinel timer once the payload guard has been passed."""
+
+
+class _SentinelTimer:
+    def start(self, name):
+        raise _PastTheGuard(name)
+
+
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        pytest.param(
+            SimpleNamespace(final_logit_softcapping=30.0), id="gemma_softcapping"
+        ),
+        pytest.param(SimpleNamespace(output_multiplier=2.0), id="output_multiplier"),
+        pytest.param(SimpleNamespace(use_mup=True), id="mup"),
+    ],
+)
+def test_full_payload_rejects_hidden_states_when_logits_are_post_processed(
+    model_config,
+):
+    """The student rebuilds teacher logits as ``output_layer(h)``.
+
+    A teacher that softcaps or rescales them afterwards would be silently
+    mis-reconstructed: no error, just a wrong target.
+    """
+    worker = _opd_full_teacher_worker(model_config)
+
+    with pytest.raises(ValueError, match="teacher_payload='logits'"):
+        worker.get_logprobs_with_full_payload(
+            data=BatchedDataDict({}),
+            payload="hidden_states",
+            payload_dtype="bfloat16",
+        )
+
+
+@pytest.mark.parametrize(
+    ("model_config", "payload"),
+    [
+        pytest.param(SimpleNamespace(hidden_size=8), "hidden_states", id="plain_mcore"),
+        # The logits payload is exact for a post-processed teacher.
+        pytest.param(
+            SimpleNamespace(final_logit_softcapping=30.0), "logits", id="softcap_logits"
+        ),
+    ],
+)
+def test_full_payload_admits_reconstructible_teachers(model_config, payload):
+    """The guard is the method's first statement, so a sentinel timer marks it passed."""
+    worker = _opd_full_teacher_worker(model_config)
+    worker.timer = _SentinelTimer()
+
+    with pytest.raises(_PastTheGuard):
+        worker.get_logprobs_with_full_payload(
+            data=BatchedDataDict({}),
+            payload=payload,
+            payload_dtype="bfloat16",
+        )
+
+
+def test_model_cp_slicing_accepts_transfer_queue_setup(monkeypatch):
+    """Media-before-CP models are served by the leader-broadcast fetch.
+
+    ``_fetch`` broadcasts one DP slice across the replica group (TP x CP x PP
+    siblings of a DP rank), so every CP sibling gets identical full THD rows and
+    the model applies its own post-embedding slice. Setup used to reject these
+    models outright, so setup must now accept them.
+    """
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        MegatronPolicyWorkerImpl,
+    )
+
+    worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     worker.model_slices_context_parallel_inputs = True
     worker._dp_client = None
 
@@ -244,6 +359,7 @@ def test_megatron_offload_before_refit_finalizes_async_save_first(monkeypatch):
 
     events = []
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     worker.model = object()
     worker.optimizer = None
     worker.optimizer_cpu_offload = False
@@ -288,6 +404,7 @@ def test_megatron_offload_before_refit_honors_offload_optimizer_for_refit(
 
     moved = []
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     worker.model = object()
     worker.optimizer = object()
     worker.optimizer_cpu_offload = False
@@ -338,6 +455,7 @@ def test_megatron_offload_after_refit_finalizes_before_model_move(
     events = []
     move_kwargs = []
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     worker.model = _FakeTrainableModel()
     worker.model.eval = lambda: events.append("eval")
     worker.cfg = (
@@ -385,6 +503,7 @@ def test_megatron_finish_inference_evals_before_model_offload(monkeypatch):
     events = []
     move_kwargs = []
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     worker.model = _FakeTrainableModel()
     worker.model.eval = lambda: events.append("eval")
     worker.move_model = lambda model, device, **kwargs: (
@@ -408,6 +527,7 @@ def test_megatron_save_checkpoint_onloads_model_before_save(monkeypatch):
 
     events = []
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     worker.model = _FakeTrainableModel()
     worker.model.training = False
     worker.optimizer = object()
@@ -522,6 +642,7 @@ def test_megatron_move_model_does_not_serialize_extra_state():
     )
 
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     model = _ModelWithNonSerializableExtraState()
 
     moved_model = MegatronPolicyWorkerImpl.move_model(worker, model, "cpu")
@@ -537,6 +658,7 @@ def test_megatron_prepare_for_training_restores_optimizer():
     )
 
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     model = _FakeTrainableModel()
     restored_devices = []
 
@@ -560,6 +682,7 @@ def test_megatron_prepare_for_training_leaves_native_cpu_optimizer_placement():
     )
 
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     model = _FakeTrainableModel()
 
     worker.model = model
@@ -583,6 +706,7 @@ def test_set_moe_grad_scale_func_sets_and_clears_on_model_config():
     )
 
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     model_config = SimpleNamespace()
     worker.model = SimpleNamespace(config=model_config)
 
@@ -604,6 +728,7 @@ def test_set_moe_grad_scale_func_handles_float16module_wrapper():
     )
 
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     inner_config = SimpleNamespace()
     worker.model = SimpleNamespace(module=SimpleNamespace(config=inner_config))
 
@@ -621,6 +746,7 @@ def test_set_moe_grad_scale_func_noop_when_no_config():
     )
 
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
     worker.model = SimpleNamespace()  # no .config and no .module
 
     # Should not raise even though there is no config to set the func on.
@@ -634,6 +760,7 @@ def test_compute_moe_grad_scale_normalizes_by_valid_tokens():
     )
 
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
 
     scale_fn = MegatronPolicyWorkerImpl._compute_moe_grad_scale(
         worker, torch.tensor(4.0)
@@ -648,6 +775,7 @@ def test_compute_moe_grad_scale_clamps_zero_valid_tokens():
     )
 
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    _disable_opd_full(worker)
 
     scale_fn = MegatronPolicyWorkerImpl._compute_moe_grad_scale(
         worker, torch.tensor(0.0)
@@ -717,6 +845,40 @@ def test_disable_forward_pre_hook_until_next_step_uses_worker_override(
     assert worker._first_train_step_param_sync_func == "sync"
     assert model_config.param_sync_func is None
     assert worker._first_train_step_forward_pre_hook_disabled is True
+
+
+@pytest.mark.parametrize("update_successful", [False, True])
+def test_restore_first_train_step_param_sync(
+    monkeypatch: pytest.MonkeyPatch, update_successful: bool
+) -> None:
+    from nemo_rl.models.policy.workers import megatron_policy_worker
+
+    worker = object.__new__(megatron_policy_worker.MegatronPolicyWorkerImpl)
+    worker.model = object()
+    worker.enable_forward_pre_hook = MagicMock()
+    saved_param_sync = MagicMock(name="saved_param_sync")
+    worker._first_train_step_forward_pre_hook_disabled = True
+    worker._first_train_step_param_sync_func = saved_param_sync
+    model_config = SimpleNamespace(param_sync_func=None)
+    monkeypatch.setattr(
+        megatron_policy_worker, "get_model_config", lambda _: model_config
+    )
+
+    worker._restore_first_train_step_param_sync(update_successful)
+
+    if update_successful:
+        worker.enable_forward_pre_hook.assert_called_once_with()
+        assert model_config.param_sync_func is saved_param_sync
+        assert worker._first_train_step_param_sync_func is None
+        assert worker._first_train_step_forward_pre_hook_disabled is False
+
+        worker._restore_first_train_step_param_sync(True)
+        worker.enable_forward_pre_hook.assert_called_once_with()
+    else:
+        worker.enable_forward_pre_hook.assert_not_called()
+        assert model_config.param_sync_func is None
+        assert worker._first_train_step_param_sync_func is saved_param_sync
+        assert worker._first_train_step_forward_pre_hook_disabled is True
 
 
 def test_prepare_for_generation_disables_param_gather_hook_before_wake(
