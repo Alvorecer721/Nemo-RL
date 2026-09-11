@@ -21,7 +21,7 @@ A third PR, but not a third layer of the stack. Branch `tools/2026-09-11-shared-
 - Fork-only detection is textual: a key name that appears nowhere in upstream's `nemo_rl/**/*.py` or `examples/configs/**/*.yaml` at the pinned upstream ref is fork-only. False negatives are possible (a fork key that shares a name with an upstream identifier); false positives are not. The upstream ref is always passed explicitly and recorded in the header.
 - Scrubbing replaces string leaves that start with a site prefix (`/capstor`, `/iopsstor`, `/users` by default) with `<site>/<basename>`, and sets `logger.wandb.entity` to `<wandb-entity>`. Nothing else is rewritten.
 - Snapshots are documentation, frozen by job id and source commit. They live outside `examples/configs/` so the recipe validators, the recipe-accounting test and `minimize-check` never see them.
-- Headers use 12-character commit SHAs and job ids, never image digests, so the secrets detector has nothing to flag.
+- Headers carry job ids, 12-character source commits and the full upstream ref (the value `git grep` reproduces against), never image digests; the secrets detector does not scan YAML comments.
 
 ## Global Constraints
 
