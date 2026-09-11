@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib.util
 import re
 import subprocess
 import sys
@@ -35,7 +36,9 @@ def scrub(config: dict, prefixes: tuple[str, ...]) -> dict:
             return {k: visit(v) for k, v in value.items()}
         if isinstance(value, list):
             return [visit(v) for v in value]
-        if isinstance(value, str) and value.startswith(prefixes):
+        if isinstance(value, str) and any(
+            value == p or value.startswith(p + "/") for p in prefixes
+        ):
             return "<site>/" + PurePosixPath(value).name
         return value
 
@@ -54,13 +57,15 @@ def fork_only_paths(config: dict, upstream_identifiers: set[str]) -> list[str]:
     found: list[str] = []
 
     def visit(value, path):
-        if not isinstance(value, dict):
-            return
-        for key, child in value.items():
-            dotted = f"{path}.{key}" if path else str(key)
-            if isinstance(key, str) and key not in upstream_identifiers:
-                found.append(dotted)
-            visit(child, dotted)
+        if isinstance(value, dict):
+            for key, child in value.items():
+                dotted = f"{path}.{key}" if path else str(key)
+                if isinstance(key, str) and key not in upstream_identifiers:
+                    found.append(dotted)
+                visit(child, dotted)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                visit(item, f"{path}[{index}]")
 
     visit(config, "")
     return sorted(found)
@@ -77,8 +82,6 @@ def render(config: dict, provenance: dict[str, str], fork_only: list[str]) -> st
 
 
 def _load_module(name: str, path: Path):
-    import importlib.util
-
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -101,7 +104,10 @@ def load_resolved(config: Path | None, recipe: Path | None) -> dict:
     if (config is None) == (recipe is None):
         raise ValueError("pass exactly one of --config or --recipe")
     if config is not None:
-        return yaml.safe_load(config.read_text())
+        parsed = yaml.safe_load(config.read_text())
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{config} did not parse to a mapping")
+        return parsed
     return _resolved_container(recipe)
 
 
@@ -165,7 +171,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--reference-run", required=True)
     parser.add_argument("--resolved-from", required=True)
-    parser.add_argument("--scrub-prefix", action="append", dest="scrub_prefixes")
+    parser.add_argument(
+        "--scrub-prefix",
+        action="append",
+        dest="scrub_prefixes",
+        help=(
+            "site path prefix to replace with <site>/<basename>; repeatable; "
+            "replaces the defaults (/capstor, /iopsstor, /users)"
+        ),
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
 
@@ -187,10 +201,14 @@ def main(argv: list[str] | None = None) -> int:
         "Scrubbed prefixes": ", ".join(prefixes),
         "Note": "reference of what ran on the fork; not loadable by upstream as-is",
     }
+    text = render(scrubbed, provenance, fork_only_paths(scrubbed, identifiers))
+    body = text.split("\n\n", 1)[1]
+    suspects = [body] + [v for k, v in provenance.items() if k != "Scrubbed prefixes"]
+    leftover = sorted({p for p in prefixes for s in suspects if p in s})
+    if leftover:
+        raise RuntimeError(f"unscrubbed site prefix in output: {leftover}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        render(scrubbed, provenance, fork_only_paths(scrubbed, identifiers))
-    )
+    args.output.write_text(text)
     return 0
 
 

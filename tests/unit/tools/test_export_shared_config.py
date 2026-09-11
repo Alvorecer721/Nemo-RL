@@ -83,16 +83,35 @@ def test_scrub_replaces_site_paths_and_keeps_basename(tool):
     )
 
 
+def test_scrub_requires_prefix_boundary(tool):
+    cfg = {"a": "/usersfoo/x", "b": "/users/x/y"}
+    out = tool.scrub(cfg, ("/users",))
+    assert out["a"] == "/usersfoo/x"
+    assert out["b"] == "<site>/y"
+
+
+def test_scrub_walks_lists(tool):
+    cfg = {"paths": ["/capstor/a", "/opt/b"]}
+    out = tool.scrub(cfg, ("/capstor", "/iopsstor"))
+    assert out["paths"] == ["<site>/a", "/opt/b"]
+
+
 def test_fork_only_paths_uses_identifier_set(tool):
     cfg = {
         "grpo": {"num_prompts_per_step": 48, "cot_think_token_ids": [32, 33]},
-        "async_rl": {"sampler": {"name": "windowed", "max_staleness_versions": 2}},
+        "async_rl": {"sampler": {"name": "windowed"}, "weight_sync_period": 2},
     }
     known = {"grpo", "num_prompts_per_step", "async_rl", "sampler", "name"}
     assert tool.fork_only_paths(cfg, known) == [
-        "async_rl.sampler.max_staleness_versions",
+        "async_rl.weight_sync_period",
         "grpo.cot_think_token_ids",
     ]
+
+
+def test_fork_only_paths_walks_lists(tool):
+    cfg = {"data": {"train": [{"name": "x", "shard_hint": 1}]}}
+    known = {"data", "train", "name"}
+    assert tool.fork_only_paths(cfg, known) == ["data.train[0].shard_hint"]
 
 
 def test_render_header_lists_provenance_and_fork_only_keys(tool):
@@ -132,6 +151,22 @@ def test_load_resolved_requires_exactly_one_input(tool, tmp_path):
         tool.load_resolved(config=None, recipe=None)
 
 
+def test_load_resolved_rejects_both_inputs(tool, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("a: 1\n")
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text("a: 1\n")
+    with pytest.raises(ValueError, match="exactly one"):
+        tool.load_resolved(config=config, recipe=recipe)
+
+
+def test_load_resolved_rejects_non_mapping_config(tool, tmp_path):
+    empty = tmp_path / "empty.yaml"
+    empty.write_text("")
+    with pytest.raises(ValueError, match="did not parse to a mapping"):
+        tool.load_resolved(config=empty, recipe=None)
+
+
 def test_cli_writes_scrubbed_annotated_yaml(tool, tmp_path):
     resolved = tmp_path / "config.yaml"
     resolved.write_text(
@@ -166,6 +201,62 @@ def test_cli_writes_scrubbed_annotated_yaml(tool, tmp_path):
     assert "#   - grpo.cot_think_token_ids" in head
     assert "# Scrubbed prefixes: /capstor, /iopsstor, /users" in head
     assert "<site>/ap1p5-70b" in body and "/capstor" not in body
+
+
+def test_main_raises_on_leftover_site_prefix_in_body(tool, tmp_path):
+    resolved = tmp_path / "config.yaml"
+    resolved.write_text(
+        'policy:\n  megatron_cfg:\n    env_vars:\n      PYTHONPATH: "/opt/x:/capstor/y"\n'
+    )
+    idents = tmp_path / "idents.txt"
+    idents.write_text("policy\nmegatron_cfg\nenv_vars\nPYTHONPATH\n")
+    out = tmp_path / "out.yaml"
+    with pytest.raises(RuntimeError, match="unscrubbed site prefix"):
+        tool.main(
+            [
+                "--config",
+                str(resolved),
+                "--upstream-identifiers",
+                str(idents),
+                "--source-commit",
+                "7197ac71505b",
+                "--job-id",
+                "3352055",
+                "--reference-run",
+                "70B GSM8K",
+                "--resolved-from",
+                "checkpoint step_2/config.yaml",
+                "--output",
+                str(out),
+            ]
+        )
+
+
+def test_main_raises_on_leftover_site_prefix_in_resolved_from(tool, tmp_path):
+    resolved = tmp_path / "config.yaml"
+    resolved.write_text("policy:\n  model_name: base\n")
+    idents = tmp_path / "idents.txt"
+    idents.write_text("policy\nmodel_name\n")
+    out = tmp_path / "out.yaml"
+    with pytest.raises(RuntimeError, match="unscrubbed site prefix"):
+        tool.main(
+            [
+                "--config",
+                str(resolved),
+                "--upstream-identifiers",
+                str(idents),
+                "--source-commit",
+                "7197ac71505b",
+                "--job-id",
+                "3352055",
+                "--reference-run",
+                "70B GSM8K",
+                "--resolved-from",
+                "checkpoint at /iopsstor/foo",
+                "--output",
+                str(out),
+            ]
+        )
 
 
 def test_upstream_identifiers_from_git_reads_the_ref(tool, tmp_path):
