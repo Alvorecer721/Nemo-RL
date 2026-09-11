@@ -11,7 +11,7 @@ upstream.
 |---|---|---|---|
 | Apertus 1.5 70B GSM8K, 16 nodes (12 trainer TP2/PP4, 4 rollout), 48x16, 2k context | `reference-configs/2026-09-10-apertus-70b-gsm8k-job3352055.yaml` | `7197ac71505b` | 3352055 |
 | GLM-5.1 GRPO ready-first, 136 nodes (72 trainer TP2/PP18/EP16, 64 rollout), 10 steps | `reference-configs/2026-08-29-glm51-ready-first-job3217663.yaml` | `b6ea7c17daf2` | 3217663 |
-| Apertus 1.5 70B DAPO thinking-12k, 40 nodes TP2/PP4, GBS 768 | `pending: job id and AP_TRAIN_DATA / AP_CHECKPOINT_DIR not yet supplied` | `e82118fb7659` | pending |
+| Apertus 1.5 70B DAPO thinking-12k, 40 nodes (24 trainer TP2/PP4, 16 rollout), 48x16, GBS 768, 92 updates | `reference-configs/2026-09-06-apertus-70b-dapo-thinking12k-gbs768-job3308421.yaml` (recipe expansion; run and checkpoint directories are placeholders) | `e82118fb7659` | 3308421 |
 
 Regenerate a snapshot from a checkpoint:
 
