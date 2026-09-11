@@ -256,7 +256,7 @@ def test_prepare_refit_info_accepts_identical_worker_manifests(monkeypatch):
     policy = Policy.__new__(Policy)
     policy.worker_group = WorkerGroup()
 
-    assert policy.prepare_refit_info() is manifest
+    assert policy.prepare_refit_info(refit_payload_mode="hf_export") is manifest
 
 
 def _policy_with_worker_results(monkeypatch, results):
@@ -293,7 +293,7 @@ def test_prepare_refit_info_rejects_pipeline_rank_key_mismatch(monkeypatch):
         RefitManifestMismatchError,
         match=r"HF-schema refit.*worker 0.*worker 1.*unexpected: .*act_fn\.beta",
     ):
-        policy.prepare_refit_info()
+        policy.prepare_refit_info(refit_payload_mode="hf_export")
 
 
 def _nccl_refit_info(*, misc_meta):
@@ -339,4 +339,6 @@ def test_prepare_nccl_reshard_refit_info_checks_misc_and_bulk_manifests(
         RefitManifestMismatchError,
         match=r"NCCL-reshard refit.*unexpected: .*act_fn\.eps",
     ):
-        policy.prepare_nccl_reshard_refit_info({}, {}, 2, 1)
+        policy.prepare_nccl_reshard_refit_info(
+            {}, {}, 2, 1, refit_payload_mode="hf_export"
+        )
