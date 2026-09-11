@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 EXPECTED_HEAD=$(git -C "$REPO_DIR" rev-parse HEAD)
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm026_ncclext.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm026_ncclext.toml}
 AP_VARIANT=${AP_VARIANT:?set AP_VARIANT to 70b-bench or 8b-smoke}
 case "$AP_VARIANT" in
   70b-bench)

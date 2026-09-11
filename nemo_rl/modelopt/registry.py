@@ -14,6 +14,7 @@
 
 import os
 
+from nemo_rl.distributed.actor_environments import ACTOR_ENVIRONMENTS
 from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES, git_root
 
 USE_SYSTEM_EXECUTABLE = os.environ.get("NEMO_RL_PY_EXECUTABLES_SYSTEM", "0") == "1"
@@ -34,10 +35,14 @@ MODELOPT_MCORE_EXECUTABLE = (
     else f"uv run --locked --extra modelopt --extra mcore --directory {git_root}"
 )
 
+_MODELOPT_EXECUTABLES = {
+    ("modelopt", "vllm"): MODELOPT_VLLM_EXECUTABLE,
+    ("modelopt", "automodel"): MODELOPT_AUTOMODEL_EXECUTABLE,
+    ("modelopt", "mcore"): MODELOPT_MCORE_EXECUTABLE,
+}
+
 MODELOPT_ACTOR_REGISTRY: dict[str, str] = {
-    "nemo_rl.modelopt.models.generation.vllm_quant_worker.VllmQuantGenerationWorker": MODELOPT_VLLM_EXECUTABLE,
-    "nemo_rl.modelopt.models.generation.vllm_quant_worker.VllmQuantAsyncGenerationWorker": MODELOPT_VLLM_EXECUTABLE,
-    "nemo_rl.modelopt.models.policy.workers.dtensor_quant_policy_worker.DTensorQuantPolicyWorker": MODELOPT_AUTOMODEL_EXECUTABLE,
-    "nemo_rl.modelopt.models.policy.workers.dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2": MODELOPT_AUTOMODEL_EXECUTABLE,
-    "nemo_rl.modelopt.models.policy.workers.megatron_quant_policy_worker.MegatronQuantPolicyWorker": MODELOPT_MCORE_EXECUTABLE,
+    actor: _MODELOPT_EXECUTABLES[tuple(extras)]
+    for actor, extras in ACTOR_ENVIRONMENTS.items()
+    if extras is not None and "modelopt" in extras
 }

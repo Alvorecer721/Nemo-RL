@@ -29,7 +29,7 @@
 set -euo pipefail
 
 REPO_DIR=${REPO_DIR:-$PWD}
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm0251.toml}
 RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nrl_vllm0251_tp4_${SLURM_JOB_ID}}
 APERTUS_CKPT=${APERTUS_CKPT:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200}
 APERTUS_TOKENIZER=${APERTUS_TOKENIZER:-/capstor/store/cscs/swissai/infra01/MLLM/tokenizer/Apertus-v1.5-8B-official}

@@ -24,41 +24,50 @@
 #SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --export=NONE
 set -euo pipefail
+# sbatch spools this script elsewhere; resolve helpers from the submitted repository.
+REPO_DIR=${REPO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}
+source "$REPO_DIR/infra/slurm/cscs/image_storage.sh"
 
 # Build the repository's release image with Podman on a Clariden compute node,
 # retain intermediate layers in CSCS's persistent local-registry cache, and
-# import the result into an Enroot-compatible SquashFS image before the
-# allocation (and Podman's /dev/shm storage) disappears.
+# publish a complete OCI image and immutable receipt for a separate assembly job.
 
 CSCS_USER=${USER:-$(id -un)}
 SCRATCH_ROOT=${SCRATCH_ROOT:-/iopsstor/scratch/cscs/$CSCS_USER}
-REPO_DIR=${REPO_DIR:-$SLURM_SUBMIT_DIR}
 CACHE_DIR=${CACHE_DIR:-$SCRATCH_ROOT/podman-cache/nemo-rl}
 OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 MAX_JOBS=${MAX_JOBS:-4}
+NVTE_BUILD_MAX_JOBS=${NVTE_BUILD_MAX_JOBS:-4}
+NVTE_BUILD_THREADS_PER_JOB=${NVTE_BUILD_THREADS_PER_JOB:-2}
+TRTLLM_BUILD_JOBS=${TRTLLM_BUILD_JOBS:-4}
+NRL_IMAGE_PROFILE=${NRL_IMAGE_PROFILE:-apertus}
+PLATFORM=${PLATFORM:-linux/arm64}
+for variable in MAX_JOBS NVTE_BUILD_MAX_JOBS NVTE_BUILD_THREADS_PER_JOB TRTLLM_BUILD_JOBS; do
+    [[ "${!variable}" =~ ^[1-9][0-9]*$ ]] || {
+        echo "$variable must be a positive integer" >&2
+        exit 2
+    }
+done
+case "$NRL_IMAGE_PROFILE" in
+    full) NRL_ACTORS="" ;;
+    apertus)
+        NRL_ACTORS=$(cat "$REPO_DIR/infra/slurm/cscs/profiles/apertus.actors")
+        [[ -n "${NRL_ACTORS//[[:space:]]/}" ]] || { echo "Empty Apertus actor profile" >&2; exit 2; }
+        ;;
+    *) echo "NRL_IMAGE_PROFILE must be full or apertus" >&2; exit 2 ;;
+esac
+[[ "$PLATFORM" == linux/arm64 ]] || {
+    echo "This CSCS launcher and its pinned base support PLATFORM=linux/arm64" >&2
+    exit 2
+}
 NVTE_CUDA_ARCHS=${NVTE_CUDA_ARCHS:-90}
 NVTE_WITH_NCCL_EP=${NVTE_WITH_NCCL_EP:-0}
 [[ "$NVTE_WITH_NCCL_EP" == 0 || "$NVTE_WITH_NCCL_EP" == 1 ]] || {
     echo "NVTE_WITH_NCCL_EP must be 0 or 1, got: $NVTE_WITH_NCCL_EP" >&2
     exit 2
 }
-# The fingerprint helper needs modern Python, while the host interpreter varies
-# across Clariden images. Prefer a system interpreter and fall back to the
-# user's shared Miniconda installation.
-if [[ -z "${HOST_PYTHON:-}" ]]; then
-    for candidate in \
-        /usr/bin/python3.13 \
-        /usr/bin/python3.12 \
-        /usr/bin/python3.11 \
-        "/users/$CSCS_USER/miniconda3/bin/python"; do
-        if [[ -x "$candidate" ]] \
-            && "$candidate" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
-            HOST_PYTHON=$candidate
-            break
-        fi
-    done
-fi
+image_host_python
 # This Apertus production image is validated with vLLM. Keep TensorRT-LLM an
 # explicit opt-in until its GH200 source build has independent evidence.
 BUILD_TRTLLM=${BUILD_TRTLLM:-0}
@@ -81,24 +90,18 @@ case "$BUILD_TRTLLM" in
         exit 1
         ;;
 esac
-# Completed hermetic stage for the dependency fingerprint below. Source-only
-# releases resume directly from this content-addressed manifest, avoiding
-# Podman's named-context identity bug that otherwise invalidates uv.lock when
-# an unrelated application source file changes. Set to "rebuild" only when
-# intentionally changing dependencies.
-HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-679a0eb8c22b64929c8db02890c1d3c343b68c7ba3193b96713473a4e17033cb}
-HERMETIC_FINGERPRINT_SHA256=679a0eb8c22b64929c8db02890c1d3c343b68c7ba3193b96713473a4e17033cb
-# Use an explicit allocation-local store so the launcher does not depend on a
-# login-node containers/storage.conf. Large release layers are bounded in the
-# Dockerfile so they fit this node-local tmpfs.
+# auto reuses only this build's generated digest, otherwise it builds and
+# publishes the hermetic stage. A second build allocation prepares the release.
+HERMETIC_CACHE_TAG=${HERMETIC_CACHE_TAG:-auto}
+[[ "$NRL_IMAGE_PROFILE" != apertus || "$BUILD_TRTLLM" == 0 ]] || {
+    echo "BUILD_TRTLLM=1 requires NRL_IMAGE_PROFILE=full; apertus excludes TRT-LLM" >&2
+    exit 2
+}
+# A new private store is mandatory because release preparation resets this store.
 PODMAN_STORAGE_BASE=${PODMAN_STORAGE_BASE:-/tmp/nemo-rl-podman-$CSCS_USER-$SLURM_JOB_ID}
 
 cd "$REPO_DIR"
-if [[ -z "${HOST_PYTHON:-}" || ! -x "$HOST_PYTHON" ]] \
-    || ! "$HOST_PYTHON" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
-    echo "No host Python >=3.11 found; set HOST_PYTHON explicitly." >&2
-    exit 1
-fi
+REPO_DIR=$(pwd -P)
 [[ -f docker/Dockerfile ]] || {
     echo "NeMo-RL Dockerfile not found under REPO_DIR=$REPO_DIR" >&2
     exit 1
@@ -125,43 +128,60 @@ git submodule foreach --quiet --recursive '
 SOURCE_COMMIT=$(git rev-parse HEAD)
 SOURCE_REV=${SOURCE_COMMIT:0:12}
 SUBMODULE_STATUS=$(git submodule status --recursive)
+if [[ -n "$SUBMODULE_STATUS" ]] && printf '%s\n' "$SUBMODULE_STATUS" | grep -q '^[+U-]'; then
+    echo "Every submodule must be initialized at its recorded recursive pin" >&2
+    exit 1
+fi
+
+create_image_store
+
+HERMETIC_MANIFEST="$PODMAN_STORAGE_BASE/hermetic-manifest.json"
+# Pass the same effective choices to identity generation and Podman. Compiler
+# limits are conservative defaults; any intentional override is recorded.
+DEPENDENCY_BUILD_ARGS=(
+    "BASE_IMAGE=$BASE_IMAGE"
+    "NRL_ACTORS=$NRL_ACTORS"
+    "MAX_JOBS=$MAX_JOBS"
+    "NVTE_BUILD_MAX_JOBS=$NVTE_BUILD_MAX_JOBS"
+    "NVTE_BUILD_THREADS_PER_JOB=$NVTE_BUILD_THREADS_PER_JOB"
+    "NVTE_CUDA_ARCHS=$NVTE_CUDA_ARCHS"
+    "NVTE_WITH_NCCL_EP=$NVTE_WITH_NCCL_EP"
+    "TRTLLM_BUILD_JOBS=$TRTLLM_BUILD_JOBS"
+    "SKIP_TRTLLM_BUILD=$SKIP_TRTLLM_BUILD"
+    "CUSTOM_SETUP_FNAME=$CUSTOM_SETUP_FNAME"
+)
+MANIFEST_ARGS=()
+PODMAN_DEPENDENCY_ARGS=()
+for assignment in "${DEPENDENCY_BUILD_ARGS[@]}"; do
+    MANIFEST_ARGS+=(--build-arg "$assignment")
+    PODMAN_DEPENDENCY_ARGS+=(--build-arg "$assignment")
+done
+CURRENT_FINGERPRINT_SHA256=$("$HOST_PYTHON" tools/image_build_manifest.py generate \
+    --repo-root "$REPO_DIR" --base-image "$BASE_IMAGE" --platform "$PLATFORM" \
+    --profile "$NRL_IMAGE_PROFILE" "${MANIFEST_ARGS[@]}" --output "$HERMETIC_MANIFEST")
+# Validate explicit pins before starting registry or container operations.
+"$HOST_PYTHON" tools/image_build_manifest.py select "$HERMETIC_MANIFEST" \
+    --cache-tag "$HERMETIC_CACHE_TAG" --available yes >/dev/null
 BUILD_INPUTS_SHA256=$(
     {
         printf 'commit\0%s\0' "$SOURCE_COMMIT"
-        printf 'submodules\0%s\0' "$SUBMODULE_STATUS"
-        printf 'base_image\0%s\0' "$BASE_IMAGE"
-        printf 'max_jobs\0%s\0' "$MAX_JOBS"
-        printf 'nvte_cuda_archs\0%s\0' "$NVTE_CUDA_ARCHS"
-        printf 'nvte_with_nccl_ep\0%s\0' "$NVTE_WITH_NCCL_EP"
-        printf 'build_trtllm\0%s\0' "$BUILD_TRTLLM"
-        printf 'custom_setup_fname\0%s\0' "$CUSTOM_SETUP_FNAME"
-        printf 'platform\0linux/arm64\0'
-        printf 'hermetic_cache_tag\0%s\0' "$HERMETIC_CACHE_TAG"
+        printf 'hermetic\0%s\0' "$CURRENT_FINGERPRINT_SHA256"
     } | sha256sum | cut -d' ' -f1
 )
 SOURCE_ID="${SOURCE_REV}-${BUILD_INPUTS_SHA256:0:12}"
-IMAGE="nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
-SQSH_PATH="${OUTPUT_DIR}/nemo-rl-apertus-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
-generate_hermetic_cache_fingerprint() {
-    "$HOST_PYTHON" tools/generate_fingerprint.py
-    printf '\nbase_image=%s\nnvte_cuda_archs=%s\nnvte_with_nccl_ep=%s\nbuild_trtllm=%s\ncustom_setup_fname=%s\n' \
-        "$BASE_IMAGE" "$NVTE_CUDA_ARCHS" "$NVTE_WITH_NCCL_EP" "$BUILD_TRTLLM" "$CUSTOM_SETUP_FNAME"
-}
-# The runtime version check expects this file to contain exactly one JSON
-# document. Image-construction choices participate only in the separate
-# hermetic cache key above.
+IMAGE="nemo-rl-${NRL_IMAGE_PROFILE}:vllm-${VLLM_VERSION}-${SOURCE_ID}"
+SQSH_PATH="${OUTPUT_DIR}/nemo-rl-${NRL_IMAGE_PROFILE}-vllm-${VLLM_VERSION}-${SOURCE_ID}.sqsh"
+# Runtime version checks continue to receive exactly one fingerprint JSON.
 BUILD_FINGERPRINT_B64=$("$HOST_PYTHON" tools/generate_fingerprint.py | base64 -w0)
-CURRENT_FINGERPRINT_SHA256=$(generate_hermetic_cache_fingerprint | sha256sum | cut -d' ' -f1)
-BUILD_TARGET=release-core
-if [[ "$HERMETIC_CACHE_TAG" == "rebuild" ]]; then
-    BUILD_TARGET=hermetic
-fi
+HERMETIC_MANIFEST_B64=$(base64 -w0 "$HERMETIC_MANIFEST")
 
 echo "Repository:  $REPO_DIR"
 echo "Source ID:   $SOURCE_ID"
 echo "Base image:  $BASE_IMAGE"
 echo "Inputs SHA:  $BUILD_INPUTS_SHA256"
-echo "Hermetic:    $HERMETIC_CACHE_TAG"
+echo "Hermetic mode: $HERMETIC_CACHE_TAG"
+echo "Hermetic key:  $CURRENT_FINGERPRINT_SHA256"
+echo "Image profile: $NRL_IMAGE_PROFILE"
 echo "TensorRT-LLM build: $BUILD_TRTLLM"
 echo "Custom setup: ${CUSTOM_SETUP_FNAME:-disabled}"
 echo "Podman tag:  $IMAGE"
@@ -170,78 +190,17 @@ echo "SquashFS:    $SQSH_PATH"
 echo "Submodules:"
 printf '%s\n' "$SUBMODULE_STATUS"
 
-[[ ! -e "$SQSH_PATH" ]] || {
-    echo "Refusing to overwrite existing image: $SQSH_PATH" >&2
-    exit 1
-}
-
-unset LD_PRELOAD
-unset PYTHONPATH
-# Image construction does not need a GPU. Prevent the NGC OCI hook from
-# injecting GPU/CXI device mounts into transient Podman build containers;
-# those FUSE-backed mounts can disconnect while a layer is being committed.
-export NVIDIA_VISIBLE_DEVICES=void
-for variable in "${!SLURM_SPANK_@}"; do
-    unset "$variable"
-done
-
-# Rootless Podman briefly needs both the working container and a second copy of
-# each layer while committing it. Keep that graph store allocation-local; the
-# registry below remains the durable cache across allocations.
-mkdir -p "$PODMAN_STORAGE_BASE/graphroot" "$PODMAN_STORAGE_BASE/runroot"
-PODMAN_STORAGE_CONF="$PODMAN_STORAGE_BASE/storage.conf"
-printf '[storage]\ndriver = "overlay"\nrunroot = "%s"\ngraphroot = "%s"\n' \
-    "$PODMAN_STORAGE_BASE/runroot" "$PODMAN_STORAGE_BASE/graphroot" \
-    > "$PODMAN_STORAGE_CONF"
-export CONTAINERS_STORAGE_CONF="$PODMAN_STORAGE_CONF"
-
-# Rootless Podman keeps its pause process under XDG_RUNTIME_DIR. A batch step
-# has no logind session, so /run/user/<uid> does not exist and every command
-# dies on `open .../libpod/tmp/pause.pid`. Interactive allocations happen to
-# have one, which is why this only bites plain sbatch submissions.
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$PODMAN_STORAGE_BASE/xdg}"
-if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
-    mkdir -p "$XDG_RUNTIME_DIR"
-    chmod 700 "$XDG_RUNTIME_DIR"
-fi
-
-# Reconcile rootless runtime state after an interrupted Slurm step while
-# preserving images and layers already present in the allocation-local store.
-podman system migrate
-# Interrupted `podman build` processes leave Buildah working containers in the
-# graph store.  They are not image cache entries, but each keeps an overlay
-# mounted and can exhaust tmpfs during a later layer commit.  Remove only that
-# transient build state; images remain available locally and in CACHE_DIR.
-podman system prune --external --force
-podman system prune --build --force
-
-GRAPH_ROOT=$(podman info --format '{{.Store.GraphRoot}}')
-[[ "$GRAPH_ROOT" == "$PODMAN_STORAGE_BASE/graphroot" ]] || {
-    echo "Unexpected Podman graph root: $GRAPH_ROOT" >&2
-    exit 1
-}
-echo "Podman graph root: $GRAPH_ROOT"
-df -h "$PODMAN_STORAGE_BASE"
-
-mkdir -p "$CACHE_DIR"
-# Only one writer may mutate the persistent registry cache. The kernel releases
-# this lock automatically when Slurm kills or times out the build process.
-exec 9>"$CACHE_DIR/.build.lock"
-if ! flock --nonblock 9; then
-    echo "Another NeMo-RL image build owns $CACHE_DIR/.build.lock" >&2
-    exit 1
-fi
-if [[ ! -d "$OUTPUT_DIR" ]]; then
-    mkdir -p "$OUTPUT_DIR"
-    # CSCS's progressive Lustre layout: one stripe for small files, then
-    # spread large SquashFS files over 4 and finally 32 OSTs in 4 MiB chunks.
-    lfs setstripe \
-        --component-end 4M --stripe-count 1 \
-        --component-end 64M --stripe-count 4 \
-        --component-end -1 --stripe-count 32 --stripe-size 4M \
-        "$OUTPUT_DIR"
-fi
-lfs getstripe -d "$OUTPUT_DIR"
+TIMING_REPORT="$OUTPUT_DIR/${SOURCE_ID}.build.timings.log"
+initialize_image_storage
+# Preserve a durable reviewable copy without ever exposing a partial JSON.
+"$HOST_PYTHON" -B - "$HERMETIC_MANIFEST" "$CACHE_DIR/manifests/$CURRENT_FINGERPRINT_SHA256.json" <<'PY_MANIFEST'
+import sys
+from pathlib import Path
+sys.path.insert(0, "tools")
+from image_build_manifest import read_manifest, write_manifest
+write_manifest(Path(sys.argv[2]), read_manifest(Path(sys.argv[1])))
+PY_MANIFEST
+report_storage initialization
 
 # Construct a tracked-files-only source context from the clean checkout and
 # each recursively pinned submodule. Preserve the checkout metadata: Podman
@@ -263,51 +222,7 @@ git submodule foreach --quiet --recursive '
         | tar --extract --file=- --directory="$destination"
 '
 
-LOCAL_REGISTRY=127.0.0.1:5000
-load_registry_image() {
-    # Fresh Clariden nodes have intermittently stalled while pulling this tiny
-    # bootstrap image from Docker Hub. Prefer the pinned local OCI copy.
-    if podman image exists docker.io/library/registry:3; then
-        echo "registry:3 is already present in Podman storage"
-    elif [[ -r "$REGISTRY_IMAGE_ARCHIVE" ]]; then
-        echo "a6943a0bbcc0395ed76d5bd46000b20ca1a858d7d2ffb5318e218c6f32480d62  $REGISTRY_IMAGE_ARCHIVE" | sha256sum -c -
-        podman load --input "$REGISTRY_IMAGE_ARCHIVE"
-    else
-        podman pull docker.io/registry:3
-    fi
-}
-stop_local_registry() {
-    podman container rm --force local_registry >/dev/null 2>&1 || true
-}
-start_local_registry() {
-    # Rootless port publishing depends on a user session bus, which plain
-    # sbatch jobs do not have. Bind registry directly on the host network.
-    stop_local_registry
-    mkdir -p "$CACHE_DIR/data"
-    podman run --detach \
-        --network host \
-        --name local_registry \
-        --volume "$CACHE_DIR/data:/var/lib/registry" \
-        --env REGISTRY_HTTP_ADDR=127.0.0.1:5000 \
-        docker.io/library/registry:3 >/dev/null
 
-    local registry_ready=0
-    for _ in {1..30}; do
-        if curl --fail --silent "http://${LOCAL_REGISTRY}/v2/" >/dev/null 2>&1; then
-            registry_ready=1
-            break
-        fi
-        sleep 1
-    done
-    [[ "$registry_ready" == 1 ]] || {
-        echo "Local registry did not become ready on port 5000" >&2
-        podman logs local_registry >&2 || true
-        return 1
-    }
-}
-load_registry_image
-start_local_registry
-trap stop_local_registry EXIT
 
 # Resume source-only releases directly from the persisted final hermetic image.
 # `--cache-from` alone cannot do this reliably with Podman: its complete named
@@ -316,68 +231,33 @@ trap stop_local_registry EXIT
 # Replacing only the release stage's FROM keeps the normal Dockerfile
 # authoritative while bypassing that false dependency invalidation.
 BUILD_DOCKERFILE="$SOURCE_CONTEXT/docker/Dockerfile"
-if [[ "$HERMETIC_CACHE_TAG" != "rebuild" ]]; then
-    [[ "$CURRENT_FINGERPRINT_SHA256" == "$HERMETIC_FINGERPRINT_SHA256" ]] || {
-        echo "The pinned hermetic image does not match current dependencies." >&2
-        echo "Expected fingerprint: $HERMETIC_FINGERPRINT_SHA256" >&2
-        echo "Current fingerprint:  $CURRENT_FINGERPRINT_SHA256" >&2
-        echo "Rebuild dependencies and record their final cache tag." >&2
-        exit 1
-    }
-    HERMETIC_IMAGE="${LOCAL_REGISTRY}/cache:${HERMETIC_CACHE_TAG}"
-    curl --fail --silent --show-error --output /dev/null \
-        -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
-        "http://${LOCAL_REGISTRY}/v2/cache/manifests/${HERMETIC_CACHE_TAG}"
+HERMETIC_IMAGE="${LOCAL_REGISTRY}/cache:${CURRENT_FINGERPRINT_SHA256}"
+CACHE_AVAILABLE=no
+if [[ "$HERMETIC_CACHE_TAG" != rebuild ]]; then
+    # Only 404 means a cache miss. Transport/registry failures must fail loudly.
+    REGISTRY_STATUS=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+        -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+        "http://${LOCAL_REGISTRY}/v2/cache/manifests/${CURRENT_FINGERPRINT_SHA256}")
+    case "$REGISTRY_STATUS" in
+        200) CACHE_AVAILABLE=yes ;;
+        404) ;;
+        *) echo "Registry cache lookup failed with HTTP $REGISTRY_STATUS" >&2; exit 1 ;;
+    esac
+fi
+BUILD_TARGET=$("$HOST_PYTHON" tools/image_build_manifest.py select "$HERMETIC_MANIFEST" \
+    --cache-tag "$HERMETIC_CACHE_TAG" --available "$CACHE_AVAILABLE")
+if [[ "$BUILD_TARGET" == release-core ]]; then
     pull_rc=0
-    podman pull --tls-verify=false "$HERMETIC_IMAGE" || pull_rc=$?
+    run_timed hermetic-pull podman pull --tls-verify=false "$HERMETIC_IMAGE" || pull_rc=$?
     if ((pull_rc != 0)); then
-        # Podman can report a post-copy cleanup failure after it has already
-        # written a complete manifest into the allocation-local graph. Only
-        # accept that case when Podman itself confirms the image is usable.
         podman image exists "$HERMETIC_IMAGE" || exit "$pull_rc"
-        echo "Podman pull exited $pull_rc after materializing $HERMETIC_IMAGE; continuing with the verified local image" >&2
+        echo "Podman pull exited $pull_rc after materializing $HERMETIC_IMAGE; checking embedded manifest" >&2
     fi
-    HERMETIC_PYPROJECT_MD5=$(podman run --rm \
-        --entrypoint /usr/bin/md5sum "$HERMETIC_IMAGE" \
-        /opt/nemo-rl/pyproject.toml | cut -d' ' -f1)
-    HERMETIC_LOCK_MD5=$(podman run --rm \
-        --entrypoint /usr/bin/md5sum "$HERMETIC_IMAGE" \
-        /opt/nemo-rl/uv.lock | cut -d' ' -f1)
-    HERMETIC_VLLM_VERSION=$(podman run --rm \
-        --entrypoint /opt/nemo_rl_venv/bin/python "$HERMETIC_IMAGE" -c \
-        '
-import re
-import tomllib
-
-lock = tomllib.load(open("/opt/nemo-rl/uv.lock", "rb"))
-nemo_rl = next(package for package in lock["package"] if package["name"] == "nemo-rl")
-requirement = next(
-    requirement
-    for requirement in nemo_rl["metadata"]["requires-dist"]
-    if requirement["name"] == "vllm"
-    and "platform_machine == '\''aarch64'\''" in requirement.get("marker", "")
-    and "extra == '\''vllm'\''" in requirement.get("marker", "")
-)
-match = re.search(r"/v([^/]+)/vllm-([^-]+)-", requirement["url"])
-if match is None or match.group(1) != match.group(2):
-    raise RuntimeError(f"Malformed vLLM wheel URL: {requirement}")
-print(match.group(2))
-')
-    echo "Hermetic pyproject MD5: $HERMETIC_PYPROJECT_MD5"
-    echo "Hermetic lock MD5:      $HERMETIC_LOCK_MD5"
-    echo "Hermetic vLLM version:  $HERMETIC_VLLM_VERSION"
-    [[ "$HERMETIC_PYPROJECT_MD5" == "5bcd5feb94a97da7fe078f0ec1c1a902" ]] || { # pragma: allowlist secret
-        echo "Hermetic pyproject.toml does not match the pinned digest" >&2
-        exit 1
-    }
-    [[ "$HERMETIC_LOCK_MD5" == "e266ae4f7b43eefdaf328f5387dfc309" ]] || { # pragma: allowlist secret
-        echo "Hermetic uv.lock does not match the pinned digest" >&2
-        exit 1
-    }
-    [[ "$HERMETIC_VLLM_VERSION" == "$VLLM_VERSION" ]] || {
-        echo "Hermetic vLLM version does not match $VLLM_VERSION" >&2
-        exit 1
-    }
+    EMBEDDED_MANIFEST="$PODMAN_STORAGE_BASE/embedded-hermetic-manifest.json"
+    podman run --rm --network none --entrypoint /bin/cat "$HERMETIC_IMAGE" \
+        /opt/nemo-rl-hermetic-manifest.json > "$EMBEDDED_MANIFEST"
+    "$HOST_PYTHON" tools/image_build_manifest.py verify "$HERMETIC_MANIFEST" "$EMBEDDED_MANIFEST"
+    echo "Verified embedded hermetic manifest: $CURRENT_FINGERPRINT_SHA256"
 
     BUILD_DOCKERFILE="$PODMAN_STORAGE_BASE/Dockerfile.release-core"
     sed "s|^FROM hermetic AS release-core$|FROM ${HERMETIC_IMAGE} AS release-core|" \
@@ -386,7 +266,7 @@ print(match.group(2))
     echo "Resuming from hermetic image: $HERMETIC_IMAGE"
 else
     echo "Rebuilding only the hermetic dependency stage from source"
-    echo "Release assembly will require a second build with the printed cache pin"
+    echo "After this dependency build, submit a fresh allocation with HERMETIC_CACHE_TAG=auto"
 fi
 
 BUILD_SECRET_ARGS=()
@@ -397,22 +277,19 @@ if [[ -r "$GIT_CREDENTIALS_FILE" ]]; then
     BUILD_SECRET_ARGS+=(--secret "id=git_credentials,src=$GIT_CREDENTIALS_FILE")
 fi
 
-podman build \
+report_storage "before-$BUILD_TARGET"
+run_timed "$BUILD_TARGET-build" podman build \
     "${BUILD_SECRET_ARGS[@]}" \
     --layers \
     --tls-verify=false \
     --cache-from="${LOCAL_REGISTRY}/cache" \
     --cache-to="${LOCAL_REGISTRY}/cache" \
     --network=host \
-    --platform=linux/arm64 \
+    --platform="$PLATFORM" \
     --target="$BUILD_TARGET" \
     --build-context "nemo-rl=$SOURCE_CONTEXT" \
-    --build-arg "BASE_IMAGE=$BASE_IMAGE" \
-    --build-arg "MAX_JOBS=$MAX_JOBS" \
-    --build-arg "NVTE_CUDA_ARCHS=$NVTE_CUDA_ARCHS" \
-    --build-arg "NVTE_WITH_NCCL_EP=$NVTE_WITH_NCCL_EP" \
-    --build-arg "SKIP_TRTLLM_BUILD=$SKIP_TRTLLM_BUILD" \
-    --build-arg "CUSTOM_SETUP_FNAME=$CUSTOM_SETUP_FNAME" \
+    "${PODMAN_DEPENDENCY_ARGS[@]}" \
+    --build-arg "NEMO_RL_HERMETIC_MANIFEST_B64=$HERMETIC_MANIFEST_B64" \
     --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
     --build-arg "NEMO_RL_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
     --build-arg "NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64" \
@@ -420,22 +297,19 @@ podman build \
     --file "$BUILD_DOCKERFILE" \
     "$SOURCE_CONTEXT"
 
-# A dependency-changing build and release assembly cannot safely share the
-# 334 GiB allocation-local Podman graph: committing a release worker layer may
-# briefly duplicate enough data to exhaust /tmp. Persist the completed
-# hermetic image under its dependency fingerprint and stop. After recording
-# the printed pin values, a second job starts from a clean graph and builds the
-# release target only.
+# Persist only the dependency stage in this allocation; release preparation gets
+# a fresh graph in the next allocation, even for an automatic cache miss.
 if [[ "$BUILD_TARGET" == "hermetic" ]]; then
-    PUBLISHED_HERMETIC_TAG="$CURRENT_FINGERPRINT_SHA256"
-    PUBLISHED_HERMETIC_IMAGE="${LOCAL_REGISTRY}/cache:${PUBLISHED_HERMETIC_TAG}"
-    podman push --tls-verify=false "$IMAGE" "$PUBLISHED_HERMETIC_IMAGE"
-    echo "HERMETIC BUILD COMPLETE: $PUBLISHED_HERMETIC_IMAGE"
-    echo "Pin these values before submitting the fresh release build:"
-    echo "HERMETIC_CACHE_TAG=$PUBLISHED_HERMETIC_TAG"
-    echo "HERMETIC_FINGERPRINT_SHA256=$CURRENT_FINGERPRINT_SHA256"
-    echo "HERMETIC_PYPROJECT_MD5=$(md5sum pyproject.toml | cut -d' ' -f1)"
-    echo "HERMETIC_LOCK_MD5=$(md5sum uv.lock | cut -d' ' -f1)"
+    EMBEDDED_MANIFEST="$PODMAN_STORAGE_BASE/built-hermetic-manifest.json"
+    podman run --rm --network none --entrypoint /bin/cat "$IMAGE" \
+        /opt/nemo-rl-hermetic-manifest.json > "$EMBEDDED_MANIFEST"
+    "$HOST_PYTHON" tools/image_build_manifest.py verify "$HERMETIC_MANIFEST" "$EMBEDDED_MANIFEST"
+    run_timed hermetic-publish podman push --tls-verify=false "$IMAGE" "$HERMETIC_IMAGE"
+    report_storage hermetic-complete
+    echo "HERMETIC BUILD COMPLETE: $HERMETIC_IMAGE"
+    echo "Manifest: $CACHE_DIR/manifests/$CURRENT_FINGERPRINT_SHA256.json"
+    echo "Submit the fresh release allocation with HERMETIC_CACHE_TAG=auto"
+    echo "Optional explicit pin: HERMETIC_CACHE_TAG=$CURRENT_FINGERPRINT_SHA256"
     exit 0
 fi
 
@@ -444,11 +318,12 @@ fi
 # the broad build cache and the last control/Gym delta in that graph together
 # exhausts it; rebuilding the final delta from this exact parent does not.
 CORE_REGISTRY_IMAGE="${LOCAL_REGISTRY}/nemo-rl-release-core:${SOURCE_ID}"
-podman push --tls-verify=false "$IMAGE" "$CORE_REGISTRY_IMAGE"
+run_timed release-core-publish podman push --tls-verify=false "$IMAGE" "$CORE_REGISTRY_IMAGE"
 echo "Persistent release core: $CORE_REGISTRY_IMAGE"
 
 stop_local_registry
-podman system reset --force
+verify_private_graph
+run_timed graph-reset podman system reset --force
 mkdir -p \
     "$PODMAN_STORAGE_BASE/graphroot" \
     "$PODMAN_STORAGE_BASE/runroot" \
@@ -461,7 +336,7 @@ start_local_registry
 curl --fail --silent --show-error --output /dev/null \
     -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
     "http://${LOCAL_REGISTRY}/v2/nemo-rl-release-core/manifests/${SOURCE_ID}"
-podman pull --tls-verify=false "$CORE_REGISTRY_IMAGE"
+run_timed release-core-pull podman pull --tls-verify=false "$CORE_REGISTRY_IMAGE"
 
 FINAL_DOCKERFILE="$PODMAN_STORAGE_BASE/Dockerfile.release-final"
 sed "s|^FROM release-core AS release$|FROM ${CORE_REGISTRY_IMAGE} AS release|" \
@@ -469,15 +344,17 @@ sed "s|^FROM release-core AS release$|FROM ${CORE_REGISTRY_IMAGE} AS release|" \
 grep -F "FROM ${CORE_REGISTRY_IMAGE} AS release" "$FINAL_DOCKERFILE"
 echo "Finalizing from a fresh graph: $CORE_REGISTRY_IMAGE"
 
-podman build \
+report_storage before-release-final
+run_timed release-final-build podman build \
     "${BUILD_SECRET_ARGS[@]}" \
     --layers \
     --tls-verify=false \
     --network=host \
-    --platform=linux/arm64 \
+    --platform="$PLATFORM" \
     --target=release \
-    --build-arg "BASE_IMAGE=$BASE_IMAGE" \
-    --build-arg "SKIP_TRTLLM_BUILD=$SKIP_TRTLLM_BUILD" \
+    --build-context "nemo-rl=$SOURCE_CONTEXT" \
+    "${PODMAN_DEPENDENCY_ARGS[@]}" \
+    --build-arg "NEMO_RL_HERMETIC_MANIFEST_B64=$HERMETIC_MANIFEST_B64" \
     --build-arg "NEMO_RL_COMMIT=$SOURCE_COMMIT" \
     --build-arg "NEMO_RL_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
     --build-arg "NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64" \
@@ -488,103 +365,19 @@ podman build \
 # Persist the final manifest/tag as well as its cached layers. Registry blobs
 # are content-addressed, so this reuses the cache payload instead of storing a
 # second copy and lets Enroot export be retried in a later allocation.
-REGISTRY_IMAGE="${LOCAL_REGISTRY}/nemo-rl-apertus:vllm-${VLLM_VERSION}-${SOURCE_ID}"
-podman push --tls-verify=false "$IMAGE" "$REGISTRY_IMAGE"
+REGISTRY_IMAGE="${LOCAL_REGISTRY}/nemo-rl-${NRL_IMAGE_PROFILE}:vllm-${VLLM_VERSION}-${SOURCE_ID}"
+run_timed release-publish podman push --tls-verify=false \
+    --digestfile "$PODMAN_STORAGE_BASE/release.digest" "$IMAGE" "$REGISTRY_IMAGE"
 echo "Persistent image: $REGISTRY_IMAGE"
 
-# Podman storage is node-local tmpfs, so import in this same allocation.  Some
-# Enroot/Podman combinations return nonzero only while cleaning their temporary
-# mount after mksquashfs has already completed.  Accept that cleanup failure
-# only when the resulting image has a valid SquashFS superblock.
-if ! enroot import -x mount -o "$SQSH_PATH" "podman://$IMAGE"; then
-    if [[ -s "$SQSH_PATH" ]] && unsquashfs -s "$SQSH_PATH" >/dev/null; then
-        echo "Enroot cleanup returned nonzero; the completed SquashFS is valid" >&2
-    else
-        exit 1
-    fi
-fi
-
-# Verify the dependency/API boundary that motivated this image. A writable
-# overlay is required because NeMo-RL applies narrowly scoped vLLM source
-# compatibility patches at worker startup.
-enroot start --root --rw "$SQSH_PATH" \
-    /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker/bin/python - <<'PY'
-from importlib.metadata import version
-
-from nemo_rl.models.generation.vllm.patches import ensure_vllm_source_compat
-
-ensure_vllm_source_compat()
-
-import openai
-import vllm
-import xgrammar
-from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
-from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.tool_parsers import utils as tool_parser_utils
-
-if vllm.__version__ != "0.26.0":
-    raise RuntimeError(f"Expected vLLM 0.26.0, found {vllm.__version__}")
-if any(
-    symbol is None
-    for symbol in (OnlineRenderer, ServingTokenization, tool_parser_utils.NamespaceTool)
-):
-    raise RuntimeError("Required vLLM 0.25 APIs are unavailable")
-print("vLLM:", vllm.__version__)
-print("OpenAI:", openai.__version__)
-print("xgrammar:", version("xgrammar"))
-print("vLLM 0.25 renderer, tokenization, and tool-parser imports: OK")
-PY
-
-# TE is compiled independently in the Megatron worker environment. Verify the
-# exact MCore pairing and the TE APIs used by the dense and grouped-MoE paths.
-enroot start --root --rw "$SQSH_PATH" \
-    /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python \
-    - "$NVTE_WITH_NCCL_EP" <<'PY'
-import ctypes
-import sys
-from importlib.metadata import version
-
-import megatron.core.extensions.transformer_engine as mcore_te
-
-if not mcore_te.HAVE_TE:
-    raise RuntimeError("MCore did not discover Transformer Engine")
-
-import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
-
-expected_te = "2.18.0+27486e03"
-actual_te = version("transformer-engine")
-if actual_te != expected_te:
-    raise RuntimeError(f"Expected Transformer Engine {expected_te}, found {actual_te}")
-
-expect_nccl_ep = bool(int(sys.argv[1]))
-ep_symbols = [
-    name
-    for name in ("ep_initialize", "ep_finalize", "ep_get_zero_copy")
-    if hasattr(tex, name)
-]
-if expect_nccl_ep:
-    if len(ep_symbols) != 3:
-        raise RuntimeError(f"NCCL-EP was enabled but only found symbols: {ep_symbols}")
-    nccl = ctypes.CDLL("libnccl.so.2", mode=ctypes.RTLD_GLOBAL)
-    nccl_version = ctypes.c_int()
-    if nccl.ncclGetVersion(ctypes.byref(nccl_version)) != 0:
-        raise RuntimeError("ncclGetVersion failed")
-    if nccl_version.value < 23004:
-        raise RuntimeError(f"NCCL-EP requires NCCL >=2.30.4, found {nccl_version.value}")
-elif ep_symbols:
-    raise RuntimeError(f"NCCL-EP was expected to be disabled, found symbols: {ep_symbols}")
-
-if any(
-    symbol is None
-    for symbol in (mcore_te.TELinear, te.DotProductAttention, te.GroupedLinear)
-):
-    raise RuntimeError("Required MCore/Transformer Engine APIs are unavailable")
-print("Transformer Engine:", actual_te)
-print("MCore TE adapters: OK; NCCL-EP enabled:", expect_nccl_ep)
-PY
-
-echo "SquashFS checksum and size:"
-sha256sum "$SQSH_PATH"
-du -h "$SQSH_PATH"
-echo "BUILD COMPLETE: $SQSH_PATH"
+# Only a successfully published complete image receives an assembly handoff.
+RELEASE_DIGEST=$(cat "$PODMAN_STORAGE_BASE/release.digest")
+RELEASE_RECEIPT="${SQSH_PATH%.sqsh}.release.json"
+"$HOST_PYTHON" "$REPO_DIR/infra/slurm/cscs/image_release_receipt.py" create \
+    --manifest "$HERMETIC_MANIFEST" --source-commit "$SOURCE_COMMIT" \
+    --image-ref "${LOCAL_REGISTRY}/nemo-rl-${NRL_IMAGE_PROFILE}@${RELEASE_DIGEST}" \
+    --vllm-version "$VLLM_VERSION" --output "$RELEASE_RECEIPT"
+report_storage prepared-image-complete
+echo "PREPARED IMAGE BUILD COMPLETE: $RELEASE_RECEIPT"
+echo "Assemble separately with RELEASE_RECEIPT=$RELEASE_RECEIPT"
+echo "Timing report: $TIMING_REPORT"

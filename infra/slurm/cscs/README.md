@@ -2,7 +2,7 @@
 
 This directory contains the Clariden/GH200 Slurm wrappers used to build, probe, and train with the NeMo-RL `nvcr.io/nvidia/nemo-rl:v0.7.0` container on Slingshot.
 
-The default container environment is `docker/nemo_rl.toml` in this checkout. The wrappers set `CUDA_CACHE_PATH` and Hugging Face cache paths in shell code because TOML values are not shell-expanded by Pyxis/EDF.
+The default container environment is `infra/slurm/cscs/environments/nemo_rl.toml` in this checkout. The wrappers set `CUDA_CACHE_PATH` and Hugging Face cache paths in shell code because TOML values are not shell-expanded by Pyxis/EDF.
 Its AWS OFI hook and NCCL/libfabric values follow the current
 [CSCS NCCL guidance](https://docs.cscs.ch/software/communication/nccl/): the
 portable `cuda-dl` hook, GPU Direct RDMA through `PHB`, and
@@ -95,8 +95,20 @@ its corresponding image must also exist in the persistent local registry.
 The build checks that inherited submodule pins match before regenerating the
 dependency fingerprint and synchronizing worker environments. Retain the source/image fingerprint checks when running
 the resulting image with a checkout overlay.
+Both the base-image and overlay launchers default to `NRL_IMAGE_PROFILE=apertus`:
+six environments covering vLLM generation, Megatron policy training, and rollout
+controllers. Set `NRL_IMAGE_PROFILE=full` to include the other backends. The overlay
+does not build TRT-LLM; use the base-image launcher with `BUILD_TRTLLM=1` and the
+full profile when that backend is needed.
 
-`docker/nemo_rl_vllm026_ncclext.toml` selects the built overlay. The bounded
+The six-worker selection is declared in [`profiles/apertus.actors`](profiles/apertus.actors).
+Both launchers pass those names through the shared Dockerfile's `NRL_ACTORS`
+argument; `full` passes an empty selection, meaning all registered workers.
+The selected names enter the dependency manifest and cache identity. The shared
+actor registry defines dependencies and validates names without importing CSCS
+configuration.
+
+`infra/slurm/cscs/environments/nemo_rl_vllm026_ncclext.toml` selects the built overlay. The bounded
 probe is `AP_VARIANT=8b-smoke bash infra/slurm/cscs/autoresearch/submit_apertus_bench.sh`: three nodes, two updates,
 trainer TP2/PP2 and rollout TP2/PP1. The wrapper also provides `70b-bench`;
 it accepts only variants whose recipes are present. These recipes are separate
@@ -115,22 +127,38 @@ the same fallback. Warm full-step means were 344.76 s for the overlay and 335.22
 for the reference on different sampled batches. These runs establish an
 operational fallback, not a speedup or native cross-node qualification.
 
-## Custom vLLM 0.25.1 GH200 image
+## GH200 images and build lifecycle
 
-The machine-local `docker/nemo_rl_vllm0251.toml` EDF selects the custom arm64
+The current source builds TE 2.18 and vLLM 0.26. The September 10 build-tooling
+candidate completed native GPU checks and a bounded 70B initial/resume smoke;
+see the [qualification record](docs/2026-09-10-image-build-refresh.md#final-qualification-september-10)
+for its source, immutable digest, job IDs and the nonfatal TransferQueue resume
+warning. This candidate retains the existing dependency pins; full upstream
+synchronization remains a separate integration.
+
+CSCS environment definitions are under [`environments/`](environments/), and
+build plans and qualification records are under [`docs/`](docs/).
+`image_release_receipt.py` owns the local-registry and platform rules for the
+build-to-assembly handoff. Generic dependency manifests and worker checks stay
+under the repository's `tools/` directory.
+
+### Historical vLLM 0.25.1 release
+
+The machine-local `infra/slurm/cscs/environments/nemo_rl_vllm0251.toml` EDF selects the custom arm64
 image built from this checkout. It runs the baked `/opt/nemo-rl` tree and
 frozen environments under `/opt/ray_venvs`; it does not require checkout-local
 `.venv` or `venvs` directories.
 
-The current SquashFS is the clean upstream-sync release from
+The older EDF below selects the clean upstream-sync release from
 `3868458efa37288069ff3f1a2f0b892464c517e0`. The artifact includes the Apertus
 refit fixes and the upstream vLLM, SGLang, DTensor, Megatron, quantized-policy,
 trajectory, replay, and NeMo Gym worker environments.
 
-The EDF ships with the checkout and points at the certified production copy
+That EDF ships with the checkout and points at the certified historical copy
 below. The file is owner-only (`0600`); other users must build their own image.
 To run a different build, replace only its `image` value with the builder's
-reported `BUILD COMPLETE` path.
+reported `ASSEMBLY COMPLETE` path, then qualify the selected image. Do not infer
+the installed runtime version from an EDF filename or the current source tree.
 
 | Field | Value |
 | --- | --- |
@@ -180,8 +208,10 @@ Useful environment overrides are `SCRATCH_ROOT`, `CACHE_DIR`, `OUTPUT_DIR`,
 `PODMAN_STORAGE_BASE`. `CUSTOM_SETUP_FNAME` is empty by default because CSCS
 launches SquashFS images through Pyxis/Enroot and does not need Apptainer
 inside the image; set it explicitly only for a nested-container use case.
-`HERMETIC_CACHE_TAG=rebuild` deliberately rebuilds all dependencies instead of
-resuming the pinned hermetic image. The default architecture is arm64/GH200,
+`HERMETIC_CACHE_TAG=auto` is the default: reuse dependencies only when the
+generated manifest matches, otherwise build and publish the hermetic image.
+`HERMETIC_CACHE_TAG=rebuild` forces the hermetic stage. An explicit digest is
+accepted only when it matches the generated key. The default architecture is arm64/GH200,
 the NGC base is digest-pinned, and Transformer Engine is limited to
 `NVTE_CUDA_ARCHS=90`.
 
@@ -196,27 +226,79 @@ The build has two different stores:
   `OUTPUT_DIR` is the delivered Container Engine image and also survives the
   allocation.
 
-The launcher cleans interrupted Buildah containers before building, restores a
-pinned `registry:3` bootstrap image, waits for registry readiness, pushes the
-final OCI manifest, exports SquashFS, verifies its superblock, and checks the
-vLLM renderer/tokenizer/tool-parser import boundary.
+Build, assembly, and runtime qualification are separate operations:
 
-For a source-only release, the launcher verifies the current dependency
-fingerprint and resumes from the content-addressed hermetic image. It first
-builds and persists `release-core`, which contains the generation and training
-workers. It then clears only the allocation-local Podman graph, restores that
-exact core into the fresh graph, and commits the final control/Gym delta before
-export. This keeps the broad build cache and the last delta from competing for
-the fixed 334 GiB `/tmp` mount.
+1. **Build:** `build_nemo_rl_image.slurm` owns every Dockerfile instruction,
+   compilation, package installation, worker finalization, and offline CPU check.
+   It publishes the completed OCI image and prints a `*.release.json` receipt.
+   The receipt records the immutable registry digest, source commit, dependency
+   manifest and runtime fingerprint. The builder does not export SquashFS.
+2. **Assembly:** `assemble_nemo_rl_image.slurm` requires that receipt. It pulls
+   the exact digest, checks the image labels and fingerprints, and exports it
+   using the verified local image ID (the installed Enroot parser does not accept
+   `@sha256` references). It performs no package installation or Dockerfile build.
+   Missing artifacts and mismatches fail without a rebuild fallback.
+3. **Qualification:** `qualify_nemo_rl_image.sh` runs the native vLLM/TE API
+   checks against an assembled image on a compute node. Training, distributed
+   refit and optimizer-resume qualification remain separate Slurm jobs.
 
-When dependencies change, treat the rebuild as two allocations. First run with
-`HERMETIC_CACHE_TAG=rebuild`. The launcher builds and publishes only the
-hermetic target under its dependency fingerprint, prints the exact tag and
-digests to pin, and exits successfully without entering release assembly.
-Replace the pinned tag, fingerprint, and digests with those values, commit the
-change, and start the two-phase release assembly from a clean allocation-local
-Podman store. Do not move the overlay graph to Lustre; that filesystem does not
-provide the extended-attribute semantics Podman needs.
+The assembly exporter must succeed. An allocation-local Docker compatibility
+helper handles only Enroot's cleanup call: it changes to `/` before invoking
+Podman, because the installed Enroot removes its working directory first.
+This prevents the reproduced `getcwd` cleanup failure while preserving genuine
+export and cleanup errors. No host packages or prepared-image files are changed.
+ `unsquashfs -no-progress -pf -` then reads
+metadata and decompresses all file data to discarded output, without storing a
+second extracted filesystem. Only after that succeeds is the final `.sqsh`
+name published atomically without overwriting another artifact. Build and
+assembly write separate timing logs. Offline worker checks performed during
+build are recorded in `/opt/nemo-rl-image-qualification.json`; they do not claim
+GPU or distributed training qualification.
+
+For a source-only release, the builder verifies the dependency fingerprint and
+resumes from the content-addressed hermetic image. It prepares and persists
+`release-core`, resets only its private Podman graph, then completes the final
+release and publishes its receipt. All of this remains on the build side of
+the handoff. Application changes do not invalidate the dependency cache.
+
+If dependencies changed, two build allocations are needed: the first `auto`
+invocation publishes the missing hermetic image and exits; the second finds
+that cache and prepares the complete release. A known dependency rebuild can
+be queued as follows from a clean, fully initialized repository:
+
+```bash
+deps_job=$(sbatch --parsable --chdir="$PWD" --export="REPO_DIR=$PWD,HERMETIC_CACHE_TAG=rebuild" infra/slurm/cscs/build_nemo_rl_image.slurm)
+sbatch --dependency="afterok:$deps_job" --chdir="$PWD" --export="REPO_DIR=$PWD" infra/slurm/cscs/build_nemo_rl_image.slurm
+```
+
+After the build prints `PREPARED IMAGE BUILD COMPLETE`, set `RELEASE_RECEIPT`
+to the exact printed JSON path and submit assembly:
+
+```bash
+: "${RELEASE_RECEIPT:?Set this to the receipt printed by the successful build}"
+sbatch --chdir="$PWD" --export="REPO_DIR=$PWD,RELEASE_RECEIPT=$RELEASE_RECEIPT" infra/slurm/cscs/assemble_nemo_rl_image.slurm
+```
+
+An assembly retry uses the same receipt and image digest. Pass the original
+`CACHE_DIR` if it was overridden during build, and a different `OUTPUT_DIR`
+only when intentionally producing another copy. Assembly needs this repository's
+host tools, but does not require its application source/submodules to match the
+image; the receipt identifies the image being packaged. `REPO_DIR` is explicit
+because Slurm executes a spooled copy of the batch script.
+
+After assembly prints `ASSEMBLY COMPLETE`, run the separate native checks in a
+compute allocation with `SQSH_PATH` set to that image:
+
+```bash
+SQSH_PATH="$SQSH_PATH" bash infra/slurm/cscs/qualify_nemo_rl_image.sh
+```
+
+`PODMAN_STORAGE_BASE` must be a new absolute directory. Never move its overlay
+graph onto Lustre; keep only registry data and delivered artifacts there.
+Both entry points share the same private-store guard, pinned host helper and
+registry lock through `image_storage.sh`. The local registry endpoint exists
+only while its allocation is running, but the receipt's digest and registry
+blobs survive in `CACHE_DIR`.
 
 ### Failure and recovery ledger
 

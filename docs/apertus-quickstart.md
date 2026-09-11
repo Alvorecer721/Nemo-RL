@@ -3,12 +3,12 @@
 How to reproduce online GRPO post-training for Apertus 1.5 8B on a CSCS GH200 node from a clean checkout.
 The default path runs on the **stock `nvcr.io/nvidia/nemo-rl:v0.7.0` image** via `uv run --locked` — no custom image build. Since the vLLM 0.25.1 bump, the lock installs vLLM 0.25.1 (official prebuilt aarch64 wheel) into the checkout venvs; the stock image supplies the host runtime, not the Python stack.
 For the architecture gotchas behind the gates here, see [apertus-traps-and-invariants.md](apertus-traps-and-invariants.md); for Slurm submission details, see `infra/slurm/cscs/README.md` in the repo.
-The faster vLLM 0.25.1 stack is also clone-and-run: a certified prebuilt image is shared under `MLLM/containers/` and the checkout ships its EDF (`docker/nemo_rl_vllm0251.toml`) — see the "Custom vLLM 0.25.1 GH200 image" section of the Slurm README.
+The faster vLLM 0.25.1 stack is also clone-and-run: a certified prebuilt image is shared under `MLLM/containers/` and the checkout ships its EDF (`infra/slurm/cscs/environments/nemo_rl_vllm0251.toml`) — see the "Custom vLLM 0.25.1 GH200 image" section of the Slurm README.
 
 ## Prerequisites
 
 - A CSCS GH200 allocation (e.g. Clariden), account `infra01`.
-- The stock image `nvcr.io/nvidia/nemo-rl:v0.7.0` — `docker/nemo_rl.toml` serves it from the shared pre-pulled copy in `MLLM/containers/` (no pull, no build; see the Slurm README for the registry alternative).
+- The stock image `nvcr.io/nvidia/nemo-rl:v0.7.0` — `infra/slurm/cscs/environments/nemo_rl.toml` serves it from the shared pre-pulled copy in `MLLM/containers/` (no pull, no build; see the Slurm README for the registry alternative).
 - The shared wheelhouse `/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/` — provides the prebuilt CUDA xIELU kernel for the **training side** (`aarch64/xielu-site-current`, a symlink the launchers follow so kernel bumps need no launcher edits) and the `libjson-c.so.5` used for compute-node submission. vLLM generation deliberately runs its fused-Python xIELU — a measured tie against the kernel under compile; see [the xIELU reference](apertus-xielu.md).
 - The Apertus SFT checkpoint and tokenizer referenced in the recipe (already staged under `/capstor/store/cscs/swissai/infra01/`).
 

@@ -9,7 +9,7 @@ FROM ${BASE_RELEASE_IMAGE}
 ARG NEMO_RL_COMMIT
 ARG NEMO_RL_BUILD_INPUTS_SHA256
 ARG NEMO_RL_BUILD_FINGERPRINT_B64
-ARG OVERLAY_NEGATIVE_FILTERS="trtllm dynamo nemo_gym"
+ARG NRL_ACTORS=""
 ARG OVERLAY_GATE_VENVS="nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
 
 ENV NEMO_RL_COMMIT=${NEMO_RL_COMMIT:-<unknown>}
@@ -26,10 +26,18 @@ RUN python tools/restamp_overlay_fingerprint.py \
     /opt/nemo_rl_container_fingerprint \
     /opt/nemo-rl/.nemo_rl_source_fingerprint.json
 
-RUN UV_LINK_MODE=symlink bash tools/uv-sync-retry.sh --frozen --all-groups --no-install-project
-
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    --negative-filters ${OVERLAY_NEGATIVE_FILTERS}
+# Overlay dependencies may change. The selected actor manifest determines every
+# environment to reconcile; application-only release assembly uses offline mode.
+RUN <<"EOF" bash -exu -o pipefail
+python3 nemo_rl/distributed/actor_environments.py --actors "$NRL_ACTORS" \
+    all trtllm > /opt/actor_venvs.tsv
+test -s /opt/actor_venvs.tsv
+UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --all-groups --no-install-project
+mapfile -t actors < <(cut -f1 /opt/actor_venvs.tsv)
+(( ${#actors[@]} > 0 ))
+UV_LINK_MODE=hardlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs "${actors[@]}"
+UV_OFFLINE=1 python tools/check_image_workers.py --output /opt/nemo-rl-image-qualification.json
+EOF
 
 RUN <<"EOF" bash -exu -o pipefail
 for venv in ${OVERLAY_GATE_VENVS}; do

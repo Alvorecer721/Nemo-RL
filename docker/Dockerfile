@@ -177,6 +177,8 @@ ARG BUILD_CUSTOM_FLASHINFER_REF
 ARG SKIP_VLLM_BUILD
 ARG SKIP_SGLANG_BUILD
 ARG SKIP_TRTLLM_BUILD
+ARG NRL_ACTORS=""
+ARG NVTE_WITH_NCCL_EP=0
 ARG BASE_IMAGE
 ARG UV_VERSION
 ARG TARGETARCH
@@ -223,6 +225,7 @@ COPY --from=nemo-rl nemo_rl/__init__.py nemo_rl/package_info.py nemo_rl/transfor
 COPY --from=nemo-rl tools/build-custom-vllm.sh ./tools/build-custom-vllm.sh
 COPY --from=nemo-rl tools/build-custom-flashinfer.sh ./tools/build-custom-flashinfer.sh
 COPY --from=nemo-rl tools/uv-sync-retry.sh ./tools/uv-sync-retry.sh
+COPY --from=nemo-rl nemo_rl/distributed/actor_environments.py ./nemo_rl/distributed/actor_environments.py
 COPY --from=nemo-rl --link research/ ./research/
 COPY --from=nemo-rl --link \
     --exclude=TensorRT-LLM-workspace \
@@ -255,77 +258,32 @@ fi
 # without evaluating that absent local source; the late layer runs uv lock
 # --check with the complete workspace before starting the TRT-LLM build.
 
-# Install the common environment first. Later backend-specific syncs use
-# disposable environments so their conflicting package sets warm the uv cache
-# without bloating image layers.
+# Build worker dependencies in the same layer that owns the downloaded cache.
+# Hardlinking from a later overlay layer would copy the cached wheels up again.
+# The actor manifest is also the runtime registry's source of truth.
+SKIP_EXTRAS=()
+[[ -z "${SKIP_VLLM_BUILD:-}" ]] || SKIP_EXTRAS+=(vllm)
+[[ -z "${SKIP_SGLANG_BUILD:-}" ]] || SKIP_EXTRAS+=(sglang)
+[[ -z "${SKIP_TRTLLM_BUILD:-}" ]] || SKIP_EXTRAS+=(trtllm)
+"${UV_PROJECT_ENVIRONMENT}/bin/python" nemo_rl/distributed/actor_environments.py \
+    --actors "$NRL_ACTORS" all "${SKIP_EXTRAS[@]}" > /opt/actor_venvs.tsv
+test -s /opt/actor_venvs.tsv
 UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --no-install-project
-EOF
-
-# Commit backend cache additions independently. This bounds the mutable overlay
-# Podman must snapshot at once and makes expensive native builds reusable after
-# an interrupted build.
-RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
-if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
-    source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
-    uv venv --seed /tmp/nemo-rl-warm-vllm
-    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
+while IFS=$'\t' read -r actor stage extras; do
+    worker_venv="${NEMO_RL_VENV_DIR}/${actor}"
+    uv venv --allow-existing "$worker_venv"
+    UV_PROJECT_ENVIRONMENT="$worker_venv" UV_LINK_MODE=hardlink \
         bash tools/uv-sync-retry.sh --frozen --no-install-project
-    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-vllm UV_LINK_MODE=copy \
-        bash tools/uv-sync-retry.sh --frozen --extra vllm --no-install-project
-    rm -rf /tmp/nemo-rl-warm-vllm
-fi
-EOF
-RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
-if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
-    uv venv --seed /tmp/nemo-rl-warm-sglang
-    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
-        bash tools/uv-sync-retry.sh --frozen --no-install-project
-    UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-sglang UV_LINK_MODE=copy \
-        bash tools/uv-sync-retry.sh --frozen --extra sglang --no-install-project
-    rm -rf /tmp/nemo-rl-warm-sglang
-fi
-EOF
-# The base image provides NCCL 2.29 headers, while TE's optional NCCL-EP
-# backend requires the NCCL 2.30 internal API. Declare this immediately before
-# the first TE consumer so unrelated backend cache layers remain reusable.
-ARG NVTE_WITH_NCCL_EP=0
-RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
-uv venv --seed /tmp/nemo-rl-warm-mcore
-UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
-    bash tools/uv-sync-retry.sh --frozen --no-install-project
-UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-mcore UV_LINK_MODE=copy \
-    bash tools/uv-sync-retry.sh --frozen --extra mcore --no-install-project
-rm -rf /tmp/nemo-rl-warm-mcore
-EOF
-RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
-uv venv --seed /tmp/nemo-rl-warm-automodel
-UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
-    bash tools/uv-sync-retry.sh --frozen --no-install-project
-UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-automodel UV_LINK_MODE=copy \
-    bash tools/uv-sync-retry.sh --frozen --extra automodel --no-install-project
-rm -rf /tmp/nemo-rl-warm-automodel
-EOF
-RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
-uv venv --seed /tmp/nemo-rl-warm-modelopt
-UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
-    bash tools/uv-sync-retry.sh --frozen --no-install-project
-UV_PROJECT_ENVIRONMENT=/tmp/nemo-rl-warm-modelopt UV_LINK_MODE=copy \
-    bash tools/uv-sync-retry.sh --frozen --extra modelopt --no-install-project
-rm -rf /tmp/nemo-rl-warm-modelopt
-EOF
-
-# Assemble the image's actual project environment from the now-warm cache.
-RUN --mount=type=secret,id=git_credentials <<"EOF" bash -exu
-source 3rdparty/vllm/nemo-rl.env 2>/dev/null || true
-bash tools/uv-sync-retry.sh --link-mode symlink --frozen --all-groups --no-install-project
-
-# Remove the aiohttp in this uv cache dir to fully address CVE GHSA-mqqc-3gqh-h2x8
-# The ray install will include the older aiohttp version in its cache
+    if [[ "$stage" == deps ]]; then
+        # extras contains only validated --extra NAME pairs from the leaf module.
+        UV_PROJECT_ENVIRONMENT="$worker_venv" UV_LINK_MODE=hardlink \
+            bash tools/uv-sync-retry.sh --frozen $extras --no-install-project
+    fi
+done < /opt/actor_venvs.tsv
+# Keep the driver environment independent of any backend's incompatible extras.
+UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --all-groups --no-install-project
 find /root/.cache/uv -type d -path "*ray/_private/runtime_env/agent/thirdparty_files/aiohttp*" -exec rm -rf {} +
-
-mkdir -p /root/.cache/uv
-CACHE_KEY=$(echo "${BASE_IMAGE}-${UV_VERSION}" | md5sum | cut -c1-12)
-echo "${CACHE_KEY}" > /root/.cache/uv/.cache-key
+printf '%s\n' "$CACHE_KEY" > /root/.cache/uv/.cache-key
 EOF
 
 # Keep the frequently changing TRT-LLM build inputs after the other backend
@@ -345,11 +303,11 @@ RUN --mount=type=ssh \
 # path-source member isn't copied until the COPY just above (kept late so a
 # TRT-LLM ref bump doesn't bust the cached TE/backend build).
 # WARNING: removing this check (or this layer) without also reverting --frozen
-# above would let an out-of-date lock ship silently. Keep it before the SKIP exit.
+# above would let an out-of-date lock ship silently. Keep it before the worker-selection exit.
 uv lock --check
 
-if [[ -n "${SKIP_TRTLLM_BUILD:-}" ]]; then
-    echo "SKIP_TRTLLM_BUILD is set; skipping the isolated TRT-LLM build"
+if ! awk -F '\t' '$2 == "trtllm" { found=1 } END { exit !found }' /opt/actor_venvs.tsv; then
+    echo "No TRT-LLM workers selected; skipping the isolated TRT-LLM build"
     exit 0
 fi
 
@@ -397,6 +355,16 @@ rm -rf "${TRTLLM_BUILD_VENV}"
 echo "TRT-LLM cache state after build:"
 du -sh /root/.cache/uv /root/.cache/trtllm-wheels
 
+# Complete TRT workers only after the native wheel is available. Other workers
+# were completed in the earlier dependency layer.
+export TRTLLM_WHEEL_CACHE_MIRROR_DIR=/opt/trtllm_wheels
+export TRTLLM_REQUIRE_CACHED_WHEEL=1
+while IFS=$'\t' read -r actor stage extras; do
+    [[ "$stage" == trtllm ]] || continue
+    UV_PROJECT_ENVIRONMENT="${NEMO_RL_VENV_DIR}/${actor}" UV_LINK_MODE=hardlink \
+        bash tools/uv-sync-retry.sh --frozen $extras --no-install-project
+done < /opt/actor_venvs.tsv
+
 # The TRT-LLM sync can repopulate the shared uv cache, so repeat the security
 # cleanup performed in the preceding dependency layer.
 find /root/.cache/uv -type d -path "*ray/_private/runtime_env/agent/thirdparty_files/aiohttp*" -exec rm -rf {} +
@@ -424,6 +392,13 @@ bash -x /opt/${CUSTOM_SETUP_FNAME}
 EOF
 
 WORKDIR /opt/nemo-rl
+
+# The CSCS builder supplies the manifest it will verify before cache reuse.
+ARG NEMO_RL_HERMETIC_MANIFEST_B64
+RUN if [ -n "${NEMO_RL_HERMETIC_MANIFEST_B64:-}" ]; then \
+        printf '%s' "$NEMO_RL_HERMETIC_MANIFEST_B64" | base64 --decode \
+            > /opt/nemo-rl-hermetic-manifest.json; \
+    fi
 
 FROM hermetic AS release-core
 
@@ -487,49 +462,16 @@ EOF
 # Potentially not necessary if the repo is passed in as a complete repository (w/ full git history),
 # so do a quick check before trying to unshallow.
 RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
-# Commit the frozen Ray environments in bounded groups. One layer for every
-# worker exceeds Clariden's node-local graph, while one layer per actor creates
-# too many cumulative snapshots. Groups of at most four fit both constraints.
-# Positive filters match actor FQNs and retain every non-system environment in
-# the current actor registry.
-RUN <<"EOF" bash -exu
-if [[ -z "${SKIP_VLLM_BUILD:-}" ]]; then
-    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs vllm
-fi
+# Finish the frozen actor environments and record their installed inventories.
+# Copy mode for this small release delta avoids replacing overlay hardlinks;
+# the expensive dependency layer retains its shared files. No base-only sync.
+# Offline mode makes a missing dependency fail here rather than at job startup.
+RUN <<"EOF" bash -exu -o pipefail
+mapfile -t actors < <(cut -f1 /opt/actor_venvs.tsv)
+(( ${#actors[@]} > 0 ))
+UV_OFFLINE=1 uv run --no-sync python -m nemo_rl.utils.prefetch_venvs --prebuilt "${actors[@]}"
 EOF
-RUN <<"EOF" bash -exu
-if [[ -z "${SKIP_SGLANG_BUILD:-}" ]]; then
-    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs sglang
-fi
-EOF
-ARG BASE_IMAGE
-RUN --mount=type=cache,id=trtllm-wheel-cache-${TARGETARCH}-${BASE_IMAGE},from=trtllm-wheel-cache-seed,source=.,target=/root/.cache/trtllm-wheels,sharing=locked <<"EOF" bash -exu
-if [[ -z "${SKIP_TRTLLM_BUILD:-}" ]]; then
-    # Reuse the custom wheel produced by the hermetic stage. Normal uv
-    # artifacts stay in /root/.cache/uv, which remains available to symlinked
-    # environments. Mirror only the current content-addressed TRT-LLM wheel so
-    # runtime `uv run --extra trtllm` calls cannot fall back to a source build.
-    export TRTLLM_WHEEL_CACHE_DIR=/root/.cache/trtllm-wheels
-    export TRTLLM_WHEEL_CACHE_MIRROR_DIR=/opt/trtllm_wheels
-    export TRTLLM_REQUIRE_CACHED_WHEEL=1
-    UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs trtllm
-fi
-EOF
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_policy_worker.DTensorPolicyWorker \
-    dtensor_policy_worker_v2.DTensorPolicyWorkerV2 \
-    dtensor_value_worker_v2.DTensorValueWorkerV2
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    dtensor_quant_policy_worker.DTensorQuantPolicyWorker \
-    dtensor_quant_policy_worker_v2.DTensorQuantPolicyWorkerV2 \
-    megatron_quant_policy_worker.MegatronQuantPolicyWorker
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    megatron_policy_worker.MegatronPolicyWorker \
-    megatron_value_worker.MegatronValueWorker
 
-# CSCS finalizes this stage from a fresh allocation-local Podman graph. Keeping
-# the control/Gym environments in one last delta avoids retaining every build
-# cache candidate while that delta is packed and unpacked.
 FROM release-core AS release
 
 ARG NEMO_GYM_PREFETCH_CONFIGS=
@@ -538,12 +480,6 @@ ARG NEMO_GYM_VLLM_VERSION=0.24.0
 ARG NEMO_RL_BUILD_FINGERPRINT_B64
 ARG RC_DATE=00.00
 ARG TARGETARCH
-
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    async_utils.AsyncTrajectoryCollector \
-    async_utils.ReplayBuffer \
-    sync_rollout_actor.SyncRolloutActor \
-    nemo_gym.NemoGym
 
 # Prefetch NeMo Gym internal venvs (gym servers like code_gen, math_with_judge, etc.)
 # into the image. Gated on NEMO_GYM_PREFETCH_CONFIGS (no-op by default). Runs after the
@@ -576,6 +512,11 @@ RUN if [[ -n "${NEMO_RL_BUILD_FINGERPRINT_B64:-}" ]]; then \
             | tee /opt/nemo_rl_container_fingerprint \
                 > /opt/nemo-rl/.nemo_rl_source_fingerprint.json; \
     fi
+
+# Import selected workers offline in their own frozen environments. GPU execution
+# and multi-node NCCL qualification remain post-build checks.
+RUN UV_OFFLINE=1 python tools/check_image_workers.py \
+    --output /opt/nemo-rl-image-qualification.json
 
 # NOTICES.txt file points to where the OSS source code is archived
 RUN echo "This distribution includes open source which is archived at the following URL: https://opensource.nvidia.com/oss/teams/nvidia/nemo-rl/${RC_DATE}:linux-${TARGETARCH}/index.html" > NOTICES.txt && \

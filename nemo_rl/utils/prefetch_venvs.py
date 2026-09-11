@@ -20,10 +20,10 @@ from pathlib import Path
 from nemo_rl.distributed.ray_actor_environment_registry import (
     ACTOR_ENVIRONMENT_REGISTRY,
 )
-from nemo_rl.utils.venvs import create_local_venv
+from nemo_rl.utils.venvs import create_local_venv, finalize_prebuilt_venv
 
 
-def prefetch_venvs(filters=None, negative_filters=None):
+def prefetch_venvs(filters=None, negative_filters=None, *, prebuilt: bool = False):
     """Prefetch all virtual environments that will be used by workers.
 
     Args:
@@ -32,6 +32,8 @@ def prefetch_venvs(filters=None, negative_filters=None):
                 be prefetched. If None, all venvs are prefetched.
         negative_filters: List of strings to exclude from prefetching. Actors whose
                 FQN contains any of these strings will be skipped.
+        prebuilt: Finalize existing image workers with an offline frozen actor
+                sync, avoiding the base-environment switch and recording the result.
     """
     print("Prefetching virtual environments...")
     if filters:
@@ -80,7 +82,10 @@ def prefetch_venvs(filters=None, negative_filters=None):
             print(f"  Creating venv for: {actor_fqn}")
             for attempt in range(1, max_attempts + 1):
                 try:
-                    python_path = create_local_venv(py_executable, actor_fqn)
+                    if prebuilt:
+                        python_path = finalize_prebuilt_venv(py_executable, actor_fqn)
+                    else:
+                        python_path = create_local_venv(py_executable, actor_fqn)
                     print(f"    Success: {python_path}")
                     prefetched.append(actor_fqn)
                     venv_paths[actor_fqn] = python_path
@@ -241,9 +246,15 @@ Examples:
         help="Filter strings to exclude from prefetching. Actors whose FQN "
         "contains any of these strings will be skipped.",
     )
+    parser.add_argument(
+        "--prebuilt",
+        action="store_true",
+        help="Finalize existing image workers with their frozen backend selection.",
+    )
     args = parser.parse_args()
 
     prefetch_venvs(
         filters=args.filters if args.filters else None,
         negative_filters=args.negative_filters if args.negative_filters else None,
+        prebuilt=args.prebuilt,
     )
