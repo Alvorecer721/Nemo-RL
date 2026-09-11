@@ -307,6 +307,7 @@ adding-new-models.md
 apertus-quickstart.md
 apertus-traps-and-invariants.md
 apertus-xielu.md
+apertus-reference-runs.md
 guides/sft.md
 guides/dpo.md
 guides/dapo.md
