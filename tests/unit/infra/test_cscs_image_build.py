@@ -40,6 +40,7 @@ class _BuilderFixture(_ManifestFixture):
             (launcher.parent / "image_storage.sh")
             .read_text()
             .replace(
+                # pragma: allowlist nextline secret
                 "82fed736197b2a881a822e5357b488796f654e8371ce8573a1592331510a0133",
                 hashlib.sha256(helper.encode()).hexdigest(),
             )
