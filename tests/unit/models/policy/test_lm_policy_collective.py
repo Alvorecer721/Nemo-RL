@@ -246,7 +246,7 @@ def test_prepare_refit_info_accepts_identical_worker_manifests(monkeypatch):
     class WorkerGroup:
         def run_all_workers_single_data(self, method_name, **kwargs):
             assert method_name == "prepare_refit_info"
-            assert kwargs == {}
+            assert kwargs == {"refit_payload_mode": "hf_export"}
             return [manifest, dict(manifest)]
 
         def shutdown(self, **_kwargs):
