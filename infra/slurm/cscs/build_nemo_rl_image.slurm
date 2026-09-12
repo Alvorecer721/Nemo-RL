@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #SBATCH --account=infra01
-#SBATCH --job-name=nrl-vllm026-image
+#SBATCH --job-name=nrl-vllm029-image
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --time=12:00:00
@@ -77,7 +77,7 @@ BUILD_TRTLLM=${BUILD_TRTLLM:-0}
 # script name only when deliberately producing an image that needs the
 # upstream custom-setup layer.
 CUSTOM_SETUP_FNAME=${CUSTOM_SETUP_FNAME-}
-VLLM_VERSION=0.26.0
+VLLM_VERSION=0.29.0
 # Pin the arm64 manifest used on Clariden rather than resolving a mutable NGC
 # tag differently on a later rebuild. Override only when deliberately updating
 # the foundation image.

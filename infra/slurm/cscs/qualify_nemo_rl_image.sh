@@ -31,23 +31,43 @@ from nemo_rl.models.generation.vllm.patches import ensure_vllm_source_compat
 ensure_vllm_source_compat()
 
 import openai
+import torch
 import vllm
 import xgrammar
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tool_parsers import utils as tool_parser_utils
 
-if vllm.__version__ != "0.26.0":
-    raise RuntimeError(f"Expected vLLM 0.26.0, found {vllm.__version__}")
+if vllm.__version__ != "0.29.0":
+    raise RuntimeError(f"Expected vLLM 0.29.0, found {vllm.__version__}")
+for package, expected in {
+    "torch": "2.13.0",
+    "flashinfer-python": "0.6.18",
+    "flashinfer-cubin": "0.6.18",
+    "flashinfer-jit-cache": "0.6.18",
+    "tilelang": "0.1.12",
+    "nvidia-cutlass-dsl": "4.6.2",
+}.items():
+    actual = version(package)
+    if actual.split("+")[0] != expected:
+        raise RuntimeError(f"Expected {package} {expected}, found {actual}")
+    print(f"{package}: {actual}")
+from nemo_rl.models.generation.vllm.apertus_tool_parser import ApertusToolParser
+from nemo_rl.models.generation.vllm.vllm_backend import (
+    VllmInternalWorkerExtensionWithCheckpointEngine,
+)
+
+assert ApertusToolParser is not None
+assert VllmInternalWorkerExtensionWithCheckpointEngine is not None
 if any(
     symbol is None
     for symbol in (OnlineRenderer, ServingTokenization, tool_parser_utils.NamespaceTool)
 ):
-    raise RuntimeError("Required vLLM 0.25 APIs are unavailable")
+    raise RuntimeError("Required vLLM APIs are unavailable")
 print("vLLM:", vllm.__version__)
 print("OpenAI:", openai.__version__)
 print("xgrammar:", version("xgrammar"))
-print("vLLM 0.25 renderer, tokenization, and tool-parser imports: OK")
+print("vLLM renderer, tokenization, tool-parser and refit imports: OK")
 PY
 
 # TE is compiled independently in the Megatron worker environment. Verify the

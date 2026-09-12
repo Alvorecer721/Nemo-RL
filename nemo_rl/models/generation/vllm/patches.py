@@ -680,9 +680,10 @@ def _patch_vllm_apertus_static_xielu_loader(logger) -> None:
             "model_executor/models/apertus.py."
         ) from exc
 
+    # Keep the argument list intact: vLLM 0.29 puts ``self`` on this line,
+    # whereas older releases use a multiline call.
     old_snippet = """    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-"""
+        loader = AutoWeightsLoader("""
     new_snippet = """    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         static_buffers = getattr(self, "_nrl_xielu_static_buffers", None)
         if static_buffers is None:
@@ -713,8 +714,7 @@ def _patch_vllm_apertus_static_xielu_loader(logger) -> None:
                 yield name, loaded_weight
 
         weights = validate_static_xielu_constants(weights)
-        loader = AutoWeightsLoader(
-"""
+        loader = AutoWeightsLoader("""
 
     with _locked_file_patch(file_to_patch) as (content, write_back):
         if new_snippet in content:
@@ -723,7 +723,7 @@ def _patch_vllm_apertus_static_xielu_loader(logger) -> None:
         if old_snippet not in content:
             raise RuntimeError(
                 "Required vLLM Apertus static xIELU loader patch did not find "
-                f"the expected vLLM 0.25.1 source shape in {file_to_patch}."
+                f"the expected load_weights/AutoWeightsLoader anchor in {file_to_patch}."
             )
         write_back(content.replace(old_snippet, new_snippet, 1))
 

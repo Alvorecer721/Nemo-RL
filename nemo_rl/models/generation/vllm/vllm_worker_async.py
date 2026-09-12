@@ -729,7 +729,12 @@ class VllmAsyncGenerationWorkerImpl(
         from vllm.entrypoints.openai.chat_completion.serving import (
             OpenAIServingChat,
         )
-        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
+        try:
+            from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+        except ModuleNotFoundError:
+            # vLLM < 0.29 kept shared protocol types under openai.
+            from vllm.entrypoints.openai.engine.protocol import ErrorResponse
         from vllm.entrypoints.openai.models.protocol import BaseModelPath
         from vllm.entrypoints.openai.models.serving import OpenAIServingModels
         from vllm.entrypoints.serve.tokenize.protocol import (
