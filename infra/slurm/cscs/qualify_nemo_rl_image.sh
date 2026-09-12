@@ -54,11 +54,19 @@ for package, expected in {
     print(f"{package}: {actual}")
 from nemo_rl.models.generation.vllm.apertus_tool_parser import ApertusToolParser
 from nemo_rl.models.generation.vllm.vllm_backend import (
+    VllmInternalWorkerExtension,
     VllmInternalWorkerExtensionWithCheckpointEngine,
+    VllmWorker,
 )
 
 assert ApertusToolParser is not None
 assert VllmInternalWorkerExtensionWithCheckpointEngine is not None
+for extension in (VllmInternalWorkerExtension, VllmInternalWorkerExtensionWithCheckpointEngine):
+    collisions = [name for name in dir(extension)
+                  if not name.startswith("__") and hasattr(VllmWorker, name)]
+    if collisions:
+        raise RuntimeError(f"vLLM worker extension API collision: {collisions}")
+print("vLLM worker extension composition: OK")
 if any(
     symbol is None
     for symbol in (OnlineRenderer, ServingTokenization, tool_parser_utils.NamespaceTool)
