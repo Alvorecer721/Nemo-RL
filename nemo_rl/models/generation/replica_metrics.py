@@ -61,6 +61,21 @@ class CallMetrics:
         self._last_dispatch: float | None = None
         self._last_finish: float | None = None
 
+    def __getstate__(self) -> dict[str, Callable[[], float]]:
+        """Transfer idle accounting to Ray without process-local state.
+
+        The generation handle moves from the driver to the controller before
+        rollout starts. Locks and monotonic windows belong to the receiving
+        process; transferring an active call would orphan its completion.
+        """
+        with self._lock:
+            if self._inflight:
+                raise RuntimeError("Cannot transfer metrics with in-flight calls")
+            return {"clock": self._clock}
+
+    def __setstate__(self, state: dict[str, Callable[[], float]]) -> None:
+        self.__init__(clock=state["clock"])
+
     def _advance(self, now: float) -> None:
         self._area += self._inflight * (now - self._last)
         self._last = now

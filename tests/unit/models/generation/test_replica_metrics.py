@@ -2,8 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+from ray import cloudpickle
 
 from nemo_rl.models.generation.replica_metrics import CallMetrics, EngineMetrics
+
+
+def test_call_metrics_transfer_starts_a_local_interval():
+    calls = CallMetrics()
+    calls.finish(calls.start(), completed=True)
+    restored = cloudpickle.loads(cloudpickle.dumps(calls))
+    # Ray transfers the generation handle to the controller before rollout.
+    # Process-local locks and monotonic timestamps must not cross that boundary.
+    assert restored.drain()["calls_completed"] == 0
+    restored.finish(restored.start(), completed=True)
+    assert restored.drain()["calls_completed"] == 1
+    assert calls.drain()["calls_completed"] == 1
+
+
+def test_call_metrics_cannot_transfer_unfinished_requests():
+    calls = CallMetrics()
+    started = calls.start()
+    with pytest.raises(RuntimeError, match="in-flight"):
+        cloudpickle.dumps(calls)
+    calls.finish(started, completed=True)
+    assert calls.drain()["calls_completed"] == 1
 
 
 def test_call_window_keeps_live_calls_across_drains():

@@ -30,6 +30,7 @@ from unittest.mock import patch
 import pytest
 import ray.exceptions
 import torch
+from ray import cloudpickle
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.experience.failures import GenerationUnavailable, NoHealthyShards
@@ -86,6 +87,15 @@ def _make_generation(dp_size: int, fail_on_workers=()) -> VllmGeneration:
     gen._replica_metrics_pending = {}
     gen.cfg = {"vllm_cfg": {"async_engine": True}}
     return gen
+
+
+def test_generation_handle_transfer_keeps_routing_and_telemetry_working():
+    gen = cloudpickle.loads(cloudpickle.dumps(_make_generation(dp_size=2)))
+    _generate(gen)
+    _generate(gen)
+    assert gen.worker_group.dispatched == [0, 1]
+    for calls in gen._replica_calls:
+        assert calls.drain()["calls_completed"] == 1
 
 
 def test_round_robin_dispatch_counts_and_failure_closure():
