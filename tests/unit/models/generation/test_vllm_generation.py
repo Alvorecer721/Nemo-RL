@@ -302,6 +302,34 @@ async def test_async_vllm_worker_uses_native_keep_pause_and_resume() -> None:
     worker.llm.resume_generation.assert_awaited_once_with()
 
 
+def test_async_vllm_http_client_preserves_admission_rejection() -> None:
+    rejection = RuntimeError("request queue full")
+    calls = []
+
+    def check_admission(n=1, request_id=None):
+        calls.append((n, request_id))
+        if n > 1:
+            raise rejection
+
+    engine = types.SimpleNamespace(
+        model_config=None,
+        renderer=None,
+        input_processor=None,
+        vllm_config=None,
+        check_admission=check_admission,
+    )
+    loop = asyncio.new_event_loop()
+    try:
+        client = _AsyncLLMHTTPClient(engine, loop)
+        assert client.check_admission() is None
+        with pytest.raises(RuntimeError, match="request queue full") as exc:
+            client.check_admission(3, request_id="overloaded-request")
+        assert exc.value is rejection
+        assert calls == [(1, None), (3, "overloaded-request")]
+    finally:
+        loop.close()
+
+
 @pytest.mark.asyncio
 async def test_async_vllm_http_client_runs_generation_on_owner_loop() -> None:
     engine_loop = asyncio.get_running_loop()

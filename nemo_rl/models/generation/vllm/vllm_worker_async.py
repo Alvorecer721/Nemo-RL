@@ -137,6 +137,9 @@ class _AsyncLLMHTTPClient:
 
     # These members only read engine status or immutable configuration. Running
     # them on the engine loop added a cross-thread wait to each HTTP request.
+    def check_admission(self, n: int = 1, request_id: str | None = None) -> None:
+        self._engine_client.check_admission(n, request_id=request_id)
+
     @property
     def errored(self) -> bool:
         return self._engine_client.errored
