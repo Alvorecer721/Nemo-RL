@@ -19,6 +19,28 @@ set -euo pipefail
 NVTE_WITH_NCCL_EP=${NVTE_WITH_NCCL_EP:-0}
 [[ "$NVTE_WITH_NCCL_EP" == 0 || "$NVTE_WITH_NCCL_EP" == 1 ]] || exit 2
 [[ -s "$SQSH_PATH" ]] || { echo "Missing assembled image: $SQSH_PATH" >&2; exit 1; }
+# Check the imported Ray runtime, not just distribution metadata. Gym service
+# subprocesses join the same cluster and must use the driver's exact build.
+enroot start --root --rw "$SQSH_PATH" /opt/nemo_rl_venv/bin/python - <<'PY_RAY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+code = "import json, ray; from importlib.metadata import version; print(json.dumps([ray.__version__, ray.__commit__, version('ray')]))"
+interpreters = [Path(sys.executable), *sorted(Path('/opt/ray_venvs').glob('*/bin/python'))]
+reference = None
+for interpreter in interpreters:
+    runtime = json.loads(subprocess.check_output([str(interpreter), '-c', code], text=True))
+    if runtime[0] != '2.58.0' or runtime[2] != runtime[0]:
+        raise RuntimeError(f'Ray runtime/metadata mismatch in {interpreter}: {runtime}')
+    if reference is None:
+        reference = runtime
+    if runtime != reference:
+        raise RuntimeError(f'Ray build differs from driver in {interpreter}: {runtime} != {reference}')
+    print(f'Ray runtime verified: {interpreter}: {runtime}', flush=True)
+PY_RAY
+
 # Verify the dependency/API boundary that motivated this image. A writable
 # overlay is required because NeMo-RL applies narrowly scoped vLLM source
 # compatibility patches at worker startup.
