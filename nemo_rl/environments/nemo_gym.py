@@ -329,7 +329,9 @@ def get_pad_dynamic_image_shapes(env_config: Mapping[str, Any]) -> bool:
 class NemoGym(EnvironmentInterface):
     """This environment class isn't really used for training. It's really meant as an integration wrapper around NeMo-Gym that hooks into the existing NeMo RL resource management via ray. So there is still one source of truth for resource management in NeMo RL."""
 
-    def __init__(self, cfg: NemoGymConfig):
+    def __init__(
+        self, cfg: NemoGymConfig, tokenizer: Optional[PreTrainedTokenizerBase] = None
+    ):
         self.cfg = cfg
         # Populated by _spinup. Declared here so a restarted actor -- Ray recreates it
         # through __init__, which does not start the Gym servers -- reports what
@@ -365,6 +367,12 @@ class NemoGym(EnvironmentInterface):
                 f"got {type(self._processor).__name__}. Update "
                 "attach_image_model_inputs_to_message before enabling."
             )
+
+        # Constructor arguments are replayed by Ray when an actor restarts.
+        # Restore both subprocess servers and tokenizer before accepting work.
+        if tokenizer is not None:
+            self._spinup()
+            self.set_tokenizer(tokenizer)
 
     def _require_spinup(self) -> None:
         """Raise a diagnosable error if this instance never ran :meth:`_spinup`."""
@@ -1390,10 +1398,9 @@ def spinup_nemo_gym_actor(
             soft=True,
         )
 
-    actor = NemoGym.options(**nemo_gym_opts).remote(nemo_gym_cfg)
+    actor = NemoGym.options(**nemo_gym_opts).remote(nemo_gym_cfg, tokenizer)
     try:
-        ray.get(actor._spinup.remote())
-        ray.get(actor.set_tokenizer.remote(tokenizer))
+        ray.get(actor.health_check.remote())
     except Exception:
         # _spinup can fail after RunHelper has started some Gym subprocesses.
         # Ask the actor to reap anything it owns, then force-stop the actor as a
