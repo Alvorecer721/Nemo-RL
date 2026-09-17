@@ -40,8 +40,8 @@ from nemo_rl.models.generation.fleet_health import (
     HealthyShardSelector,
     ShardState,
 )
-from nemo_rl.models.generation.vllm.vllm_generation import VllmGeneration
 from nemo_rl.models.generation.replica_metrics import CallMetrics
+from nemo_rl.models.generation.vllm.vllm_generation import VllmGeneration
 
 
 class _WorkerGroup:

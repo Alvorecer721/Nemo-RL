@@ -3,9 +3,8 @@
 """Exercise launcher cleanup with real child processes, without a Ray cluster."""
 
 import os
-from pathlib import Path
 import subprocess
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 
