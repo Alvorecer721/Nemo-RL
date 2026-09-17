@@ -182,9 +182,9 @@ enter it.
 
 ### Build and cache lifecycle
 
-Submit the builder from the repository root. The checked-in launchers pin the
-current Apertus reservation; override the `#SBATCH` option at submission time
-when the reservation changes.
+Submit the builder from the repository root. The launchers set no reservation
+and select `--partition=normal`; pass `--reservation` or another partition on
+the sbatch line when the allocation policy calls for it.
 
 If the submitting shell is itself running inside a Container Engine or VS Code
 session, clear inherited Pyxis options first. Otherwise `sbatch` can
