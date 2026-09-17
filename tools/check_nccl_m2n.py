@@ -39,7 +39,6 @@ def mapped_nccl_libraries() -> list[str]:
 
 def main() -> int:
     import torch
-
     from nccl.m2n import reshard
 
     parameters = inspect.signature(reshard).parameters

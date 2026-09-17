@@ -17,12 +17,11 @@
 import base64
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[3] / "tools/restamp_overlay_fingerprint.py"
 BASE = {

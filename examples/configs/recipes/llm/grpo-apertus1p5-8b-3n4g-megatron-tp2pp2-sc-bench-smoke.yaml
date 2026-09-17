@@ -10,13 +10,11 @@ grpo:
 policy:
   train_global_batch_size: 16
   megatron_cfg:
-    tensor_model_parallel_size: 2
     pipeline_model_parallel_size: 2
   generation:
     colocated:
       resources:
         num_nodes: 1
-        gpus_per_node: 4
     vllm_cfg:
       tensor_parallel_size: 2
       gpu_memory_utilization: 0.6
