@@ -41,6 +41,34 @@ log_phase "ray.sub started (job=${SLURM_JOB_ID:-?} nodes=${SLURM_JOB_NUM_NODES:-
 _nrl_log_exit() { local rc=$?; trap - EXIT; log_phase "ray.sub exiting (exit_code=$rc)"; exit $rc; }
 trap _nrl_log_exit EXIT TERM HUP INT
 
+# Called only after the head has finished. Container descendants can keep srun
+# alive even after all command scripts exit, so bound the submit-side wait too.
+wait_for_ray_cluster() {
+  local pid=$1 step=$2 grace=${3:-120}
+  local deadline=$((SECONDS + grace))
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      echo "[ERROR] Ray cleanup deadline exceeded; terminating Slurm step $step." >&2
+      # Never widen cleanup to the allocation or other concurrently running jobs.
+      if [[ "$step" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        timeout --kill-after=5s 15s scancel --signal=KILL "$step" || true
+      else
+        echo "[ERROR] Invalid Ray step identity: $step; stopping srun only." >&2
+      fi
+      kill -TERM "$pid" 2>/dev/null || true
+      deadline=$((SECONDS + 10))
+      while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do
+        sleep 1
+      done
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+  done
+  wait "$pid"
+}
+
 ########################################################
 # Function to detect if SLURM cluster uses GRES
 ########################################################
@@ -1201,6 +1229,7 @@ if [[ "$RAY_SINGLE_SRUN" == "1" ]]; then
 set -uo pipefail
 
 if [[ "\$SLURM_PROCID" -eq 0 ]]; then
+  printf '%s.%s\n' "\$SLURM_JOB_ID" "\$SLURM_STEP_ID" > "$LOG_DIR/RAY_CLUSTER_STEP_ID"
   if [[ "\$SLURMD_NODENAME" != "$head_node" ]]; then
     echo "[ERROR] Slurm task 0 landed on \$SLURMD_NODENAME, expected Ray head $head_node." >&2
     exit 1
@@ -1294,7 +1323,8 @@ if [[ -n "$COMMAND" ]]; then
       exit_code=1
     fi
     touch "$LOG_DIR/ENDED"
-    wait "${SRUN_PIDS["ray-cluster"]}"
+    cluster_step=$(cat "$LOG_DIR/RAY_CLUSTER_STEP_ID" 2>/dev/null || true)
+    wait_for_ray_cluster "${SRUN_PIDS["ray-cluster"]}" "$cluster_step"
     cluster_exit_code=$?
     set -e
     if [[ "$exit_code" -eq 0 && "$cluster_exit_code" -ne 0 ]]; then
