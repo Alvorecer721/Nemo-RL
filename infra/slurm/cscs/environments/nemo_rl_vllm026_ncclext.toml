@@ -1,4 +1,4 @@
-image = "/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.26.0-46466aaf4259-5ad7c46f0a6d.sqsh"
+image = "/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.26.0-7197ac71505b-4b083e73f774.sqsh"
 mounts = ["/capstor", "/iopsstor", "/users"]
 writable = true
 workdir = "/opt/nemo-rl"
