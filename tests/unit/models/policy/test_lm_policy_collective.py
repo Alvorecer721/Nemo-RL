@@ -19,6 +19,25 @@ from nemo_rl.models.policy.lm_policy import Policy, RefitManifestMismatchError
 from nemo_rl.models.policy.workers.base_policy_worker import AbstractPolicyWorker
 
 
+def test_policy_waits_for_param_sync_before_refit(monkeypatch):
+    calls = []
+    waited_for = []
+
+    class WorkerGroup:
+        def run_all_workers_single_data(self, method_name, **kwargs):
+            calls.append((method_name, kwargs))
+            return ["future"]
+
+    monkeypatch.setattr("nemo_rl.models.policy.lm_policy.ray.get", waited_for.append)
+    policy = Policy.__new__(Policy)
+    policy.worker_group = WorkerGroup()
+
+    policy.sync_params_before_refit()
+
+    assert calls == [("sync_params_before_refit", {})]
+    assert waited_for == [["future"]]
+
+
 def test_policy_forwards_nccl_peer_to_workers():
     calls = []
 
@@ -50,10 +69,91 @@ def test_policy_forwards_nccl_peer_to_workers():
                 "port": 1234,
                 "world_size": 4,
                 "train_world_size": 2,
+                "rank_offset": 0,
                 "nccl_peer": "vllm",
             },
         )
     ]
+
+
+def test_policy_forwards_rank_offset_to_workers():
+    """Megatron M-to-N generation ranks join the group after the training ranks."""
+    calls = []
+
+    class WorkerGroup:
+        def run_all_workers_single_data(self, method_name, **kwargs):
+            calls.append((method_name, kwargs))
+            return ["future"]
+
+        def shutdown(self, **_kwargs):
+            pass
+
+    policy = Policy.__new__(Policy)
+    policy.worker_group = WorkerGroup()
+
+    policy.init_collective(
+        "127.0.0.1",
+        1234,
+        6,
+        train_world_size=4,
+        rank_offset=4,
+        nccl_peer="nemo",
+    )
+
+    assert calls == [
+        (
+            "init_collective",
+            {
+                "ip": "127.0.0.1",
+                "port": 1234,
+                "world_size": 6,
+                "train_world_size": 4,
+                "rank_offset": 4,
+                "nccl_peer": "nemo",
+            },
+        )
+    ]
+
+
+def test_policy_worker_offsets_its_rank_in_the_collective(monkeypatch):
+    """A non-zero rank_offset shifts the worker's rank within the shared group."""
+    calls = []
+
+    class ProcessGroup:
+        def __init__(self, **kwargs):
+            calls.append(("create", kwargs))
+
+        def init_nccl_communicator(self, **kwargs):
+            calls.append(("init", kwargs))
+
+    monkeypatch.setattr(
+        "nemo_rl.distributed.stateless_process_group.StatelessProcessGroup",
+        ProcessGroup,
+    )
+    monkeypatch.setattr(
+        "nemo_rl.models.policy.workers.base_policy_worker.torch.cuda.current_device",
+        lambda: 0,
+    )
+
+    worker = AbstractPolicyWorker.__new__(AbstractPolicyWorker)
+    worker.rank = 1
+    worker.init_collective(
+        "127.0.0.1",
+        1234,
+        6,
+        train_world_size=4,
+        rank_offset=4,
+    )
+
+    assert calls[0] == (
+        "create",
+        {
+            "master_address": "127.0.0.1",
+            "port": 1234,
+            "rank": 5,
+            "world_size": 6,
+        },
+    )
 
 
 def test_policy_worker_initializes_requested_nccl_peer(monkeypatch):
@@ -146,7 +246,7 @@ def test_prepare_refit_info_accepts_identical_worker_manifests(monkeypatch):
     class WorkerGroup:
         def run_all_workers_single_data(self, method_name, **kwargs):
             assert method_name == "prepare_refit_info"
-            assert kwargs == {}
+            assert kwargs == {"refit_payload_mode": "hf_export"}
             return [manifest, dict(manifest)]
 
         def shutdown(self, **_kwargs):
@@ -156,7 +256,7 @@ def test_prepare_refit_info_accepts_identical_worker_manifests(monkeypatch):
     policy = Policy.__new__(Policy)
     policy.worker_group = WorkerGroup()
 
-    assert policy.prepare_refit_info() is manifest
+    assert policy.prepare_refit_info(refit_payload_mode="hf_export") is manifest
 
 
 def _policy_with_worker_results(monkeypatch, results):
@@ -193,7 +293,7 @@ def test_prepare_refit_info_rejects_pipeline_rank_key_mismatch(monkeypatch):
         RefitManifestMismatchError,
         match=r"HF-schema refit.*worker 0.*worker 1.*unexpected: .*act_fn\.beta",
     ):
-        policy.prepare_refit_info()
+        policy.prepare_refit_info(refit_payload_mode="hf_export")
 
 
 def _nccl_refit_info(*, misc_meta):
@@ -239,4 +339,6 @@ def test_prepare_nccl_reshard_refit_info_checks_misc_and_bulk_manifests(
         RefitManifestMismatchError,
         match=r"NCCL-reshard refit.*unexpected: .*act_fn\.eps",
     ):
-        policy.prepare_nccl_reshard_refit_info({}, {}, 2, 1)
+        policy.prepare_nccl_reshard_refit_info(
+            {}, {}, 2, 1, refit_payload_mode="hf_export"
+        )

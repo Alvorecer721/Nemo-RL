@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeGuard
 
 from nemo_rl.data_plane.interfaces import (
     DataPlaneClient,
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from nemo_rl.algorithms.grpo import MasterConfig
 
 
-def data_plane_enabled(cfg: DataPlaneConfig | None) -> bool:
+def data_plane_enabled(cfg: DataPlaneConfig | None) -> TypeGuard[DataPlaneConfig]:
     """Whether the data plane is on. ``None`` (key absent) means off."""
     return cfg is not None and bool(cfg.get("enabled", False))
 
