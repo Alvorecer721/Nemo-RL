@@ -19,8 +19,8 @@ import torch
 
 from nemo_rl.algorithms.reward_functions import RewardShapingConfig
 from nemo_rl.algorithms.single_controller_utils.rewards import apply_grouped_alp
-from nemo_rl.data_plane.adapters.noop import NoOpDataPlaneClient
 from nemo_rl.data.multimodal_utils import PackedTensor
+from nemo_rl.data_plane.adapters.noop import NoOpDataPlaneClient
 from nemo_rl.data_plane.codec import materialize
 from nemo_rl.data_plane.schema import (
     EPISODE_SUCCESS,

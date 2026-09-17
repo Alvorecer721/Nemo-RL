@@ -285,6 +285,7 @@ jobs:
           echo "image_tag=$IMAGE_TAG" | tee -a "$GITHUB_OUTPUT"
 
   ephemeral-runner-routing:
+    if: ${{ vars.NON_NVIDIA_H100_RUNNER != '' }}
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_ephemeral_runner_routing.yml@4fe957d4ea5816af1d67fae130bbab4b434c10b3 # v1.9.2
     with:
       lane: ${{ vars.NEMO_CI_EPHEMERAL_LANE }}
@@ -294,6 +295,7 @@ jobs:
 
   org-member-pre-flight:
     needs: [ephemeral-runner-routing]
+    if: ${{ !cancelled() && contains('success skipped', needs.ephemeral-runner-routing.result) }}
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@d0878a142525ff79366ca96fbc0b306cd8d64670 # v1.9.0
     with:
       default_runner_prefix: ${{ vars.DEFAULT_H100_RUNNER }}

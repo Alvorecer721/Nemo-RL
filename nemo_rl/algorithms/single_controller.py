@@ -96,6 +96,7 @@ from nemo_rl.algorithms.single_controller_utils.config import (
     algo_config,
     is_ppo_run,
 )
+from nemo_rl.algorithms.single_controller_utils.rewards import apply_grouped_alp
 from nemo_rl.algorithms.single_controller_utils.rollout_checkpoint import (
     ROLLOUT_SNAPSHOT_MANIFEST_FILENAME,
     ROLLOUT_SNAPSHOT_SCHEMA_VERSION,
@@ -106,7 +107,6 @@ from nemo_rl.algorithms.single_controller_utils.rollout_checkpoint import (
     prepare_snapshot_paths,
     prune_bootstrap_snapshots,
 )
-from nemo_rl.algorithms.single_controller_utils.rewards import apply_grouped_alp
 from nemo_rl.algorithms.single_controller_utils.setup import SingleControllerActorArgs
 from nemo_rl.algorithms.single_controller_utils.utils import (
     aggregate_step_metrics,
