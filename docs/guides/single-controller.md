@@ -301,6 +301,69 @@ Field definitions:
 - `min_groups_for_streaming_train` — minimum ready groups the trainer waits for before dispatching a batch. Set to `num_prompts_per_step` for sync/legacy semantics; lower for streaming. (PPO) Must equal `num_prompts_per_step` — the critic has no split train API, so each critic epoch calls the full-step `train_from_meta` once per chunk. Splitting an RL step across chunks would multiply both models' configured optimizer updates by the number of chunks.
 - `sampler.warmup_lookahead_versions` (PPO) — lookahead used while `ppo.policy_training_start_step` critic warmup is in progress, shrinking back to `max_lookahead_versions` afterwards. The SC equivalent of `ppo.async_ppo.warmup_generation_lead_steps`.
 
+## Per-replica generation metrics
+
+Native async vLLM generation records replica scalars through
+`VllmGeneration.get_step_metrics()`. SingleController saves them with its normal
+training metrics in the configured file, TensorBoard and W&B loggers. Look for
+`train/vllm/replica_0/`, `train/vllm/replica_1/`, and so on. These are training
+logger scalars; no Lens/OTLP exporter is required.
+
+Controller call accounting works with round-robin and fleet-health selection.
+Engine sampling uses the existing settings:
+
+```yaml
+policy:
+  generation:
+    vllm_cfg:
+      async_engine: true
+      enable_vllm_metrics_logger: true
+      vllm_metrics_logger_interval: 0.5
+```
+
+This does not enable `async_rl.generation_fleet_health` or change routing.
+
+| Per-replica suffix | Meaning |
+|---|---|
+| `calls_started`, `calls_completed`, `calls_interrupted` | Calls dispatched or closed since the previous collection; interrupted includes failures, cancellation and early stream closure. Completion describes the call lifecycle, not answer correctness. |
+| `calls_inflight`, `calls_inflight_mean`, `calls_inflight_max` | Current, time-weighted mean and peak outstanding controller calls. Native async generation currently submits one sample per call. |
+| `call_duration_s_mean`, `call_duration_s_max` | Full lifetime of calls that closed during this interval, including calls started in earlier intervals. |
+| `last_dispatch_unix_s`, `last_finish_unix_s` | Latest event timestamps, not a full request trace. Use file metrics for full timestamp precision. |
+| `requests_running`, `requests_waiting` and their `_mean`/`_max` variants | Latest, sample mean and peak engine queue sizes. These differ from controller calls, which can also be waiting for transport or result delivery. |
+| `kv_cache_usage_fraction` and its `_mean`/`_max` variants | KV usage in the range 0–1; 0.8 means 80%. |
+| `idle_sample_fraction` | Fraction of samples with both running and waiting queues empty. This includes deliberate generation pauses. |
+| `generated_tokens`, `generation_tokens_per_s`, `token_window_s` | Counter delta, delta divided by actual monotonic elapsed time, and its denominator. Includes idle time; not active-decode throughput. |
+| `engine_samples`, `counter_resets` | Sampling coverage and detected token-counter resets. Missing samples or an invalid counter interval do not emit a fabricated zero rate. |
+| `engine_metrics_received`, `engine_metrics_pending`, `engine_metrics_error` | Whether the controller received a summary, still awaits a poll, or encountered a Ray error. |
+| `engine_sample_age_s`, `engine_poll_age_s`, `sample_time_unix_s` | Freshness of the last engine sample and age of the poll; identify delayed data before comparing replicas. |
+
+Call windows (`call_window_s`) end at controller collection. Engine windows end
+when the worker drains its summaries; they cover generation activity during that
+wall-clock interval, including lookahead, rather than only the rollouts consumed
+by that optimizer update. A slow poll can appear on a later update. Compare
+coverage, freshness and window lengths alongside the averages. Startup can be
+included in the first collection window. These scalars show distributions over
+updates; they are not a sub-step request timeline.
+
+Engine summaries use constant memory and retain every sampled peak. The legacy
+get/clear timeline API separately retains the latest 4,096 values per metric.
+Token-counter baselines survive drains, so adjacent intervals do not lose the
+counter increment at their boundary. Multiple engine labels within one actor
+are summed for queues/tokens; KV usage reports the maximum engine fraction.
+
+The new collection issues at most one pending RPC per replica and spends at most
+100 ms waiting across all replicas. Slow polls are retained for the next update;
+other replicas can still report. The measured local collection duration is
+`train/vllm/replica_metrics_collection_s`. This bound applies to the new replica
+polling, not the existing speculative-counter snapshot/collection RPCs or the
+time spent flushing training loggers. Full distributed overhead must be measured
+in the target run.
+
+For a routing baseline, keep round-robin enabled and compare each replica's
+in-flight mean/peak, running/waiting queues, token rate and idle fraction. This
+reveals whether one replica is backed up while another is idle before changing
+the selector.
+
 ## Implementation Structure
 
 The SC path splits the async-GRPO loop across a rollout pump and a train pump that share a `TQReplayBuffer` and are orchestrated by the `SingleControllerActor`.

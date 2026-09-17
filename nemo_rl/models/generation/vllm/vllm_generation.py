@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import os
+import time
 import warnings
 from collections import defaultdict
 from typing import (
@@ -44,6 +45,7 @@ from nemo_rl.models.generation.interfaces import (
     GenerationInterface,
     GenerationOutputSpec,
 )
+from nemo_rl.models.generation.replica_metrics import CallMetrics
 from nemo_rl.models.generation.vllm.config import (
     REFITTABLE_FP8_KV_CACHE_DTYPES,
     VllmConfig,
@@ -346,6 +348,8 @@ class VllmGeneration(GenerationInterface):
         # shard selection stays health-blind, which is the historical behaviour.
         self.fleet_monitor: Optional[GenerationFleetHealth] = None
         self.fleet_selector: Optional[HealthyShardSelector] = None
+        self._replica_calls = [CallMetrics() for _ in range(self.worker_group.dp_size)]
+        self._replica_metrics_pending: dict[int, tuple[ray.ObjectRef, float]] = {}
         # Declared here rather than springing into existence in set_refit_membership.
         # None means "no shard has been lost", which is the state for the whole life of
         # any run that never loses one -- so absence is a real value, not a missing one,
@@ -680,32 +684,105 @@ class VllmGeneration(GenerationInterface):
         self._step_metrics_snapshot = self._get_raw_spec_counters()
 
     def get_step_metrics(self) -> dict[str, float]:
-        """Get speculative decoding metrics delta since snapshot_step_metrics().
+        """Get replica interval metrics and speculative decoding deltas.
 
         Returns:
             Dictionary of delta metrics with 'vllm/' prefix.
-            Returns empty dict if snapshot_step_metrics() was not called.
+            Replica metrics are available without a speculative decoding snapshot.
 
         Raises:
             RuntimeWarning: If called without snapshot_step_metrics() first.
         """
+        step_metrics = self._get_replica_step_metrics()
         if self._step_metrics_snapshot is None:
             warnings.warn(
                 "get_step_metrics() called without snapshot_step_metrics(). "
                 "Call snapshot_step_metrics() before generation to track metrics.",
                 RuntimeWarning,
             )
-            return {}
+            return step_metrics
 
-        counters_end = self._get_raw_spec_counters()
-        step_metrics = compute_spec_decode_metrics(
-            self._step_metrics_snapshot, counters_end
+        try:
+            counters_end = self._get_raw_spec_counters()
+        except ray.exceptions.RayError as error:
+            logger.warning("Skipping speculative decoding metrics: %s", error)
+            self._step_metrics_snapshot = None
+            return step_metrics
+        step_metrics.update(
+            compute_spec_decode_metrics(self._step_metrics_snapshot, counters_end)
         )
 
         # Reset snapshot for next step
         self._step_metrics_snapshot = None
 
         return step_metrics
+
+    def _get_replica_step_metrics(self) -> dict[str, float]:
+        """Collect interval scalars with at most one pending RPC per replica.
+
+        A single 100 ms wait budget covers all replicas. Slow RPCs are retained
+        for the next step, with their age exposed; healthy replicas still log.
+        Only small, constant-size summaries cross Ray's object store.
+        """
+        if not self.cfg["vllm_cfg"]["async_engine"]:
+            return {}
+        started = time.monotonic()
+        metrics = {}
+        for idx, calls in enumerate(self._replica_calls):
+            metrics.update(
+                {
+                    f"vllm/replica_{idx}/{name}": value
+                    for name, value in calls.drain().items()
+                }
+            )
+        if self.cfg["vllm_cfg"].get("enable_vllm_metrics_logger", False):
+            for idx in range(self.worker_group.dp_size):
+                prefix = f"vllm/replica_{idx}/"
+                metrics[prefix + "engine_metrics_error"] = 0.0
+                metrics[prefix + "engine_metrics_received"] = 0.0
+                metrics[prefix + "engine_metrics_pending"] = 0.0
+                if idx not in self._replica_metrics_pending:
+                    try:
+                        ref = self.worker_group.run_single_worker_single_data(
+                            "drain_replica_metrics",
+                            worker_idx=self.worker_group.get_dp_leader_worker_idx(idx),
+                        )
+                    except ray.exceptions.RayError as error:
+                        logger.warning(
+                            "Replica %s metrics dispatch failed: %s", idx, error
+                        )
+                        metrics[prefix + "engine_metrics_error"] = 1.0
+                    else:
+                        self._replica_metrics_pending[idx] = (ref, time.monotonic())
+            refs = [ref for ref, _ in self._replica_metrics_pending.values()]
+            ready, _ = (
+                ray.wait(refs, num_returns=len(refs), timeout=0.1) if refs else ([], [])
+            )
+            for idx, (ref, submitted) in list(self._replica_metrics_pending.items()):
+                prefix = f"vllm/replica_{idx}/"
+                metrics[prefix + "engine_metrics_pending"] = float(ref not in ready)
+                metrics[prefix + "engine_poll_age_s"] = time.monotonic() - submitted
+                if ref not in ready:
+                    continue
+                del self._replica_metrics_pending[idx]
+                try:
+                    summary = ray.get(ref)
+                except ray.exceptions.RayError as error:
+                    logger.warning(
+                        "Replica %s metrics collection failed: %s", idx, error
+                    )
+                    metrics[prefix + "engine_metrics_error"] = 1.0
+                else:
+                    metrics[prefix + "engine_metrics_received"] = 1.0
+                    metrics.update(
+                        {prefix + name: value for name, value in summary.items()}
+                    )
+                    if "sample_time_unix_s" in summary:
+                        metrics[prefix + "engine_sample_age_s"] = max(
+                            0.0, time.time() - summary["sample_time_unix_s"]
+                        )
+        metrics["vllm/replica_metrics_collection_s"] = time.monotonic() - started
+        return metrics
 
     def init_collective(
         self, ip: str, port: int, world_size: int, *, train_world_size: int
@@ -1073,6 +1150,8 @@ class VllmGeneration(GenerationInterface):
 
         if self.fleet_selector is not None:
             self.fleet_selector.acquire(dp_shard_idx)
+        call_started = self._replica_calls[dp_shard_idx].start()
+        completed = False
         try:
             async for result in self._generate_on_shard(
                 data=data,
@@ -1082,7 +1161,9 @@ class VllmGeneration(GenerationInterface):
                 leader_worker_idx=leader_worker_idx,
             ):
                 yield result
+            completed = True
         finally:
+            self._replica_calls[dp_shard_idx].finish(call_started, completed=completed)
             if self.fleet_selector is not None:
                 self.fleet_selector.release(dp_shard_idx)
 

@@ -20,7 +20,8 @@ import threading
 import time
 import uuid
 import warnings
-from collections.abc import Awaitable, Callable
+from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, AsyncGenerator, Optional, cast
 
 import ray
@@ -41,6 +42,7 @@ from nemo_rl.models.generation.interfaces import (
     GenerationOutputSpec,
     verify_right_padding,
 )
+from nemo_rl.models.generation.replica_metrics import EngineMetrics
 from nemo_rl.models.generation.vllm.checkpoint_engine import (
     VllmAsyncCheckpointEngineRpcMixin,
 )
@@ -135,6 +137,9 @@ class _AsyncLLMHTTPClient:
 
     # These members only read engine status or immutable configuration. Running
     # them on the engine loop added a cross-thread wait to each HTTP request.
+    def check_admission(self, n: int = 1, request_id: str | None = None) -> None:
+        self._engine_client.check_admission(n, request_id=request_id)
+
     @property
     def errored(self) -> bool:
         return self._engine_client.errored
@@ -307,6 +312,7 @@ class VllmAsyncGenerationWorkerImpl(
         # vLLM Metrics Logger
         # Metrics logger only enabled for per-actor, model-owner only
         self._vllm_metrics_lock = threading.Lock()
+        self._replica_metrics = EngineMetrics()
         if self.cfg["vllm_cfg"].get("enable_vllm_metrics_logger", False):
             self._start_vllm_metrics_logger()
 
@@ -337,38 +343,33 @@ class VllmAsyncGenerationWorkerImpl(
         stop_event = threading.Event()
         self._vllm_metrics_logger_stop_event = stop_event
 
-        self.inflight_batch_sizes: list[int] = []
-        self.num_pending_samples: list[int] = []
-        self.kv_cache_usage_perc: list[float] = []
-        self.generation_tokens: list[int] = []
+        # Keep legacy timeline APIs bounded even if a controller never clears them.
+        # Interval summaries retain every sample, including peaks older than this tail.
+        self.inflight_batch_sizes: deque[int] = deque(maxlen=4096)
+        self.num_pending_samples: deque[int] = deque(maxlen=4096)
+        self.kv_cache_usage_perc: deque[float] = deque(maxlen=4096)
+        self.generation_tokens: deque[int] = deque(maxlen=4096)
 
         def _logger_loop():
             # Delay a little to let engine settle
-            time.sleep(min(2.0, interval_s))
-            while True:
+            if stop_event.wait(min(2.0, interval_s)):
+                return
+            while not stop_event.is_set():
                 try:
-                    for m in get_metrics_snapshot():
-                        with self._vllm_metrics_lock:
-                            if isinstance(m, Gauge):
-                                # Log the vllm inflight batch sizes
-                                if m.name == "vllm:num_requests_running":
-                                    self.inflight_batch_sizes.append(int(m.value))
-                                # Log the vllm pending number of requests in the queue
-                                elif m.name == "vllm:num_requests_waiting":
-                                    self.num_pending_samples.append(int(m.value))
-                                # Log the vllm kv cache usage
-                                elif m.name == "vllm:kv_cache_usage_perc":
-                                    self.kv_cache_usage_perc.append(float(m.value))
-                            elif isinstance(m, Counter):
-                                if m.name == "vllm:generation_tokens":
-                                    self.generation_tokens.append(int(m.value))
+                    snapshot = get_metrics_snapshot()
+                    self._record_vllm_metric_snapshot(
+                        (m.name, m.value)
+                        for m in snapshot
+                        if isinstance(m, (Gauge, Counter))
+                    )
                 except Exception:
                     print(
                         "⚠️[vLLM Metric Logger] Exception in vLLM metrics logger",
                         flush=True,
                     )
                     pass
-                time.sleep(interval_s)
+                if stop_event.wait(interval_s):
+                    break
 
         t = threading.Thread(
             target=_logger_loop, name="vllm-metrics-logger", daemon=True
@@ -380,16 +381,54 @@ class VllmAsyncGenerationWorkerImpl(
             flush=True,
         )
 
+    def _record_vllm_metric_snapshot(
+        self, samples: Iterable[tuple[str, float]]
+    ) -> None:
+        """Reduce one snapshot across engine labels and record it under one lock."""
+        values: dict[str, list[float]] = defaultdict(list)
+        with self._vllm_metrics_lock:
+            for name, value in samples:
+                if name == "vllm:num_requests_running":
+                    self.inflight_batch_sizes.append(int(value))
+                elif name == "vllm:num_requests_waiting":
+                    self.num_pending_samples.append(int(value))
+                elif name == "vllm:kv_cache_usage_perc":
+                    self.kv_cache_usage_perc.append(value)
+                elif name == "vllm:generation_tokens":
+                    self.generation_tokens.append(int(value))
+                else:
+                    continue
+                values[name].append(value)
+            running = values.get("vllm:num_requests_running")
+            waiting = values.get("vllm:num_requests_waiting")
+            kv = values.get("vllm:kv_cache_usage_perc")
+            tokens = values.get("vllm:generation_tokens")
+            self._replica_metrics.record(
+                now=time.monotonic(),
+                wall_time=time.time(),
+                running=sum(running) if running else None,
+                waiting=sum(waiting) if waiting else None,
+                kv=max(kv) if kv else None,
+                tokens=sum(tokens) if tokens else None,
+            )
+
+    def drain_replica_metrics(self) -> dict[str, float]:
+        """Atomically consume interval summaries, preserving the token baseline."""
+        if not self.cfg["vllm_cfg"].get("enable_vllm_metrics_logger", False):
+            return {}
+        with self._vllm_metrics_lock:
+            return self._replica_metrics.drain()
+
     def get_vllm_logger_metrics(self) -> dict[str, Any]:
         if not self.cfg["vllm_cfg"].get("enable_vllm_metrics_logger", False):
             return {}
 
         with self._vllm_metrics_lock:
             metric = {
-                "inflight_batch_sizes": copy.deepcopy(self.inflight_batch_sizes),
-                "num_pending_samples": copy.deepcopy(self.num_pending_samples),
-                "kv_cache_usage_perc": copy.deepcopy(self.kv_cache_usage_perc),
-                "generation_tokens": copy.deepcopy(self.generation_tokens),
+                "inflight_batch_sizes": list(self.inflight_batch_sizes),
+                "num_pending_samples": list(self.num_pending_samples),
+                "kv_cache_usage_perc": list(self.kv_cache_usage_perc),
+                "generation_tokens": list(self.generation_tokens),
             }
         return metric
 
@@ -422,10 +461,10 @@ class VllmAsyncGenerationWorkerImpl(
             return
 
         with self._vllm_metrics_lock:
-            self.inflight_batch_sizes = []
-            self.num_pending_samples = []
-            self.kv_cache_usage_perc = []
-            self.generation_tokens = []
+            self.inflight_batch_sizes.clear()
+            self.num_pending_samples.clear()
+            self.kv_cache_usage_perc.clear()
+            self.generation_tokens.clear()
 
     async def post_init_async(self):
         self._engine_loop = asyncio.get_running_loop()
@@ -717,7 +756,12 @@ class VllmAsyncGenerationWorkerImpl(
         from vllm.entrypoints.openai.chat_completion.serving import (
             OpenAIServingChat,
         )
-        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
+        try:
+            from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+        except ModuleNotFoundError:
+            # vLLM < 0.29 kept shared protocol types under openai.
+            from vllm.entrypoints.openai.engine.protocol import ErrorResponse
         from vllm.entrypoints.openai.models.protocol import BaseModelPath
         from vllm.entrypoints.openai.models.serving import OpenAIServingModels
         from vllm.entrypoints.serve.tokenize.protocol import (

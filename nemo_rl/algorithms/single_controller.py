@@ -3109,7 +3109,8 @@ class SingleControllerActor:
                 percent = (v / total_time * 100) if total_time > 0 else 0.0
                 print(f"  • {k}: {v:.2f}s ({percent:.1f}%)")
 
-            # TODO: per-step train_data jsonl dump, vllm metrics logger,
+            # Replica metrics arrive through generation.get_step_metrics() above.
+            # TODO: per-step train_data jsonl dump,
             #   histogram log, pretty-print "Training Results" block,
             #   print_performance_metrics.
             printable_step_metrics = {
