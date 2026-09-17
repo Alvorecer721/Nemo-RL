@@ -8,7 +8,6 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=288
 #SBATCH --partition=normal
-#SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --export=NONE
 
 # Build an overlay image on top of a published release instead of rerunning
