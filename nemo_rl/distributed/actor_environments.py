@@ -72,6 +72,10 @@ ACTOR_ENVIRONMENTS: dict[str, list[str] | None] = {
     # SyncRolloutActor needs transfer_queue from the vLLM environment and shares
     # same-node worker caches with the generation actors.
     "nemo_rl.experience.sync_rollout_actor.SyncRolloutActor": ["vllm"],
+    # Captured rollout finalization imports Gym's staging/rebuild package.
+    "nemo_rl.experience.rollout_reassembler_actor.RolloutReassemblerActor": [
+        "nemo_gym"
+    ],
     "nemo_rl.environments.tools.retriever.RAGEnvironment": None,
     "nemo_rl.environments.nemo_gym.NemoGym": ["nemo_gym"],
     "nemo_rl.modelopt.models.generation.vllm_quant_worker.VllmQuantGenerationWorker": [

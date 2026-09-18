@@ -21,6 +21,7 @@ def configure_baked_workers() -> dict[str, str]:
         "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker",
         "nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker",
         "nemo_rl.experience.sync_rollout_actor.SyncRolloutActor",
+        "nemo_rl.environments.nemo_gym.NemoGym",
     ]:
         path = Path("/opt/ray_venvs") / actor
         command = ACTOR_ENVIRONMENT_REGISTRY[actor]

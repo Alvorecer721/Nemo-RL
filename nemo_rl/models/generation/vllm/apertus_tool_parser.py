@@ -15,17 +15,30 @@ import json
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-    ExtractedToolCallInformation,
-    FunctionCall,
-    ToolCall,
-)
+
+try:
+    from vllm.entrypoints.generate.base.protocol import (
+        DeltaFunctionCall,
+        DeltaMessage,
+        DeltaToolCall,
+        ExtractedToolCallInformation,
+        FunctionCall,
+        ToolCall,
+    )
+except ModuleNotFoundError:
+    # vLLM < 0.29 protocol layout.
+    from vllm.entrypoints.openai.engine.protocol import (
+        DeltaFunctionCall,
+        DeltaMessage,
+        DeltaToolCall,
+        ExtractedToolCallInformation,
+        FunctionCall,
+        ToolCall,
+    )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
     ToolParserManager,
 )
@@ -42,8 +55,8 @@ class ApertusToolParser(ToolParser):
     vLLM parsers match.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         self.start = "<|tools_prefix|>"
         self.end = "<|tools_suffix|>"
         self._stream_emitted = False

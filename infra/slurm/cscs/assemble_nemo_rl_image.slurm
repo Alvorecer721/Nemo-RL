@@ -10,7 +10,6 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=288
 #SBATCH --partition=normal
-#SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --export=NONE
 set -euo pipefail
 # sbatch spools this script elsewhere; resolve helpers from the submitted repository.

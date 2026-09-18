@@ -128,7 +128,7 @@ def test_glm51_checkpoint_launcher_uses_cluster_safety_controls() -> None:
     assert "RAY_SINGLE_SRUN=1" in launcher
     assert "RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY:-68719476736}" in launcher
     assert "--mem=850000M" in launcher
-    assert "GLM_RESERVATION=${GLM_RESERVATION-SD-69241-apertus-1-5-0}" in launcher
+    assert "GLM_RESERVATION=${GLM_RESERVATION-}" in launcher
     assert 'SBATCH_RESERVATION_ARGS+=(--reservation="$GLM_RESERVATION")' in launcher
     assert '--nodes="$GLM_NUM_NODES"' in launcher
     assert "GLM_PHASE_A_TERMINAL" in launcher

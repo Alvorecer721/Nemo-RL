@@ -176,7 +176,7 @@ def test_glm51_r3_launcher_uses_cluster_and_route_safety_controls() -> None:
     ).read_text()
 
     assert "infra/slurm/cscs/environments/nemo_rl_vllm0251.toml" in submitter
-    assert "GLM_RESERVATION=${GLM_RESERVATION-SD-69241-apertus-1-5-0}" in submitter
+    assert "GLM_RESERVATION=${GLM_RESERVATION-}" in submitter
     assert "RAY_SINGLE_SRUN=1" in submitter
     assert "--nodes=80" in submitter
     assert "--mem=850000M" in submitter

@@ -19,6 +19,28 @@ set -euo pipefail
 NVTE_WITH_NCCL_EP=${NVTE_WITH_NCCL_EP:-0}
 [[ "$NVTE_WITH_NCCL_EP" == 0 || "$NVTE_WITH_NCCL_EP" == 1 ]] || exit 2
 [[ -s "$SQSH_PATH" ]] || { echo "Missing assembled image: $SQSH_PATH" >&2; exit 1; }
+# Check the imported Ray runtime, not just distribution metadata. Gym service
+# subprocesses join the same cluster and must use the driver's exact build.
+enroot start --root --rw "$SQSH_PATH" /opt/nemo_rl_venv/bin/python - <<'PY_RAY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+code = "import json, ray; from importlib.metadata import version; print(json.dumps([ray.__version__, ray.__commit__, version('ray')]))"
+interpreters = [Path(sys.executable), *sorted(Path('/opt/ray_venvs').glob('*/bin/python'))]
+reference = None
+for interpreter in interpreters:
+    runtime = json.loads(subprocess.check_output([str(interpreter), '-c', code], text=True))
+    if runtime[0] != '2.58.0' or runtime[2] != runtime[0]:
+        raise RuntimeError(f'Ray runtime/metadata mismatch in {interpreter}: {runtime}')
+    if reference is None:
+        reference = runtime
+    if runtime != reference:
+        raise RuntimeError(f'Ray build differs from driver in {interpreter}: {runtime} != {reference}')
+    print(f'Ray runtime verified: {interpreter}: {runtime}', flush=True)
+PY_RAY
+
 # Verify the dependency/API boundary that motivated this image. A writable
 # overlay is required because NeMo-RL applies narrowly scoped vLLM source
 # compatibility patches at worker startup.
@@ -31,23 +53,51 @@ from nemo_rl.models.generation.vllm.patches import ensure_vllm_source_compat
 ensure_vllm_source_compat()
 
 import openai
+import torch
 import vllm
 import xgrammar
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tool_parsers import utils as tool_parser_utils
 
-if vllm.__version__ != "0.26.0":
-    raise RuntimeError(f"Expected vLLM 0.26.0, found {vllm.__version__}")
+if vllm.__version__ != "0.29.0":
+    raise RuntimeError(f"Expected vLLM 0.29.0, found {vllm.__version__}")
+for package, expected in {
+    "torch": "2.13.0",
+    "flashinfer-python": "0.6.18",
+    "flashinfer-cubin": "0.6.18",
+    "flashinfer-jit-cache": "0.6.18",
+    "tilelang": "0.1.12",
+    "nvidia-cutlass-dsl": "4.6.2",
+}.items():
+    actual = version(package)
+    if actual.split("+")[0] != expected:
+        raise RuntimeError(f"Expected {package} {expected}, found {actual}")
+    print(f"{package}: {actual}")
+from nemo_rl.models.generation.vllm.apertus_tool_parser import ApertusToolParser
+from nemo_rl.models.generation.vllm.vllm_backend import (
+    VllmInternalWorkerExtension,
+    VllmInternalWorkerExtensionWithCheckpointEngine,
+    VllmWorker,
+)
+
+assert ApertusToolParser is not None
+assert VllmInternalWorkerExtensionWithCheckpointEngine is not None
+for extension in (VllmInternalWorkerExtension, VllmInternalWorkerExtensionWithCheckpointEngine):
+    collisions = [name for name in dir(extension)
+                  if not name.startswith("__") and hasattr(VllmWorker, name)]
+    if collisions:
+        raise RuntimeError(f"vLLM worker extension API collision: {collisions}")
+print("vLLM worker extension composition: OK")
 if any(
     symbol is None
     for symbol in (OnlineRenderer, ServingTokenization, tool_parser_utils.NamespaceTool)
 ):
-    raise RuntimeError("Required vLLM 0.25 APIs are unavailable")
+    raise RuntimeError("Required vLLM APIs are unavailable")
 print("vLLM:", vllm.__version__)
 print("OpenAI:", openai.__version__)
 print("xgrammar:", version("xgrammar"))
-print("vLLM 0.25 renderer, tokenization, and tool-parser imports: OK")
+print("vLLM renderer, tokenization, tool-parser and refit imports: OK")
 PY
 
 # TE is compiled independently in the Megatron worker environment. Verify the

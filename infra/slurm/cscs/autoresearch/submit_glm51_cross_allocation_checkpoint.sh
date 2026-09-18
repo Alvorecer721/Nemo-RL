@@ -23,7 +23,7 @@ GLM_NUM_NODES=${GLM_NUM_NODES:-80}
 # An explicitly empty reservation submits to the ordinary partition. Keep the
 # certified 80-node reservation as the default without making it mandatory for
 # larger capacity probes.
-GLM_RESERVATION=${GLM_RESERVATION-SD-69241-apertus-1-5-0}
+GLM_RESERVATION=${GLM_RESERVATION-}
 RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY:-68719476736}
 RAY_LOG_SYNC_FREQUENCY=${RAY_LOG_SYNC_FREQUENCY:-30}
 SBATCH_BIN=${SBATCH_BIN:-sbatch}

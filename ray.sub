@@ -41,6 +41,34 @@ log_phase "ray.sub started (job=${SLURM_JOB_ID:-?} nodes=${SLURM_JOB_NUM_NODES:-
 _nrl_log_exit() { local rc=$?; trap - EXIT; log_phase "ray.sub exiting (exit_code=$rc)"; exit $rc; }
 trap _nrl_log_exit EXIT TERM HUP INT
 
+# Called only after the head has finished. Container descendants can keep srun
+# alive even after all command scripts exit, so bound the submit-side wait too.
+wait_for_ray_cluster() {
+  local pid=$1 step=$2 grace=${3:-120}
+  local deadline=$((SECONDS + grace))
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      echo "[ERROR] Ray cleanup deadline exceeded; terminating Slurm step $step." >&2
+      # Never widen cleanup to the allocation or other concurrently running jobs.
+      if [[ "$step" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        timeout --kill-after=5s 15s scancel --signal=KILL "$step" || true
+      else
+        echo "[ERROR] Invalid Ray step identity: $step; stopping srun only." >&2
+      fi
+      kill -TERM "$pid" 2>/dev/null || true
+      deadline=$((SECONDS + 10))
+      while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do
+        sleep 1
+      done
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+  done
+  wait "$pid"
+}
+
 ########################################################
 # Function to detect if SLURM cluster uses GRES
 ########################################################
@@ -182,6 +210,7 @@ fi
 #
 # Port layout (all below ephemeral floor at 9000). Python port-range bounds
 # are half-open: [low, high).
+#   1150-1199    Data plane: mooncake metadata server, master RPC, master metrics (driver-local allocation)
 #   1200-1201    Ray GCS + client server (head only)
 #   [1202, 1300) SingleController generation router (driver-local allocation)
 #   1301-1312    Ray management (node-mgr, obj-mgr, etc.; odd=worker, even=head)
@@ -435,6 +464,29 @@ export RAY_event_stats="${RAY_event_stats:-false}"
 export RAY_ray_syncer_message_refresh_interval_ms="${RAY_ray_syncer_message_refresh_interval_ms:-10000}"
 export RAY_core_worker_internal_heartbeat_ms="${RAY_core_worker_internal_heartbeat_ms:-5000}"
 export RAY_health_check_period_ms="${RAY_health_check_period_ms:-10000}"
+
+# ---------------------------------------------------------------------------
+# Reap a dead worker's orphaned child processes
+#
+# Not a scale knob — it is here because this is the last point before `ray start`.
+# The raylet reads process_group_cleanup_enabled when it forks a worker
+# (worker_pool.cc) and acts on it when it kills one (node_manager.cc), so it must
+# be in the raylet's environment, and the raylet starts here, long before any
+# recipe has been read. A driver that sets it after the fact changes nothing.
+#
+# What it buys: a vLLM generation worker spawns its EngineCore as a plain
+# multiprocessing child that owns the CUDA context and the KV cache. Every cleanup
+# path vLLM and Ray provide runs inside the dying process, so a SIGKILLed worker
+# leaves that child holding its GPU for the rest of the job — measured at 114.95
+# GiB still held on a GB200 after one shard was killed, which is enough that the
+# replacement cannot fit. Because the EngineCore never calls setsid it stays in the
+# worker's process group, which is exactly what this reaches.
+#
+# Unconditional here, unlike the driver-side scoping in
+# nemo_rl.models.generation.maybe_configure_engine_reaping_env: the raylet is up
+# before anything knows whether this run tolerates a dead shard. `:-` keeps an
+# operator's explicit 0 — someone debugging a wedged engine may want the corpse.
+export RAY_process_group_cleanup_enabled="${RAY_process_group_cleanup_enabled:-1}"
 
 # The head is retried a few times. Workers may need more attempts since they can
 # race the head's GCS coming up: `ray start --address` fails until GCS is listening.
@@ -1177,6 +1229,7 @@ if [[ "$RAY_SINGLE_SRUN" == "1" ]]; then
 set -uo pipefail
 
 if [[ "\$SLURM_PROCID" -eq 0 ]]; then
+  printf '%s.%s\n' "\$SLURM_JOB_ID" "\$SLURM_STEP_ID" > "$LOG_DIR/RAY_CLUSTER_STEP_ID"
   if [[ "\$SLURMD_NODENAME" != "$head_node" ]]; then
     echo "[ERROR] Slurm task 0 landed on \$SLURMD_NODENAME, expected Ray head $head_node." >&2
     exit 1
@@ -1270,7 +1323,8 @@ if [[ -n "$COMMAND" ]]; then
       exit_code=1
     fi
     touch "$LOG_DIR/ENDED"
-    wait "${SRUN_PIDS["ray-cluster"]}"
+    cluster_step=$(cat "$LOG_DIR/RAY_CLUSTER_STEP_ID" 2>/dev/null || true)
+    wait_for_ray_cluster "${SRUN_PIDS["ray-cluster"]}" "$cluster_step"
     cluster_exit_code=$?
     set -e
     if [[ "$exit_code" -eq 0 && "$cluster_exit_code" -ne 0 ]]; then

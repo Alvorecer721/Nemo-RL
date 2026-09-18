@@ -90,7 +90,7 @@ uv run examples/run_grpo_single_controller.py --config <your-sc.yaml>
       use_importance_sampling_correction: true
     ```
 
-5. **Save the data plane for replay recovery.** When Single-Controller checkpointing is enabled, all built-in samplers require `checkpointing.save_data_plane: true` so completed, unconsumed rollout groups survive a restart. Native TQ checkpointing currently supports only the `simple` storage backend. For multi-node runs, `checkpoint_dir` must be on a durable filesystem visible at the same path from every node.
+5. **Save the data plane for replay recovery.** When Single-Controller checkpointing is enabled, all built-in samplers require `checkpointing.save_data_plane: true` so completed, unconsumed rollout groups survive a restart. Native TQ checkpointing supports both `simple` and `mooncake_cpu` through these same checkpoint settings; no backend-specific switch is needed. For multi-node runs, `checkpoint_dir` must be on a durable filesystem visible at the same path from every node.
 
     ```yaml
     checkpointing:
@@ -137,6 +137,8 @@ checkpointing:
 
 rollout_checkpointing:
   snapshot_attempt_interval_s: 120
+  telemetry_interval_s: null
+  max_consecutive_failures: 3
   keep_latest_k: 2
   restore_mode: latest
   extra_fingerprint_excluded_paths: []
@@ -153,6 +155,17 @@ recommended for continuous post-step coverage; with a larger value, attempts
 are skipped until the matching trainer checkpoint exists. Before the first
 training step, snapshots are anchored to the initial model and a fingerprint of
 the rollout-semantic configuration.
+
+`telemetry_interval_s` controls an independent wall-clock sampler for rollout
+throughput and checkpoint pressure. It is `null` (disabled) by default; set it
+to a positive number such as `30` to emit one sample every 30 seconds. This does
+not change the checkpoint cadence. See the
+[Single-Controller rollout recovery metrics](../observability/metrics.md#single-controller-rollout-recovery-metrics)
+for the emitted fields.
+
+`max_consecutive_failures` is the number of consecutive retryable periodic-save
+failures tolerated before training aborts. A successful or skipped checkpoint
+attempt resets the count; checkpoint invariant failures still fail immediately.
 
 The bootstrap fingerprint is fail-closed: every configuration value affects
 compatibility unless NeMo-RL's built-in denylist identifies it as operational,
@@ -185,11 +198,20 @@ on the original run as well as its restart.
 Periodic snapshots currently require all of the following:
 
 - `checkpointing.enabled: true` and `checkpointing.save_data_plane: true`.
-- `data_plane.backend: simple`, because native TQ save/load is required.
+- `data_plane.backend: simple` or `data_plane.backend: mooncake_cpu`, because native TQ save/load is required.
 - `token_capture.enabled: true`.
 - A replay-recoverable sampler with training-claim ownership. All built-in
   samplers qualify. A custom sampler must explicitly declare both
   `supports_buffer_checkpoint = True` and `supports_training_claims = True`.
+
+With `data_plane.backend: mooncake_cpu`, data-plane checkpointing also requires
+`async_rl.generation_fleet_health.restart_dead_shards: false`. Setup rejects
+automatic shard restarts because replacing a generation worker can discard
+its owned Mooncake payload and leave stale checkpoint worker handles. This
+restriction applies to both trainer-step checkpoints and periodic rollout
+snapshots; restarting the whole job from a saved checkpoint is still supported.
+Support for live shard restarts is tracked in
+[NVIDIA-NeMo/RL#4178](https://github.com/NVIDIA-NeMo/RL/issues/4178).
 
 Each trainer or bootstrap anchor has a `rollout_snapshots/` directory. A
 published `snapshot_NNNNNN/` contains the native TQ snapshot and matching
@@ -244,7 +266,7 @@ generation in the group has finished.
 
 When a sampler does not support replay recovery, a requested data-plane checkpoint is written in `shadow` mode. The TQ snapshot is retained, but no authoritative replay index is written and its rows are not restored into the training replay buffer.
 
-Native TQ save/load currently requires `data_plane.backend: "simple"`. Mooncake-backed storage is not recoverable through this mechanism. A failure while saving or validating the TQ snapshot prevents the incomplete checkpoint bundle from becoming the latest resumable checkpoint.
+Native TQ save/load works with both `data_plane.backend: "simple"` and `data_plane.backend: "mooncake_cpu"`, using the existing `checkpointing.enabled: true` and `checkpointing.save_data_plane: true` settings. A failure while saving or validating the TQ snapshot prevents the incomplete checkpoint bundle from becoming the latest resumable checkpoint.
 
 ## Async-RL Knobs and Sampler Modes
 
@@ -287,6 +309,69 @@ Field definitions:
 - `max_buffered_rollouts` — hard cap on unconsumed rollout groups buffered in the data plane. Validated at setup against the gated sampler's required capacity; a value too small deadlocks the rollout pump, so setup raises instead of silently blocking. Sized from the widest window the run ever uses, so `warmup_lookahead_versions` rather than `max_lookahead_versions` when it is set.
 - `min_groups_for_streaming_train` — minimum ready groups the trainer waits for before dispatching a batch. Set to `num_prompts_per_step` for sync/legacy semantics; lower for streaming. (PPO) Must equal `num_prompts_per_step` — the critic has no split train API, so each critic epoch calls the full-step `train_from_meta` once per chunk. Splitting an RL step across chunks would multiply both models' configured optimizer updates by the number of chunks.
 - `sampler.warmup_lookahead_versions` (PPO) — lookahead used while `ppo.policy_training_start_step` critic warmup is in progress, shrinking back to `max_lookahead_versions` afterwards. The SC equivalent of `ppo.async_ppo.warmup_generation_lead_steps`.
+
+## Per-replica generation metrics
+
+Native async vLLM generation records replica scalars through
+`VllmGeneration.get_step_metrics()`. SingleController saves them with its normal
+training metrics in the configured file, TensorBoard and W&B loggers. Look for
+`train/vllm/replica_0/`, `train/vllm/replica_1/`, and so on. These are training
+logger scalars; no Lens/OTLP exporter is required.
+
+Controller call accounting works with round-robin and fleet-health selection.
+Engine sampling uses the existing settings:
+
+```yaml
+policy:
+  generation:
+    vllm_cfg:
+      async_engine: true
+      enable_vllm_metrics_logger: true
+      vllm_metrics_logger_interval: 0.5
+```
+
+This does not enable `async_rl.generation_fleet_health` or change routing.
+
+| Per-replica suffix | Meaning |
+|---|---|
+| `calls_started`, `calls_completed`, `calls_interrupted` | Calls dispatched or closed since the previous collection; interrupted includes failures, cancellation and early stream closure. Completion describes the call lifecycle, not answer correctness. |
+| `calls_inflight`, `calls_inflight_mean`, `calls_inflight_max` | Current, time-weighted mean and peak outstanding controller calls. Native async generation currently submits one sample per call. |
+| `call_duration_s_mean`, `call_duration_s_max` | Full lifetime of calls that closed during this interval, including calls started in earlier intervals. |
+| `last_dispatch_unix_s`, `last_finish_unix_s` | Latest event timestamps, not a full request trace. Use file metrics for full timestamp precision. |
+| `requests_running`, `requests_waiting` and their `_mean`/`_max` variants | Latest, sample mean and peak engine queue sizes. These differ from controller calls, which can also be waiting for transport or result delivery. |
+| `kv_cache_usage_fraction` and its `_mean`/`_max` variants | KV usage in the range 0–1; 0.8 means 80%. |
+| `idle_sample_fraction` | Fraction of samples with both running and waiting queues empty. This includes deliberate generation pauses. |
+| `generated_tokens`, `generation_tokens_per_s`, `token_window_s` | Counter delta, delta divided by actual monotonic elapsed time, and its denominator. Includes idle time; not active-decode throughput. |
+| `engine_samples`, `counter_resets` | Sampling coverage and detected token-counter resets. Missing samples or an invalid counter interval do not emit a fabricated zero rate. |
+| `engine_metrics_received`, `engine_metrics_pending`, `engine_metrics_error` | Whether the controller received a summary, still awaits a poll, or encountered a Ray error. |
+| `engine_sample_age_s`, `engine_poll_age_s`, `sample_time_unix_s` | Freshness of the last engine sample and age of the poll; identify delayed data before comparing replicas. |
+
+Call windows (`call_window_s`) end at controller collection. Engine windows end
+when the worker drains its summaries; they cover generation activity during that
+wall-clock interval, including lookahead, rather than only the rollouts consumed
+by that optimizer update. A slow poll can appear on a later update. Compare
+coverage, freshness and window lengths alongside the averages. Startup can be
+included in the first collection window. These scalars show distributions over
+updates; they are not a sub-step request timeline.
+
+Engine summaries use constant memory and retain every sampled peak. The legacy
+get/clear timeline API separately retains the latest 4,096 values per metric.
+Token-counter baselines survive drains, so adjacent intervals do not lose the
+counter increment at their boundary. Multiple engine labels within one actor
+are summed for queues/tokens; KV usage reports the maximum engine fraction.
+
+The new collection issues at most one pending RPC per replica and spends at most
+100 ms waiting across all replicas. Slow polls are retained for the next update;
+other replicas can still report. The measured local collection duration is
+`train/vllm/replica_metrics_collection_s`. This bound applies to the new replica
+polling, not the existing speculative-counter snapshot/collection RPCs or the
+time spent flushing training loggers. Full distributed overhead must be measured
+in the target run.
+
+For a routing baseline, keep round-robin enabled and compare each replica's
+in-flight mean/peak, running/waiting queues, token rate and idle fraction. This
+reveals whether one replica is backed up while another is idle before changing
+the selector.
 
 ## Implementation Structure
 
