@@ -28,7 +28,10 @@ from ray.util.placement_group import (
 )
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from nemo_rl.utils.venvs import add_hf_modules_cache_to_pythonpath
+from nemo_rl.utils.venvs import (
+    add_checkout_to_pythonpath,
+    add_hf_modules_cache_to_pythonpath,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -437,6 +440,10 @@ def init_ray(log_dir: Optional[str] = None) -> None:
     for _k in list(os.environ):
         if _k.startswith(("PMIX_", "PMI_", "MPI_", "OMPI_", "SLURM_")):
             os.environ.pop(_k, None)
+
+    # Same reasoning for image venvs: every actor's runtime_env is captured from
+    # os.environ after this point, so the checkout's source is added once here.
+    add_checkout_to_pythonpath(os.environ)
 
     # Ray actors deserialize constructor arguments before importing NeMo-RL.
     # Put Hugging Face's generated ``transformers_modules`` package on the

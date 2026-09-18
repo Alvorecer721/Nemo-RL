@@ -5,7 +5,11 @@
 import runpy
 
 from nemo_rl.distributed.ray_actor_environment_registry import get_actor_python_env
-from nemo_rl.utils.venvs import image_venv_python, image_venvs_enabled
+from nemo_rl.utils.venvs import (
+    add_checkout_to_pythonpath,
+    image_venv_python,
+    image_venvs_enabled,
+)
 
 
 def configure_baked_workers() -> dict[str, str]:
@@ -14,6 +18,7 @@ def configure_baked_workers() -> dict[str, str]:
         raise RuntimeError(
             "The bench runs on the image's worker venvs; export NEMO_RL_IMAGE_VENVS=1"
         )
+    add_checkout_to_pythonpath({})
     return {
         actor: image_venv_python(get_actor_python_env(actor), actor)
         for actor in [

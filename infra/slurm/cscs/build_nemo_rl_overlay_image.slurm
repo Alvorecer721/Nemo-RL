@@ -107,13 +107,14 @@ fi
     echo "BASE_RECEIPT is not readable: $BASE_RECEIPT" >&2
     exit 2
 }
-mapfile -t base_fields < <("$HOST_PYTHON" infra/slurm/cscs/image_release_receipt.py fields "$BASE_RECEIPT")
+base_receipt_fields=$("$HOST_PYTHON" infra/slurm/cscs/image_release_receipt.py fields "$BASE_RECEIPT")
+mapfile -t base_fields <<< "$base_receipt_fields"
 BASE_RELEASE_IMAGE=${base_fields[0]}
 [[ "${base_fields[1]}" == "$(basename "$BASE_SQSH" .sqsh)" ]] || {
     echo "BASE_RECEIPT describes ${base_fields[1]}, not $BASE_SQSH" >&2
     exit 2
 }
-VLLM_VERSION=$("$HOST_PYTHON" -c 'import json, sys; print(json.load(open(sys.argv[1]))["vllm_version"])' "$BASE_RECEIPT")
+VLLM_VERSION=${base_fields[2]}
 echo "Base release: $BASE_RELEASE_IMAGE"
 
 SOURCE_COMMIT=$(git rev-parse HEAD)
@@ -181,17 +182,21 @@ mkdir -p "$OUTPUT_DIR"
 SOURCE_CONTEXT="$PODMAN_STORAGE_BASE/source-context"
 rm -rf "$SOURCE_CONTEXT"
 mkdir -p "$SOURCE_CONTEXT"
-mapfile -t SHIPPED_SUBMODULES < <(
+"$HOST_PYTHON" infra/slurm/cscs/image_release_receipt.py fingerprint "$BASE_RECEIPT" \
+    > "$PODMAN_STORAGE_BASE/base-fingerprint.json"
+shipped=$(
     NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64 "$HOST_PYTHON" \
         tools/restamp_overlay_fingerprint.py shipped-submodules \
-        --base-receipt "$BASE_RECEIPT" --lock uv.lock
+        "$PODMAN_STORAGE_BASE/base-fingerprint.json" --lock uv.lock
 )
+SHIPPED_SUBMODULES=()
+[[ -z "$shipped" ]] || mapfile -t SHIPPED_SUBMODULES <<< "$shipped"
 echo "Shipped submodules: ${SHIPPED_SUBMODULES[*]:-none}"
 {
     git ls-files -z | grep --null-data --invert-match '^3rdparty/'
-    for submodule in "${SHIPPED_SUBMODULES[@]}"; do
-        git -C "$submodule" ls-files -z --recurse-submodules | sed --null-data "s|^|$submodule/|"
-    done
+    if ((${#SHIPPED_SUBMODULES[@]})); then
+        git ls-files -z --recurse-submodules -- "${SHIPPED_SUBMODULES[@]}"
+    fi
 } \
     | tar --create --file=- --no-recursion --null --files-from=- \
     | tar --extract --file=- --directory="$SOURCE_CONTEXT"

@@ -56,12 +56,13 @@ def _isolated_venv_dir(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def resolved_requirements(monkeypatch):
     """Stand in for `uv export`; a test edits "text" to bump a dependency."""
-    exported = {"text": "demo==1.0\n"}
+    exported = {"text": "demo==1.0\n", "uv": "uv 1.0.0"}
     monkeypatch.setattr(
         venvs_module,
         "_export_requirements",
         lambda extras: exported["text"] + "".join(f"{e}==1.0\n" for e in extras),
     )
+    monkeypatch.setattr(venvs_module, "_uv_version", lambda: exported["uv"])
     venvs_module._resolved_environment.cache_clear()
     yield exported
     venvs_module._resolved_environment.cache_clear()
@@ -338,13 +339,11 @@ def test_stale_claim_expired_and_rebuilt(tmp_path, monkeypatch):
 
 @pytest.fixture
 def project_dependencies(tmp_path, monkeypatch):
-    """Point the fingerprint at a stand-in project whose lockfile tests can edit."""
+    """Point the fingerprint at a stand-in project whose build settings tests can edit."""
     root = tmp_path / "project"
     root.mkdir()
-    (root / "uv.lock").write_text("version = 1\n")
     (root / "pyproject.toml").write_text('[tool.uv]\nlink-mode = "copy"\n')
     monkeypatch.setattr(venvs_module, "git_root", str(root))
-    venvs_module._resolved_environment.cache_clear()
     yield root
 
 
@@ -422,7 +421,6 @@ def test_edits_that_install_nothing_new_keep_the_venv_current(
     venv.mkdir()
     _mark_ready(venv)
 
-    (project_dependencies / "uv.lock").write_text("version = 1\n# reformatted\n")
     (project_dependencies / "pyproject.toml").write_text(
         '[tool.ruff]\nline-length = 100\n\n[tool.uv]\nlink-mode = "copy"\n'
     )
@@ -463,11 +461,12 @@ def image_venvs(monkeypatch):
     )
 
 
-def _image_venv(tmp_path, built_with: str) -> Path:
+def _image_venv(tmp_path, built_with: str | None) -> Path:
     venv = tmp_path / "demo.Worker"
     (venv / "bin").mkdir(parents=True)
     (venv / "bin" / "python").touch()
-    _mark_ready(venv, built_with)
+    if built_with is not None:
+        _mark_ready(venv, built_with)
     return venv
 
 
@@ -502,10 +501,22 @@ def test_image_venv_rejects_another_resolved_environment(
 def test_image_venv_rejects_a_marker_without_a_resolved_environment(
     tmp_path, project_dependencies, image_venvs
 ):
-    venv = _image_venv(tmp_path, "uv run --locked")
+    venv = _image_venv(tmp_path, None)
     (venv / VENV_READY_MARKER).write_text("0" * 64)
 
-    with pytest.raises(RuntimeError, match="different resolved environment"):
+    with pytest.raises(RuntimeError, match="was marked by None"):
+        venvs_module.create_local_venv_on_each_node("uv run --locked", "demo.Worker")
+
+
+def test_image_venv_rejects_another_uv_before_comparing_environments(
+    tmp_path, project_dependencies, image_venvs, resolved_requirements
+):
+    _image_venv(tmp_path, "uv run --locked")
+    resolved_requirements["uv"] = "uv 2.0.0"
+
+    with pytest.raises(
+        RuntimeError, match="marked by uv 1.0.0 and this launch runs uv 2.0.0"
+    ):
         venvs_module.create_local_venv_on_each_node("uv run --locked", "demo.Worker")
 
 
@@ -529,9 +540,9 @@ def editable_checkout(project_dependencies):
     (project_dependencies / "uv.lock").write_text(
         "version = 1\n"
         '[[package]]\nname = "demo"\nsource = { registry = "https://pypi.org/simple" }\n'
-        '[[package]]\nname = "project"\nsource = { editable = "." }\n'
         '[[package]]\nname = "bridge"\nsource = { editable = "third/bridge" }\n'
         '[[package]]\nname = "flat"\nsource = { editable = "third/flat" }\n'
+        '[[package]]\nname = "project"\nsource = { editable = "." }\n'
         '[[package]]\nname = "wheelhouse"\nsource = { directory = "third/wheels" }\n'
     )
     venvs_module._checkout_import_roots.cache_clear()

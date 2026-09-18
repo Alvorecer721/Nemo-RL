@@ -58,12 +58,6 @@ class OverlayFingerprintTests(unittest.TestCase):
         self.source = Path(temporary.name) / "source-fingerprint"
         self.lock = Path(temporary.name) / "uv.lock"
         self.lock.write_text(LOCK)
-        self.receipt = Path(temporary.name) / "base.release.json"
-        self.receipt.write_text(
-            json.dumps(
-                {"hermetic_manifest": {"inputs": {"dependency_fingerprint": BASE}}}
-            )
-        )
         self.original = json.dumps(BASE).encode()
         self.container.write_bytes(self.original)
         self.source.write_bytes(self.original)
@@ -105,22 +99,40 @@ class OverlayFingerprintTests(unittest.TestCase):
                 self.assertEqual(self.container.read_bytes(), self.original)
                 self.assertEqual(self.source.read_bytes(), self.original)
 
-    def test_editable_submodules_may_move_because_the_overlay_ships_them(self):
+    def test_shipped_editable_submodules_may_move(self):
         requested = {
             **BASE,
             "submodules/3rdparty/Bridge": "moved-with-nested-core",
             "submodules/3rdparty/Gym": "moved",
         }
-        result, payload = self._run(requested)
+        listed, _ = self._run(requested, ["shipped-submodules", str(self.container)])
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(listed.stdout.split(), ["3rdparty/Bridge", "3rdparty/Gym"])
+
+        restamp = ["restamp", str(self.container), str(self.source), "--shipped"]
+        refused, _ = self._run(requested, [*restamp, "3rdparty/Gym"])
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("3rdparty/Bridge", refused.stderr)
+        self.assertEqual(self.container.read_bytes(), self.original)
+
+        result, payload = self._run(requested, [*restamp, *listed.stdout.split()])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.container.read_bytes(), payload)
 
-        listed, _ = self._run(
-            {**BASE, "submodules/3rdparty/Gym": "moved"},
-            ["shipped-submodules", "--base-receipt", str(self.receipt)],
+    def test_shipping_a_baked_submodule_does_not_excuse_its_pin(self):
+        requested = {**BASE, "submodules/3rdparty/kernels": "different"}
+        result, _ = self._run(
+            requested,
+            [
+                "restamp",
+                str(self.container),
+                str(self.source),
+                "--shipped",
+                "3rdparty/kernels",
+            ],
         )
-        self.assertEqual(listed.returncode, 0, listed.stderr)
-        self.assertEqual(listed.stdout.split(), ["3rdparty/Gym"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.container.read_bytes(), self.original)
 
     def test_missing_inherited_pins_preserve_both_fingerprints(self):
         for inherited in ({"uv.lock": "old-lock"}, {}, []):

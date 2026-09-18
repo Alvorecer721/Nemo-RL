@@ -30,7 +30,7 @@ COPY . /opt/nemo-rl/
 RUN python tools/restamp_overlay_fingerprint.py restamp \
     /opt/nemo_rl_container_fingerprint \
     /opt/nemo-rl/.nemo_rl_source_fingerprint.json \
-    --lock /opt/nemo-rl/uv.lock
+    --lock /opt/nemo-rl/uv.lock --shipped ${SHIPPED_SUBMODULES}
 
 # Overlay dependencies may change. The selected actor manifest determines every
 # environment to reconcile; application-only release assembly uses offline mode.

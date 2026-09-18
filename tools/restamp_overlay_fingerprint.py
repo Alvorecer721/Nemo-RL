@@ -17,7 +17,7 @@
 Uses only stdlib so it can run before dependency synchronization or nemo_rl imports.
 The requested fingerprint comes from NEMO_RL_BUILD_FINGERPRINT_B64, as in the
 release build. Dependency hashes may change. A submodule the lock installs as
-editable source may move too, because the overlay ships its tree; any other
+editable source may move too when the overlay ships its tree; any other
 submodule is baked into the base image and must not.
 """
 
@@ -78,17 +78,19 @@ def restamp(args: argparse.Namespace) -> None:
         inherited = submodule_pins(
             json.loads(args.container_fingerprint.read_bytes()), label="Inherited"
         )
-        baked = moved_pins(inherited, requested) - editable_submodules(
-            requested, args.lock
+        shipped = {f"submodules/{path}" for path in args.shipped}
+        refused = moved_pins(inherited, requested) - (
+            shipped & editable_submodules(requested, args.lock)
         )
-        if baked:
+        if refused:
             raise ValueError(
-                "Inherited submodule pins differ from the requested source; "
-                "rebuild the base image:\n"
+                "Inherited submodule pins differ from the requested source and "
+                "the overlay does not ship them as editable source; rebuild the "
+                "base image:\n"
                 + "\n".join(
                     f"  {key}: inherited={inherited.get(key, 'missing')} "
                     f"requested={requested.get(key, 'missing')}"
-                    for key in sorted(baked)
+                    for key in sorted(refused)
                 )
             )
     except (OSError, ValueError, KeyError) as error:
@@ -101,10 +103,8 @@ def restamp(args: argparse.Namespace) -> None:
 def shipped_submodules(args: argparse.Namespace) -> None:
     """Print the editable submodules whose pin moved since the base release."""
     requested = submodule_pins(json.loads(requested_fingerprint()), label="Requested")
-    receipt = json.loads(args.base_receipt.read_text())
     inherited = submodule_pins(
-        receipt["hermetic_manifest"]["inputs"]["dependency_fingerprint"],
-        label="Base release",
+        json.loads(args.inherited_fingerprint.read_bytes()), label="Inherited"
     )
     moved = moved_pins(inherited, requested) & editable_submodules(requested, args.lock)
     for key in sorted(moved):
@@ -117,9 +117,10 @@ def main() -> None:
     stamp = commands.add_parser("restamp")
     stamp.add_argument("container_fingerprint", type=Path)
     stamp.add_argument("source_fingerprint", type=Path)
+    stamp.add_argument("--shipped", nargs="*", default=[])
     stamp.set_defaults(run=restamp)
     shipped = commands.add_parser("shipped-submodules")
-    shipped.add_argument("--base-receipt", type=Path, required=True)
+    shipped.add_argument("inherited_fingerprint", type=Path)
     shipped.set_defaults(run=shipped_submodules)
     for command in (stamp, shipped):
         command.add_argument("--lock", type=Path, required=True)

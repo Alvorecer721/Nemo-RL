@@ -155,6 +155,7 @@ class NemoWorkerTests(unittest.TestCase):
             in {
                 "_normalized_worker_command",
                 "_command_extras",
+                "_uv_version",
                 "_export_requirements",
                 "_resolved_environment",
                 "_dependency_fingerprint",

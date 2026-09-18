@@ -102,6 +102,16 @@ def _command_extras(py_executable: str) -> tuple[str, ...]:
     return tuple(sorted(extras))
 
 
+@lru_cache(maxsize=None)
+def _uv_version() -> str:
+    return subprocess.run(
+        [os.environ.get("UV", "uv"), "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def _export_requirements(extras: tuple[str, ...]) -> str:
     command = [
         os.environ.get("UV", "uv"),
@@ -152,10 +162,12 @@ def _dependency_fingerprint(py_executable: str) -> dict[str, str]:
     0.20 -> 0.25 bump, generation workers kept importing 0.20 until 0.25-only
     code failed at refit). The normalized worker command is recorded separately:
     it names the checkout the venv's editable installs point at, which an image
-    venv used as built does not depend on.
+    venv used as built does not depend on. The uv version is recorded because
+    the export text, and so the digest, differs between uv releases.
     """
     return {
         "command": _normalized_worker_command(py_executable),
+        "uv": _uv_version(),
         "environment": _resolved_environment(_command_extras(py_executable)),
     }
 
@@ -241,7 +253,7 @@ def image_venv_python(py_executable: str, venv_name: str) -> str:
     the checkout's lock resolves for this worker, or the launch fails and names
     the image as the thing to update. The worker command is not compared: it
     names the source tree the image was built from, and the checkout's source
-    reaches the worker through ``add_checkout_to_pythonpath`` instead.
+    reaches every actor through ``add_checkout_to_pythonpath`` in ``init_ray``.
     """
     worker = Path(os.environ.get("NEMO_RL_VENV_DIR", DEFAULT_VENV_DIR)) / venv_name
     python = worker / "bin/python"
@@ -252,26 +264,37 @@ def image_venv_python(py_executable: str, venv_name: str) -> str:
             f"NEMO_RL_IMAGE_VENVS to build the venv at launch."
         )
     built = _read_marker(worker / VENV_READY_MARKER) or {}
-    wanted = _dependency_fingerprint(py_executable)["environment"]
-    if built.get("environment") != wanted:
+    wanted = _dependency_fingerprint(py_executable)
+    if built.get("uv") != wanted["uv"]:
+        raise RuntimeError(
+            f"NEMO_RL_IMAGE_VENVS=1 but the prebuilt venv for {venv_name} was marked "
+            f"by {built.get('uv')} and this launch runs {wanted['uv']}; resolved "
+            f"environments are only comparable under one uv. Point UV at the image's uv."
+        )
+    if built.get("environment") != wanted["environment"]:
         raise RuntimeError(
             f"NEMO_RL_IMAGE_VENVS=1 but the prebuilt venv for {venv_name} was built "
             f"from a different resolved environment than this checkout's lock "
-            f"(image {built.get('environment')}, checkout {wanted}). Overlay or "
-            f"rebuild the image, or unset NEMO_RL_IMAGE_VENVS to sync it at launch."
+            f"(image {built.get('environment')}, checkout {wanted['environment']}). "
+            f"Overlay or rebuild the image, or unset NEMO_RL_IMAGE_VENVS to sync it "
+            f"at launch."
         )
     return str(python)
 
 
 @lru_cache(maxsize=None)
 def _checkout_import_roots() -> tuple[str, ...]:
-    """Import roots of the checkout and of every editable project its lock names."""
+    """The checkout, then the import root of every other editable project in its lock.
+
+    The checkout comes first: sibling projects also carry top-level ``tools``,
+    ``tests`` and ``examples`` packages, and the checkout's must win.
+    """
     with open(Path(git_root) / "uv.lock", "rb") as f:
         packages = tomllib.load(f)["package"]
-    roots = []
+    roots = [git_root]
     for package in packages:
         editable = package.get("source", {}).get("editable")
-        if editable is None:
+        if editable in (None, "."):
             continue
         project = Path(git_root, editable)
         if not (project / "pyproject.toml").is_file():
@@ -284,7 +307,9 @@ def _checkout_import_roots() -> tuple[str, ...]:
     return tuple(roots)
 
 
-def add_checkout_to_pythonpath(env_vars: dict[str, str]) -> dict[str, str]:
+def add_checkout_to_pythonpath(
+    env_vars: MutableMapping[str, str],
+) -> MutableMapping[str, str]:
     """Make image venvs import the checkout instead of the image's baked source.
 
     ``sys.path`` is searched before a venv's editable finders, so these entries
@@ -293,14 +318,13 @@ def add_checkout_to_pythonpath(env_vars: dict[str, str]) -> dict[str, str]:
     """
     if not image_venvs_enabled():
         return env_vars
-    result = env_vars.copy()
     roots = _checkout_import_roots()
-    pythonpath = result.get("PYTHONPATH", "")
+    pythonpath = env_vars.get("PYTHONPATH", "")
     path_entries = pythonpath.split(os.pathsep) if pythonpath else []
-    result["PYTHONPATH"] = os.pathsep.join(
+    env_vars["PYTHONPATH"] = os.pathsep.join(
         [*roots, *(entry for entry in path_entries if entry not in roots)]
     )
-    return result
+    return env_vars
 
 
 def add_hf_modules_cache_to_pythonpath(env_vars: dict[str, str]) -> dict[str, str]:
@@ -626,7 +650,6 @@ def make_actor_runtime_env(
         }
     )
     env_vars = add_hf_modules_cache_to_pythonpath(dict(env_vars))
-    env_vars = add_checkout_to_pythonpath(env_vars)
     if extra_env_vars:
         env_vars.update(extra_env_vars)
     return {
