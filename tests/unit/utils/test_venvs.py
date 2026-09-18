@@ -16,12 +16,13 @@
 bin/python existing is NOT readiness (uv creates it before packages land); a
 venv is usable only once NEMO_RL_VENV_READY exists, written after `uv sync`
 succeeds. The marker carries the dependency fingerprint it was built from, so a
-venv that predates a uv.lock/pyproject.toml change is rebuilt instead of served
-stale. Exactly one process builds (O_EXCL claim on STARTED_ENV_BUILDER);
+venv whose resolved environment no longer matches the lock is rebuilt instead of
+served stale. Exactly one process builds (O_EXCL claim on STARTED_ENV_BUILDER);
 waiters block on the marker with a timeout, and a claim older than the timeout
 is expired as the residue of a killed build.
 """
 
+import json
 import os
 import threading
 import time
@@ -33,6 +34,7 @@ import pytest
 import nemo_rl.utils.venvs as venvs_module
 from nemo_rl.utils.venvs import (
     VENV_READY_MARKER,
+    add_checkout_to_pythonpath,
     add_hf_modules_cache_to_pythonpath,
     create_local_venv,
     make_actor_runtime_env,
@@ -51,6 +53,20 @@ def _isolated_venv_dir(tmp_path, monkeypatch):
     create_local_venv.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def resolved_requirements(monkeypatch):
+    """Stand in for `uv export`; a test edits "text" to bump a dependency."""
+    exported = {"text": "demo==1.0\n"}
+    monkeypatch.setattr(
+        venvs_module,
+        "_export_requirements",
+        lambda extras: exported["text"] + "".join(f"{e}==1.0\n" for e in extras),
+    )
+    venvs_module._resolved_environment.cache_clear()
+    yield exported
+    venvs_module._resolved_environment.cache_clear()
+
+
 def _fake_uv(venv_dir):
     """subprocess.run stand-in: `uv venv` materializes bin/python, the rest no-op."""
 
@@ -67,9 +83,7 @@ def _fake_uv(venv_dir):
 
 def _mark_ready(venv: Path, py_executable: str = "uv run --locked") -> None:
     """Mark a venv ready the way a completed build does."""
-    (venv / VENV_READY_MARKER).write_text(
-        venvs_module._dependency_fingerprint(py_executable)
-    )
+    venvs_module._mark_venv_ready(venv / VENV_READY_MARKER, py_executable)
 
 
 def test_create_local_venv_marks_ready_only_after_success(tmp_path):
@@ -328,10 +342,10 @@ def project_dependencies(tmp_path, monkeypatch):
     root = tmp_path / "project"
     root.mkdir()
     (root / "uv.lock").write_text("version = 1\n")
+    (root / "pyproject.toml").write_text('[tool.uv]\nlink-mode = "copy"\n')
     monkeypatch.setattr(venvs_module, "git_root", str(root))
-    venvs_module._dependency_fingerprint.cache_clear()
+    venvs_module._resolved_environment.cache_clear()
     yield root
-    venvs_module._dependency_fingerprint.cache_clear()
 
 
 def test_marker_records_the_dependency_fingerprint(tmp_path, project_dependencies):
@@ -339,17 +353,21 @@ def test_marker_records_the_dependency_fingerprint(tmp_path, project_dependencie
         create_local_venv("uv run --locked", "demo.Worker")
 
     marker = tmp_path / "demo.Worker" / VENV_READY_MARKER
-    assert marker.read_text() == venvs_module._dependency_fingerprint("uv run --locked")
+    assert json.loads(marker.read_text()) == venvs_module._dependency_fingerprint(
+        "uv run --locked"
+    )
 
 
-def test_env_builder_rebuilds_when_dependencies_change(tmp_path, project_dependencies):
+def test_env_builder_rebuilds_when_dependencies_change(
+    tmp_path, project_dependencies, resolved_requirements
+):
     venv = tmp_path / "demo.Worker"
     with patch.object(venvs_module.subprocess, "run", _fake_uv(tmp_path)):
         _env_builder_fn("uv run --locked", "demo.Worker", node_idx=0)
         built_from = (venv / VENV_READY_MARKER).read_text()
 
-        (project_dependencies / "uv.lock").write_text("version = 2\n")
-        venvs_module._dependency_fingerprint.cache_clear()
+        resolved_requirements["text"] = "demo==2.0\n"
+        venvs_module._resolved_environment.cache_clear()
         # A later job is a fresh process, so it does not inherit the build cache.
         create_local_venv.cache_clear()
 
@@ -357,7 +375,7 @@ def test_env_builder_rebuilds_when_dependencies_change(tmp_path, project_depende
 
     rebuilt_from = (venv / VENV_READY_MARKER).read_text()
     assert rebuilt_from != built_from
-    assert rebuilt_from == venvs_module._dependency_fingerprint("uv run --locked")
+    assert venvs_module.venv_is_current(venv / VENV_READY_MARKER, "uv run --locked")
 
 
 def test_env_builder_rebuilds_when_worker_command_changes(
@@ -375,7 +393,7 @@ def test_env_builder_rebuilds_when_worker_command_changes(
 
     rebuilt_from = (venv / VENV_READY_MARKER).read_text()
     assert rebuilt_from != built_from
-    assert rebuilt_from == venvs_module._dependency_fingerprint(new_command)
+    assert venvs_module.venv_is_current(venv / VENV_READY_MARKER, new_command)
 
 
 def test_dependency_fingerprint_normalizes_worker_command(project_dependencies):
@@ -395,6 +413,164 @@ def test_dependency_fingerprint_resolves_checkout_aliases(
     assert venvs_module._dependency_fingerprint(
         real_command
     ) == venvs_module._dependency_fingerprint(alias_command)
+
+
+def test_edits_that_install_nothing_new_keep_the_venv_current(
+    tmp_path, project_dependencies
+):
+    venv = tmp_path / "demo.Worker"
+    venv.mkdir()
+    _mark_ready(venv)
+
+    (project_dependencies / "uv.lock").write_text("version = 1\n# reformatted\n")
+    (project_dependencies / "pyproject.toml").write_text(
+        '[tool.ruff]\nline-length = 100\n\n[tool.uv]\nlink-mode = "copy"\n'
+    )
+    venvs_module._resolved_environment.cache_clear()
+    assert venvs_module.venv_is_current(venv / VENV_READY_MARKER, "uv run --locked")
+
+    (project_dependencies / "pyproject.toml").write_text(
+        '[tool.uv]\nlink-mode = "copy"\nno-build-isolation-package = ["demo"]\n'
+    )
+    venvs_module._resolved_environment.cache_clear()
+    assert not venvs_module.venv_is_current(venv / VENV_READY_MARKER, "uv run --locked")
+
+
+def test_resolved_environment_ignores_export_comments(
+    project_dependencies, resolved_requirements
+):
+    resolved_requirements["text"] = "demo==1.0\n    # via alpha\n"
+    with_alpha = venvs_module._resolved_environment(())
+    resolved_requirements["text"] = "# exported by uv\ndemo==1.0\n    # via beta\n"
+    venvs_module._resolved_environment.cache_clear()
+    assert venvs_module._resolved_environment(()) == with_alpha
+
+
+def test_command_extras_are_order_and_spelling_independent():
+    assert venvs_module._command_extras(
+        "uv run --locked --extra vllm --extra=nemo_gym --extra vllm --directory /x"
+    ) == ("nemo_gym", "vllm")
+    assert venvs_module._command_extras("uv run --locked") == ()
+
+
+@pytest.fixture
+def image_venvs(monkeypatch):
+    monkeypatch.setenv("NEMO_RL_IMAGE_VENVS", "1")
+    monkeypatch.setattr(
+        venvs_module.ray,
+        "nodes",
+        lambda: pytest.fail("image venvs must not schedule a venv build"),
+    )
+
+
+def _image_venv(tmp_path, built_with: str) -> Path:
+    venv = tmp_path / "demo.Worker"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").touch()
+    _mark_ready(venv, built_with)
+    return venv
+
+
+def test_image_venv_is_used_as_built_from_another_checkout(
+    tmp_path, project_dependencies, image_venvs
+):
+    venv = _image_venv(
+        tmp_path, "uv run --locked --extra vllm --directory /opt/nemo-rl"
+    )
+    launched = f"uv run --locked --extra vllm --directory {project_dependencies}"
+
+    with patch.object(venvs_module.subprocess, "run", side_effect=AssertionError):
+        python = venvs_module.create_local_venv_on_each_node(launched, "demo.Worker")
+
+    assert python == str(venv / "bin" / "python")
+    assert not venvs_module.venv_is_current(venv / VENV_READY_MARKER, launched)
+
+
+def test_image_venv_rejects_another_resolved_environment(
+    tmp_path, project_dependencies, image_venvs, resolved_requirements
+):
+    _image_venv(tmp_path, "uv run --locked --extra vllm")
+    resolved_requirements["text"] = "demo==2.0\n"
+    venvs_module._resolved_environment.cache_clear()
+
+    with pytest.raises(RuntimeError, match="Overlay or rebuild the image"):
+        venvs_module.create_local_venv_on_each_node(
+            "uv run --locked --extra vllm", "demo.Worker"
+        )
+
+
+def test_image_venv_rejects_a_marker_without_a_resolved_environment(
+    tmp_path, project_dependencies, image_venvs
+):
+    venv = _image_venv(tmp_path, "uv run --locked")
+    (venv / VENV_READY_MARKER).write_text("0" * 64)
+
+    with pytest.raises(RuntimeError, match="different resolved environment"):
+        venvs_module.create_local_venv_on_each_node("uv run --locked", "demo.Worker")
+
+
+def test_image_venv_rejects_an_actor_the_image_does_not_carry(
+    tmp_path, project_dependencies, image_venvs
+):
+    with pytest.raises(FileNotFoundError, match="no prebuilt venv for demo.Worker"):
+        venvs_module.create_local_venv_on_each_node("uv run --locked", "demo.Worker")
+
+
+def _editable_project(root: Path, relative: str, *, src: bool) -> None:
+    project = root / relative
+    project.mkdir(parents=True)
+    if src:
+        (project / "src").mkdir()
+    (project / "pyproject.toml").touch()
+
+
+@pytest.fixture
+def editable_checkout(project_dependencies):
+    (project_dependencies / "uv.lock").write_text(
+        "version = 1\n"
+        '[[package]]\nname = "demo"\nsource = { registry = "https://pypi.org/simple" }\n'
+        '[[package]]\nname = "project"\nsource = { editable = "." }\n'
+        '[[package]]\nname = "bridge"\nsource = { editable = "third/bridge" }\n'
+        '[[package]]\nname = "flat"\nsource = { editable = "third/flat" }\n'
+        '[[package]]\nname = "wheelhouse"\nsource = { directory = "third/wheels" }\n'
+    )
+    venvs_module._checkout_import_roots.cache_clear()
+    yield project_dependencies
+    venvs_module._checkout_import_roots.cache_clear()
+
+
+def test_checkout_reaches_image_venvs_through_pythonpath(
+    editable_checkout, image_venvs
+):
+    _editable_project(editable_checkout, "third/bridge", src=True)
+    _editable_project(editable_checkout, "third/flat", src=False)
+    flat = str(editable_checkout / "third/flat")
+
+    result = add_checkout_to_pythonpath(
+        {"PYTHONPATH": os.pathsep.join(["/hf/modules", flat])}
+    )
+
+    assert result["PYTHONPATH"].split(os.pathsep) == [
+        str(editable_checkout),
+        str(editable_checkout / "third/bridge/src"),
+        flat,
+        "/hf/modules",
+    ]
+
+
+def test_checkout_pythonpath_rejects_an_uninitialized_submodule(
+    editable_checkout, image_venvs
+):
+    _editable_project(editable_checkout, "third/bridge", src=True)
+    (editable_checkout / "third/flat").mkdir(parents=True)
+
+    with pytest.raises(FileNotFoundError, match="git submodule update"):
+        add_checkout_to_pythonpath({})
+
+
+def test_checkout_pythonpath_is_untouched_without_image_venvs(editable_checkout):
+    env_vars = {"PYTHONPATH": "/project"}
+    assert add_checkout_to_pythonpath(env_vars) is env_vars
 
 
 def test_waiter_rejects_a_venv_built_from_other_dependencies(

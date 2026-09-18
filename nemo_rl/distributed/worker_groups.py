@@ -32,6 +32,7 @@ from nemo_rl.distributed.ray_actor_environment_registry import (
 from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
 from nemo_rl.distributed.worker_group_utils import recursive_merge_options
 from nemo_rl.utils.venvs import (
+    add_checkout_to_pythonpath,
     add_hf_modules_cache_to_pythonpath,
     create_local_venv_on_each_node,
 )
@@ -494,6 +495,7 @@ class RayWorkerGroup:
         for k, v in os.environ.items():
             if k not in env_vars:
                 env_vars[k] = v
+        env_vars = add_checkout_to_pythonpath(env_vars)
 
         # Get the python environment for the actor
         actor_python_env = get_actor_python_env(
