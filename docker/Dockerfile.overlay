@@ -33,7 +33,7 @@ RUN python tools/restamp_overlay_fingerprint.py restamp \
     --lock /opt/nemo-rl/uv.lock --shipped ${SHIPPED_SUBMODULES}
 
 # Overlay dependencies may change. The selected actor manifest determines every
-# environment to reconcile; application-only release assembly uses offline mode.
+# environment to reconcile; workers are finalized offline as in the release build.
 RUN <<"EOF" bash -exu -o pipefail
 python3 nemo_rl/distributed/actor_environments.py --actors "$NRL_ACTORS" \
     all trtllm > /opt/actor_venvs.tsv
@@ -41,7 +41,7 @@ test -s /opt/actor_venvs.tsv
 UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --all-groups --no-install-project
 mapfile -t actors < <(cut -f1 /opt/actor_venvs.tsv)
 (( ${#actors[@]} > 0 ))
-UV_LINK_MODE=hardlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs "${actors[@]}"
+UV_OFFLINE=1 uv run --no-sync python -m nemo_rl.utils.prefetch_venvs --prebuilt "${actors[@]}"
 UV_OFFLINE=1 python tools/check_image_workers.py --output /opt/nemo-rl-image-qualification.json
 EOF
 
