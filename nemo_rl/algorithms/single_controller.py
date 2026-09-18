@@ -178,7 +178,10 @@ from nemo_rl.models.generation.sglang.sglang_generation import SGLangGeneration
 from nemo_rl.models.generation.vllm import VllmGeneration
 from nemo_rl.models.policy.tq_policy import TQPolicy
 from nemo_rl.models.value.tq_value import TQValue
-from nemo_rl.utils.checkpoint import CheckpointManager, PathLike
+from nemo_rl.utils.checkpoint import (
+    CheckpointManager,
+    PathLike,
+)
 from nemo_rl.utils.logger import TELEMETRY_WALL_TIME_METRIC, Logger
 from nemo_rl.utils.timer import TimeoutChecker, Timer
 
@@ -3133,6 +3136,7 @@ class SingleControllerActor:
                         await self._save_checkpoint(
                             step_metrics,
                             is_policy_training_step=is_policy_training_step,
+                            is_final_checkpoint=is_last_step,
                         )
                     if defer_refit_for_save:
                         # The save is done; wake the engine unless the loop is about to exit.
@@ -4447,12 +4451,14 @@ class SingleControllerActor:
         step_metrics: dict[str, Any],
         *,
         is_policy_training_step: bool,
+        is_final_checkpoint: bool,
     ) -> None:
         """Serialize full and rollout-only checkpoint publication."""
         async with self._checkpoint_save_lock:
             await self._save_checkpoint_impl(
                 step_metrics,
                 is_policy_training_step=is_policy_training_step,
+                is_final_checkpoint=is_final_checkpoint,
             )
 
     async def _save_checkpoint_impl(
@@ -4460,6 +4466,7 @@ class SingleControllerActor:
         step_metrics: dict[str, Any],
         *,
         is_policy_training_step: bool,
+        is_final_checkpoint: bool,
     ) -> None:
         """Write a full checkpoint for the just-finished train step.
 
@@ -4610,7 +4617,7 @@ class SingleControllerActor:
                 if self._checkpointer.save_optimizer
                 else None,
                 tokenizer_path=os.path.join(checkpoint_path, "value", "tokenizer"),
-                checkpointing_cfg=self._master_config.checkpointing,
+                is_final_checkpoint=is_final_checkpoint,
             )
             await asyncio.to_thread(self._value.finish_training)
             # Also covers a warmup step, which never ran prepare_for_training in
@@ -4631,7 +4638,7 @@ class SingleControllerActor:
             if self._checkpointer.save_optimizer and is_policy_training_step
             else None,
             tokenizer_path=os.path.join(checkpoint_path, "policy", "tokenizer"),
-            checkpointing_cfg=self._master_config.checkpointing,
+            is_final_checkpoint=is_final_checkpoint,
         )
 
         await asyncio.to_thread(
