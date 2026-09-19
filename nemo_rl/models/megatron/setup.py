@@ -2196,6 +2196,16 @@ def setup_model_and_optimizer(
         megatron_cfg.checkpoint.pretrained_checkpoint is not None
         and checkpoint_exists(megatron_cfg.checkpoint.pretrained_checkpoint)
     )
+    # Without this the policy would silently keep its random initialization.
+    if (
+        load_weights
+        and not resume_checkpoint_exists
+        and megatron_cfg.checkpoint.pretrained_checkpoint is not None
+        and not pretrained_checkpoint_exists
+    ):
+        raise ValueError(
+            f"Invalid pretrained checkpoint directory found: {megatron_cfg.checkpoint.pretrained_checkpoint}"
+        )
     preload_policy_from_pretrained_for_draft = (
         draft_enabled
         and not use_peft  # The PEFT pre-wrap hook loads the pretrained base policy before adapters are attached.
