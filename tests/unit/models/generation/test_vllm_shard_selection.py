@@ -25,10 +25,12 @@ re-raised as GenerationUnavailable so the rollout retry policy re-dispatches the
 """
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 import ray.exceptions
 import torch
+from ray import cloudpickle
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.experience.failures import GenerationUnavailable, NoHealthyShards
@@ -38,6 +40,7 @@ from nemo_rl.models.generation.fleet_health import (
     HealthyShardSelector,
     ShardState,
 )
+from nemo_rl.models.generation.replica_metrics import CallMetrics
 from nemo_rl.models.generation.vllm.vllm_generation import VllmGeneration
 
 
@@ -53,6 +56,9 @@ class _WorkerGroup:
         # One leader per shard keeps shard index and worker index aligned, so the
         # assertions below can talk about either.
         return dp_shard_idx
+
+    def shutdown(self, **kwargs):
+        return True
 
     def run_single_worker_single_data(self, *, method_name, worker_idx, data, greedy):
         del method_name, data, greedy
@@ -76,8 +82,112 @@ def _make_generation(dp_size: int, fail_on_workers=()) -> VllmGeneration:
     gen.current_generate_dp_shard_idx = 0
     gen.fleet_monitor = None
     gen.fleet_selector = None
+    gen.weight_synchronizer = None
+    gen._replica_calls = [CallMetrics() for _ in range(dp_size)]
+    gen._replica_metrics_pending = {}
     gen.cfg = {"vllm_cfg": {"async_engine": True}}
     return gen
+
+
+def test_generation_handle_transfer_keeps_routing_and_telemetry_working():
+    gen = cloudpickle.loads(cloudpickle.dumps(_make_generation(dp_size=2)))
+    _generate(gen)
+    _generate(gen)
+    assert gen.worker_group.dispatched == [0, 1]
+    for calls in gen._replica_calls:
+        assert calls.drain()["calls_completed"] == 1
+
+
+def test_round_robin_dispatch_counts_and_failure_closure():
+    gen = _make_generation(dp_size=2, fail_on_workers={1})
+    _generate(gen)
+    with pytest.raises(GenerationUnavailable):
+        _generate(gen)
+    _generate(gen)
+    first, second = [calls.drain() for calls in gen._replica_calls]
+    assert gen.worker_group.dispatched == [0, 1, 0]
+    assert first["calls_started"] == first["calls_completed"] == 2
+    assert second["calls_started"] == second["calls_interrupted"] == 1
+    assert first["calls_inflight"] == second["calls_inflight"] == 0
+
+
+def test_generator_close_releases_telemetry_and_selector():
+    gen = _make_generation(dp_size=2)
+    _attach(gen)
+
+    async def run():
+        stream = gen._async_generate_base(
+            _one_sample(), "generate_async", lambda _: True
+        )
+        await anext(stream)
+        assert gen._replica_calls[0].drain()["calls_inflight"] == 1
+        await stream.aclose()
+
+    # The fake worker yields a Python generator, not a Ray ObjectRefGenerator.
+    with patch("ray.cancel"):
+        asyncio.run(run())
+    assert gen.fleet_selector.inflight(0) == 0
+    metrics = gen._replica_calls[0].drain()
+    assert metrics["calls_inflight"] == 0
+    assert metrics["calls_interrupted"] == 1
+
+
+def test_metrics_poll_preserves_slow_replica_and_other_replica_results():
+    gen = _make_generation(dp_size=3)
+    gen.cfg["vllm_cfg"]["enable_vllm_metrics_logger"] = True
+    refs = [object(), object(), object()]
+    dispatched = []
+
+    def dispatch(method_name, *, worker_idx):
+        dispatched.append(worker_idx)
+        return refs[worker_idx]
+
+    def get(ref):
+        if ref is refs[2]:
+            raise ray.exceptions.ActorDiedError()
+        return {"engine_samples": 4, "requests_waiting_max": 7}
+
+    gen.worker_group.run_single_worker_single_data = dispatch
+    with (
+        patch("ray.wait", return_value=([refs[0], refs[2]], [refs[1]])) as wait,
+        patch("ray.get", side_effect=get),
+    ):
+        metrics = gen._get_replica_step_metrics()
+    assert metrics["vllm/replica_0/requests_waiting_max"] == 7
+    assert metrics["vllm/replica_1/engine_metrics_pending"] == 1
+    assert metrics["vllm/replica_2/engine_metrics_error"] == 1
+    assert 0 < wait.call_args.kwargs["timeout"] <= 0.1
+    assert list(gen._replica_metrics_pending) == [1]
+
+    with (
+        patch("ray.wait", return_value=([refs[1]], [refs[0], refs[2]])),
+        patch("ray.get", side_effect=get),
+    ):
+        metrics = gen._get_replica_step_metrics()
+    assert metrics["vllm/replica_1/requests_waiting_max"] == 7
+    assert dispatched.count(1) == 1  # No unbounded RPC accumulation on a hung actor.
+
+
+def test_step_metrics_include_calls_without_spec_decode_snapshot():
+    gen = _make_generation(dp_size=2)
+    gen._step_metrics_snapshot = None
+    _generate(gen)
+    with pytest.warns(RuntimeWarning, match="snapshot_step_metrics"):
+        metrics = gen.get_step_metrics()
+    assert metrics["vllm/replica_0/calls_completed"] == 1
+    assert metrics["vllm/replica_1/calls_started"] == 0
+
+
+def test_spec_decode_metrics_failure_does_not_drop_replica_metrics():
+    gen = _make_generation(dp_size=2)
+    gen._step_metrics_snapshot = {}
+    _generate(gen)
+    with patch.object(
+        gen, "_get_raw_spec_counters", side_effect=ray.exceptions.ActorDiedError()
+    ):
+        metrics = gen.get_step_metrics()
+    assert metrics["vllm/replica_0/calls_completed"] == 1
+    assert gen._step_metrics_snapshot is None
 
 
 def _attach(gen: VllmGeneration, **policy_kwargs) -> GenerationFleetHealth:

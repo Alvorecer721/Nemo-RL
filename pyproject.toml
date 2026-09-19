@@ -25,10 +25,10 @@ dependencies = [
   "setuptools",
   "pip",                                                                                                 # Required for frozen environments; uv venv --seed may not reliably install pip
   "ninja",                                                                                               # for flash-attn parallel build
-  "torch==2.11.0",
+  "torch==2.13.0",
   "triton; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
   "colored==2.2.3",
-  "ray[default]>=2.55.1",
+  "ray[default]==2.58.0",
   "wandb>=0.28.0",
   "numpy",
   "datasets>=4.0.0",
@@ -49,7 +49,7 @@ dependencies = [
   "plotly",
   "sympy>=1.14.0",
   "pillow>=12.3.0",                                                                                      # Address CVE (Pillow 12.3.0)
-  "torchvision==0.26.0",
+  "torchvision==0.28.0",
   # torchaudio and torchcodec are NOT installed in the container image.
   # Run tools/install_audio_deps.sh before using audio features or audio tests.
   # Keep the base range compatible with backend-specific pins while selecting 5.12.1
@@ -86,7 +86,7 @@ dependencies = [
   # gated-chunk backward with a RuntimeError pointing at this exact pip install.
   # Keep the base range broad for both supported Linux architectures; backend
   # extras tighten the version as required.
-  "tilelang>=0.1.9,<0.1.12; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+  "tilelang>=0.1.9,<0.1.13; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
   # Data-plane stack — promoted to base so worker venvs (built by
   # nemo_rl.utils.venvs.create_local_venv via bare `uv sync`, no extras)
   # automatically include them. Removes the need for a `[data-plane]`
@@ -151,23 +151,23 @@ automodel = [
 ]
 vllm = [
   "transformers==5.12.1",
-  "tilelang==0.1.9; sys_platform == 'linux' and platform_machine == 'x86_64'",
   "cuda-python",
   "deep_gemm @ git+https://github.com/deepseek-ai/DeepGEMM.git@67fc64863d43521080bf2005e6528d0fceee9510",
   # deep_ep also needs libibverbs-dev
   # sudo apt-get update
   # sudo apt-get install libibverbs-dev
   "deep_ep @ git+https://github.com/deepseek-ai/DeepEP.git@17cfb817bccec3a9c247013360cc550c2bac441e",
-  # Default wheels on GitHub are cu130. See v0.26.0 release assets:
-  # https://github.com/vllm-project/vllm/releases/tag/v0.26.0
-  "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
-  "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-  "vllm==0.26.0 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
+  # Default wheels on GitHub are cu130. See v0.29.0 release assets:
+  # https://github.com/vllm-project/vllm/releases/tag/v0.29.0
+  "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0-cp38-abi3-manylinux_2_28_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0-cp38-abi3-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "vllm==0.29.0 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
+  "tilelang==0.1.12; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
   "num2words>=0.5.14",
-  "flashinfer-python==0.6.14",
-  "flashinfer-cubin==0.6.14",
-  "flashinfer-jit-cache==0.6.14",
-  "nvidia-cutlass-dsl[cu13]==4.6.0",
+  "flashinfer-python==0.6.18",
+  "flashinfer-cubin==0.6.18",
+  "flashinfer-jit-cache==0.6.18",
+  "nvidia-cutlass-dsl[cu13]==4.6.2",
 ]
 sglang = [
   # sgl-project/sglang branch `sglang-miles` (based on v0.5.16). Needed for the
@@ -186,6 +186,7 @@ sglang = [
   "tilelang==0.1.11; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 mcore = [
+  "flash-attn==2.8.1", # Build locally against the trial Torch ABI.
   # also need cudnn (https://developer.nvidia.com/cudnn-downloads?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=20.04&target_type=deb_network)
   # wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb
   # sudo dpkg -i cuda-keyring_1.1-1_all.deb
@@ -207,9 +208,6 @@ mcore = [
   # Flash-attn version should be selected to satisfy both TE + vLLM requirements (xformers in particular)
   # https://github.com/NVIDIA/TransformerEngine/blob/v2.3/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L108
   # https://github.com/facebookresearch/xformers/blob/8354497deb2c04c67fbb2e2ad911e86530da0e90/xformers/ops/fmha/flash.py#L76
-  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp313-cp313-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
-  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-  "flash-attn==2.8.1 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
   # mamba-ssm/causal-conv1d LOOK redundant (megatron-bridge[ssm] pulls them), but do not
   # remove them: [tool.uv.sources] git pins only attach to direct requirements, and the
   # conflicting extras resolve in separate forks — without these direct deps the mcore fork
@@ -236,6 +234,7 @@ mcore = [
 # backend (_backend.py). The path source lets uv lock resolve the dep graph
 # without compiling (prepare_metadata_for_build_wheel returns static metadata).
 # The actual ~60-min wheel build is triggered by `uv sync --extra trtllm`.
+
 trtllm = [
   "tensorrt-llm==1.3.0rc21",
   "transformers==5.5.4",
@@ -252,7 +251,7 @@ nemo_gym = ["nemo_gym"]
 # This is a default group so that we install these even with bare `uv sync`
 build = [
   # Build requirement for TE
-  "torch==2.11.0",
+  "torch==2.13.0",
   # Build requirement for TE
   "setuptools",
   "packaging",
@@ -419,7 +418,7 @@ override-dependencies = [
   "timm<=1.0.22",
   "fastapi[standard]>=0.133.0,<0.137.0",
   "nvidia-modelopt[torch]>=0.44.0a0",
-  "torch==2.11.0",
+  "torch==2.13.0",
   # Floor only: trtllm (<1.4.0) and vllm (>=1.7.0) are incompatible, and the
   # universal lock resolves 1.3.0 either way. Pre-existing on main.
   "llguidance>=1.3.0",
@@ -497,33 +496,83 @@ constraint-dependencies = [
   "opencv-python-headless>=5.0.0",            # CVE floor: patches CVE-2025-9951, CVE-2025-1594, CVE-2024-31582 (bundled FFmpeg 5.1.6 in 4.x)
 ]
 
-# Workaround for https://github.com/NVIDIA/cutlass/issues/3259: libs-base
-# and libs-cu13 wheels overlap and race on shared paths. libs-cu13 is a
-# functional superset at 4.5.2, so drop libs-base to make installs deterministic.
-exclude-dependencies = ["nvidia-cutlass-dsl-libs-base"]
-
 conflicts = [
-  [{ extra = "fsdp" }, { extra = "sglang" }],
-  [{ extra = "automodel" }, { extra = "sglang" }],
-  [{ extra = "mcore" }, { extra = "sglang" }],
-  [{ extra = "vllm" }, { extra = "sglang" }],
-  [{ extra = "automodel" }, { extra = "fsdp" }],
-  [{ extra = "automodel" }, { extra = "mcore" }],
-  [{ extra = "automodel" }, { extra = "vllm" }],
-  [{ extra = "vllm" }, { extra = "mcore" }],
-  [{ extra = "trtllm" }, { extra = "vllm" }],
-  [{ extra = "trtllm" }, { extra = "sglang" }],
-  [{ extra = "trtllm" }, { extra = "automodel" }],
-  [{ extra = "trtllm" }, { extra = "mcore" }],
-  [{ extra = "trtllm" }, { extra = "fsdp" }],
-  [{ extra = "trtllm" }, { extra = "modelopt" }],
-  [{ extra = "trtllm" }, { extra = "nvrx" }],
-  [{ extra = "trtllm" }, { extra = "nemo_gym" }],
+  [
+    { extra = "fsdp" },
+    { extra = "sglang" },
+  ],
+  [
+    { extra = "automodel" },
+    { extra = "sglang" },
+  ],
+  [
+    { extra = "mcore" },
+    { extra = "sglang" },
+  ],
+  [
+    { extra = "vllm" },
+    { extra = "sglang" },
+  ],
+  [
+    { extra = "automodel" },
+    { extra = "fsdp" },
+  ],
+  [
+    { extra = "automodel" },
+    { extra = "mcore" },
+  ],
+  [
+    { extra = "automodel" },
+    { extra = "vllm" },
+  ],
+  [
+    { extra = "vllm" },
+    { extra = "mcore" },
+  ],
+  [
+    { extra = "vllm" },
+    { extra = "fsdp" },
+  ], # TileLang 0.1.12 versus FSDP 0.1.9.
+  [
+    { extra = "trtllm" },
+    { extra = "vllm" },
+  ],
+  [
+    { extra = "trtllm" },
+    { extra = "sglang" },
+  ],
+  [
+    { extra = "trtllm" },
+    { extra = "automodel" },
+  ],
+  [
+    { extra = "trtllm" },
+    { extra = "mcore" },
+  ],
+  [
+    { extra = "trtllm" },
+    { extra = "fsdp" },
+  ],
+  [
+    { extra = "trtllm" },
+    { extra = "modelopt" },
+  ],
+  [
+    { extra = "trtllm" },
+    { extra = "nvrx" },
+  ],
+  [
+    { extra = "trtllm" },
+    { extra = "nemo_gym" },
+  ],
   # Gym pins openai==2.44.0 (merged PR #2872 tree) while sglang==0.5.12.post1
   # pins openai==2.6.1; no environment installs both extras together.
   # Spelled nemo_gym (the raw extras-table key): uv < 0.12 compares conflict
   # entries against unnormalized extra names and rejects "nemo-gym".
-  [{ extra = "nemo_gym" }, { extra = "sglang" }],
+  [
+    { extra = "nemo_gym" },
+    { extra = "sglang" },
+  ],
 ]
 
 
@@ -662,6 +711,33 @@ requires-dist = [
   "pydantic-settings>=2.11.0,<3.0.0",
   "requests>=2.32.5,<3.0.0",
 ]
+
+# Workaround for https://github.com/NVIDIA/cutlass/issues/3259: at 4.5.x the
+# libs-base and libs-cu13 wheels overlap and race on shared paths, and libs-cu13
+# is a functional superset, so 4.5.x resolves without libs-base. From 4.6 the
+# wheels no longer overlap and libs-base brings libs-core (cutlass.cute), so
+# later versions keep their published metadata.
+[[tool.uv.dependency-metadata]]
+name = "nvidia-cutlass-dsl"
+version = "4.5.0"
+requires-dist = ["nvidia-cutlass-dsl-libs-cu13==4.5.0 ; extra == 'cu13'"]
+provides-extras = ["cu13"]
+
+[[tool.uv.dependency-metadata]]
+name = "nvidia-cutlass-dsl"
+version = "4.5.2"
+requires-dist = ["nvidia-cutlass-dsl-libs-cu13==4.5.2 ; extra == 'cu13'"]
+provides-extras = ["cu13"]
+
+[[tool.uv.dependency-metadata]]
+name = "nvidia-cutlass-dsl-libs-cu13"
+version = "4.5.0"
+requires-dist = ["numpy", "typing-extensions", "cuda-python>=12.8"]
+
+[[tool.uv.dependency-metadata]]
+name = "nvidia-cutlass-dsl-libs-cu13"
+version = "4.5.2"
+requires-dist = ["numpy", "typing-extensions", "cuda-python>=12.8"]
 
 # Override drain3 to relax cachetools==4.2.1 pin (conflicts with mlflow's cachetools>=5.0.0)
 # Tracking: https://github.com/logpai/Drain3/issues/119

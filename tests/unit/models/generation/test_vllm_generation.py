@@ -49,6 +49,7 @@ from nemo_rl.models.generation.vllm.vllm_worker_async import (
     _AsyncLLMHTTPClient,
 )
 from nemo_rl.models.policy import LoRAConfig, PolicyConfig
+from nemo_rl.models.policy.draft_config import Eagle3DraftConfig
 from nemo_rl.models.policy.lm_policy import Policy
 
 model_name = "Qwen/Qwen3-0.6B"
@@ -300,6 +301,34 @@ async def test_async_vllm_worker_uses_native_keep_pause_and_resume() -> None:
 
     worker.llm.pause_generation.assert_awaited_once_with(mode="keep", clear_cache=False)
     worker.llm.resume_generation.assert_awaited_once_with()
+
+
+def test_async_vllm_http_client_preserves_admission_rejection() -> None:
+    rejection = RuntimeError("request queue full")
+    calls = []
+
+    def check_admission(n=1, request_id=None):
+        calls.append((n, request_id))
+        if n > 1:
+            raise rejection
+
+    engine = types.SimpleNamespace(
+        model_config=None,
+        renderer=None,
+        input_processor=None,
+        vllm_config=None,
+        check_admission=check_admission,
+    )
+    loop = asyncio.new_event_loop()
+    try:
+        client = _AsyncLLMHTTPClient(engine, loop)
+        assert client.check_admission() is None
+        with pytest.raises(RuntimeError, match="request queue full") as exc:
+            client.check_admission(3, request_id="overloaded-request")
+        assert exc.value is rejection
+        assert calls == [(1, None), (3, "overloaded-request")]
+    finally:
+        loop.close()
 
 
 @pytest.mark.asyncio
@@ -560,6 +589,30 @@ def test_sampling_params_preserve_bad_words():
     )
 
     assert sampling_params["bad_words"] == ["<image>", "<img>"]
+
+
+def test_vllm_latest_metric_drain_prunes_worker_histories():
+    worker = object.__new__(VllmAsyncGenerationWorkerImpl)
+    worker.cfg = {"vllm_cfg": {"enable_vllm_metrics_logger": True}}
+    worker._vllm_metrics_lock = threading.Lock()
+    worker.inflight_batch_sizes = [1, 2]
+    worker.num_pending_samples = [3, 4]
+    worker.kv_cache_usage_perc = [0.2, 0.6]
+    worker.generation_tokens = [10, 30]
+
+    latest = worker.drain_latest_vllm_logger_metrics()
+
+    assert latest == {
+        "inflight_batch_sizes": [2],
+        "num_pending_samples": [4],
+        "kv_cache_usage_perc": [0.6],
+        "generation_tokens": [30],
+    }
+    assert worker.inflight_batch_sizes == [2]
+    assert worker.num_pending_samples == [4]
+    assert worker.kv_cache_usage_perc == [0.6]
+    assert worker.generation_tokens == [30]
+    assert latest["generation_tokens"] is not worker.generation_tokens
 
 
 def test_resolve_enable_prefix_caching_respects_explicit_config(monkeypatch):
@@ -1222,7 +1275,7 @@ def get_basic_megatron_test_config(
                 "data_parallel_sharding_strategy": "optim_grads_params",
             },
         },
-        "draft": {"enabled": False},
+        "draft": Eagle3DraftConfig(enabled=False),
         "optimizer": None,  # Remove default FSDP optimizer
         "scheduler": None,  # Remove default scheduler
         "max_grad_norm": 1.0,
@@ -2010,6 +2063,11 @@ async def test_vllm_generation_with_hf_training_colocated(
     dtensor_config = deepcopy(basic_dtensor_test_config)
     dtensor_config["dtensor_cfg"]["cpu_offload"] = cpu_offload
     dtensor_config["dtensor_cfg"]["_v2"] = enable_lora
+    if enable_lora:
+        dtensor_config["dtensor_cfg"]["checkpoint"] = {
+            "model_save_format": "safetensors",
+            "save_consolidated": "false",
+        }
     dtensor_config["dtensor_cfg"]["lora_cfg"] = deepcopy(basic_lora_test_config)
     dtensor_config["dtensor_cfg"]["lora_cfg"]["enabled"] = enable_lora
     dtensor_config["train_global_batch_size"] = 4
@@ -2098,6 +2156,11 @@ async def test_vllm_generation_with_hf_training_non_colocated(
     dtensor_config["train_global_batch_size"] = 4
     # lora must use dtensor v2
     dtensor_config["dtensor_cfg"]["_v2"] = enable_lora
+    if enable_lora:
+        dtensor_config["dtensor_cfg"]["checkpoint"] = {
+            "model_save_format": "safetensors",
+            "save_consolidated": "false",
+        }
     dtensor_config["dtensor_cfg"]["lora_cfg"] = deepcopy(basic_lora_test_config)
     dtensor_config["dtensor_cfg"]["lora_cfg"]["enabled"] = enable_lora
     lm_policy = Policy(policy_cluster_separate, dtensor_config, tokenizer)
@@ -2884,6 +2947,10 @@ def test_vllm_weight_update_memory(cluster, tokenizer, train_backend):
     elif train_backend == "dtensor_v2":
         train_config = deepcopy(basic_dtensor_test_config)
         train_config["dtensor_cfg"]["_v2"] = True
+        train_config["dtensor_cfg"]["checkpoint"] = {
+            "model_save_format": "safetensors",
+            "save_consolidated": "false",
+        }
     elif train_backend == "megatron":
         train_config = get_basic_megatron_test_config(tp=1, pp=1, precision="float32")
     else:

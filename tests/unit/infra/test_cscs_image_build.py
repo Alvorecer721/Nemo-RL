@@ -309,7 +309,7 @@ class BuilderFlowTests(_BuilderFixture):
 
 
 class SiteProfileTests(unittest.TestCase):
-    def test_apertus_profile_preserves_the_six_worker_environments(self):
+    def test_apertus_profile_includes_training_generation_and_gym(self):
         root = TOOL.parents[1]
         actors = (root / "infra/slurm/cscs/profiles/apertus.actors").read_text()
         result = subprocess.run(
@@ -332,6 +332,7 @@ class SiteProfileTests(unittest.TestCase):
             {
                 "AsyncTrajectoryCollector": ("deps", "--extra vllm"),
                 "ReplayBuffer": ("deps", "--extra vllm"),
+                "NemoGym": ("deps", "--extra nemo_gym"),
                 "SyncRolloutActor": ("deps", "--extra vllm"),
                 # Token capture imports nemo_gym inside the vLLM workers (#4009).
                 "VllmGenerationWorker": ("deps", "--extra vllm --extra nemo_gym"),

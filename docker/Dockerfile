@@ -328,6 +328,11 @@ rsync -a --ignore-existing /tmp/trtllm-ccache-seed/ "${CCACHE_DIR}/"
 
 # uv uses the shared image cache. Only the custom wheel needs a cache mount
 # because uv can miss no-build-isolation wheels across build environments.
+# The mount is builder-local scratch: it is not part of this layer, so a later
+# stage cannot rely on it -- when this RUN is served from the BuildKit layer
+# cache the mount stays empty. The build below therefore also mirrors the
+# current content-addressed wheel into /opt/trtllm_wheels, which IS part of this
+# layer; the release stage and runtime `uv run --extra trtllm` read it from there.
 echo "TRT-LLM cache state before build:"
 du -sh /root/.cache/uv /root/.cache/trtllm-wheels
 
@@ -344,6 +349,7 @@ set +e
 UV_CACHE_DIR=/root/.cache/uv \
     UV_PROJECT_ENVIRONMENT="${TRTLLM_BUILD_VENV}" \
     TRTLLM_WHEEL_CACHE_DIR=/root/.cache/trtllm-wheels \
+    TRTLLM_WHEEL_CACHE_MIRROR_DIR=/opt/trtllm_wheels \
     uv sync --verbose --link-mode symlink --locked --extra trtllm --no-install-project \
     2>&1 | tee "$TRTLLM_SYNC_LOG" \
     | awk '/\[TRTLLM_CCACHE\]|Ninja progress:/ { print; fflush() }'
@@ -470,6 +476,13 @@ RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallo
 # the expensive dependency layer retains its shared files. No base-only sync.
 # Offline mode makes a missing dependency fail here rather than at job startup.
 RUN <<"EOF" bash -exu -o pipefail
+# Reuse the custom wheel the hermetic stage mirrored into /opt/trtllm_wheels
+# (the runtime default of the TRT-LLM build backend). It lives in that layer,
+# so it is present whether the TRT-LLM RUN executed on this builder or was
+# restored from the layer cache; do not read it from the builder-local cache
+# mount here. Normal uv artifacts stay in /root/.cache/uv.
+export TRTLLM_WHEEL_CACHE_DIR=/opt/trtllm_wheels
+export TRTLLM_REQUIRE_CACHED_WHEEL=1
 mapfile -t actors < <(cut -f1 /opt/actor_venvs.tsv)
 (( ${#actors[@]} > 0 ))
 UV_OFFLINE=1 uv run --no-sync python -m nemo_rl.utils.prefetch_venvs --prebuilt "${actors[@]}"
@@ -591,8 +604,8 @@ ARG WHEEL_CACHE_EXPORT_NONCE
 RUN --mount=type=bind,from=trtllm-wheel-cache-seed,source=.,target=/tmp/trtllm-wheel-cache-seed \
     --mount=type=cache,id=trtllm-wheel-cache-${TARGETARCH}-${BASE_IMAGE},from=trtllm-wheel-cache-seed,source=.,target=/root/.cache/trtllm-wheels,sharing=locked <<"EOF" bash -exu
 echo "Exporting TRT-LLM wheel cache for build ${WHEEL_CACHE_EXPORT_NONCE:-local} (${WHEEL_CACHE_EXPORT_MODE})"
-# If the release RUN was a BuildKit cache hit, restore the seed into a fresh
-# builder-local mount before exporting it.
+# If the hermetic TRT-LLM RUN was a BuildKit cache hit, this builder-local mount is empty;
+# restore the seed before exporting it.
 if [[ -z "$(find /root/.cache/trtllm-wheels -mindepth 1 -print -quit)" ]]; then
     rsync -a /tmp/trtllm-wheel-cache-seed/ /root/.cache/trtllm-wheels/
 fi
