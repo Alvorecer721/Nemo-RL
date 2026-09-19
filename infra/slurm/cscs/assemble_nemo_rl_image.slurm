@@ -30,7 +30,7 @@ image_host_python
 # Capture the producer receipt once; every subsequent check uses this snapshot.
 RECEIPT_FIELDS=$("$HOST_PYTHON" "$IMAGE_TOOLS_DIR/image_release_receipt.py" fields "$RELEASE_RECEIPT")
 mapfile -t fields <<< "$RECEIPT_FIELDS"
-[[ ${#fields[@]} == 2 ]] || { echo "Invalid receipt fields" >&2; exit 1; }
+[[ ${#fields[@]} == 3 ]] || { echo "Invalid receipt fields" >&2; exit 1; }
 IMAGE_REF=${fields[0]}
 IMAGE_BASENAME=${fields[1]}
 SQSH_PATH="$OUTPUT_DIR/$IMAGE_BASENAME.sqsh"

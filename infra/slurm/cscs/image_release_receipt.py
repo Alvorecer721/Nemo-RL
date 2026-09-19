@@ -178,8 +178,8 @@ def main() -> None:
     create.add_argument("--image-ref", required=True)
     create.add_argument("--vllm-version", required=True)
     create.add_argument("--output", type=Path, required=True)
-    fields = sub.add_parser("fields")
-    fields.add_argument("receipt", type=Path)
+    for action in ("fields", "fingerprint"):
+        sub.add_parser(action).add_argument("receipt", type=Path)
     verify = sub.add_parser("verify-image")
     verify.add_argument("receipt", type=Path)
     for name in ("inspection", "manifest", "fingerprint"):
@@ -198,6 +198,10 @@ def main() -> None:
         result = read_receipt(args.receipt)
         print(result["image_ref"])
         print(image_basename(result))
+        print(result["vllm_version"])
+    elif args.action == "fingerprint":
+        inputs = read_receipt(args.receipt)["hermetic_manifest"]["inputs"]
+        print(json.dumps(inputs["dependency_fingerprint"]))
     else:
         image_id = verify_image(
             read_receipt(args.receipt),

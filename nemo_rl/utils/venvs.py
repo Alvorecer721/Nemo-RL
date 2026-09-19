@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import hashlib
+import json
 import logging
 import os
 import shlex
 import shutil
 import subprocess
 import time
+import tomllib
 from functools import lru_cache
 from pathlib import Path
 from typing import MutableMapping
@@ -88,50 +90,107 @@ def _normalized_worker_command(py_executable: str) -> str:
     return shlex.join(normalized)
 
 
-@lru_cache(maxsize=None)
-def _dependency_fingerprint(py_executable: str) -> str:
-    """Digest the inputs a worker venv resolves from.
+def _command_extras(py_executable: str) -> tuple[str, ...]:
+    """Extras a worker command selects."""
+    tokens = shlex.split(py_executable)
+    extras = set()
+    for index, token in enumerate(tokens):
+        if token == "--extra" and index + 1 < len(tokens):
+            extras.add(tokens[index + 1])
+        elif token.startswith("--extra="):
+            extras.add(token.partition("=")[2])
+    return tuple(sorted(extras))
 
-    `uv run --locked` re-syncs the driver's environment only; worker venvs are
-    reused whenever they are marked ready, so a lockfile bump would otherwise
-    leave them serving the previous resolution indefinitely (after the vLLM
-    0.20 -> 0.25 bump, generation workers kept importing 0.20 until 0.25-only
-    code failed at refit). `pyproject.toml` is digested alongside `uv.lock`
-    because `[tool.uv]` build settings change the installed environment without
-    changing the resolution. The normalized worker command is part of the
-    fingerprint because it selects the environment's extras; two actors can
-    share the same lockfile while requiring different installed packages.
+
+@lru_cache(maxsize=None)
+def _uv_version() -> str:
+    return subprocess.run(
+        [os.environ.get("UV", "uv"), "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _export_requirements(extras: tuple[str, ...]) -> str:
+    command = [
+        os.environ.get("UV", "uv"),
+        "export",
+        "--frozen",
+        "--no-header",
+        "--no-emit-project",
+        "--format",
+        "requirements-txt",
+        "--directory",
+        git_root,
+    ]
+    for extra in extras:
+        command.extend(["--extra", extra])
+    return subprocess.run(command, check=True, capture_output=True, text=True).stdout
+
+
+@lru_cache(maxsize=None)
+def _resolved_environment(extras: tuple[str, ...]) -> str:
+    """Digest what the lock installs for these extras, and how uv builds it.
+
+    `uv export --frozen` prints the resolved requirement set with versions,
+    hashes and editable paths relative to the project, so the digest moves only
+    when an installed artifact does. Raw `uv.lock` bytes also move when another
+    extra's package, a marker or the file layout changes, and raw
+    `pyproject.toml` bytes on any edit, which rebuilt every worker venv for
+    changes that install nothing new. `[tool.uv]` is digested alongside because
+    its build settings change the installed environment without changing the
+    resolution. Default dependency groups stay in: workers install them.
     """
     digest = hashlib.sha256()
-    digest.update(b"py_executable\0")
-    digest.update(_normalized_worker_command(py_executable).encode())
-    digest.update(b"\0")
-    for name in ("uv.lock", "pyproject.toml"):
-        path = Path(git_root) / name
-        if path.exists():
-            digest.update(name.encode())
-            digest.update(b"\0")
-            digest.update(path.read_bytes())
-            digest.update(b"\0")
+    for line in _export_requirements(extras).splitlines():
+        if not line.lstrip().startswith("#"):
+            digest.update(line.encode())
+            digest.update(b"\n")
+    with open(Path(git_root) / "pyproject.toml", "rb") as f:
+        build_settings = tomllib.load(f).get("tool", {}).get("uv", {})
+    digest.update(json.dumps(build_settings, sort_keys=True).encode())
     return digest.hexdigest()
+
+
+def _dependency_fingerprint(py_executable: str) -> dict[str, str]:
+    """What a worker venv was built from: its command and its resolved environment.
+
+    `uv run --locked` re-syncs the driver's environment only; worker venvs are
+    reused whenever they are marked ready, so a dependency bump would otherwise
+    leave them serving the previous resolution indefinitely (after the vLLM
+    0.20 -> 0.25 bump, generation workers kept importing 0.20 until 0.25-only
+    code failed at refit). The normalized worker command is recorded separately:
+    it names the checkout the venv's editable installs point at, which an image
+    venv used as built does not depend on. The uv version is recorded because
+    the export text, and so the digest, differs between uv releases.
+    """
+    return {
+        "command": _normalized_worker_command(py_executable),
+        "uv": _uv_version(),
+        "environment": _resolved_environment(_command_extras(py_executable)),
+    }
+
+
+def _read_marker(ready_marker: Path) -> dict[str, str] | None:
+    try:
+        recorded = json.loads(ready_marker.read_text())
+    except (OSError, ValueError):
+        return None
+    return recorded if isinstance(recorded, dict) else None
 
 
 def _mark_venv_ready(ready_marker: Path, py_executable: str) -> None:
     # Written via rename so a concurrent reader never sees a half-written
     # fingerprint and rebuilds a venv that is actually current.
     tmp = ready_marker.with_name(f"{ready_marker.name}.{os.getpid()}.tmp")
-    tmp.write_text(_dependency_fingerprint(py_executable))
+    tmp.write_text(json.dumps(_dependency_fingerprint(py_executable), sort_keys=True))
     os.replace(tmp, ready_marker)
 
 
 def venv_is_current(ready_marker: Path, py_executable: str) -> bool:
     """Whether a venv is both ready and built from the current dependencies."""
-    try:
-        return ready_marker.read_text().strip() == _dependency_fingerprint(
-            py_executable
-        )
-    except OSError:
-        return False
+    return _read_marker(ready_marker) == _dependency_fingerprint(py_executable)
 
 
 def finalize_prebuilt_venv(py_executable: str, venv_name: str) -> str:
@@ -141,6 +200,9 @@ def finalize_prebuilt_venv(py_executable: str, venv_name: str) -> str:
     replaces them again. Sync the actor directly and use copies for the small
     release delta: cross-layer hardlink replacements can fail with EINVAL.
     Record the successful frozen installation before declaring the worker ready.
+
+    The sync is offline unless the build sets ``UV_OFFLINE=0``, which an overlay
+    needs when the lock adds wheels that only one actor's extras install.
     """
     from nemo_rl.distributed.actor_environments import ACTOR_ENVIRONMENTS
 
@@ -154,16 +216,17 @@ def finalize_prebuilt_venv(py_executable: str, venv_name: str) -> str:
     if not python.is_file():
         raise FileNotFoundError(f"Prebuilt worker interpreter is missing: {python}")
 
+    offline = os.environ.get("UV_OFFLINE", "1") != "0"
     env = {
         **os.environ,
         "UV_PROJECT_ENVIRONMENT": str(worker),
-        "UV_OFFLINE": "1",
+        "UV_OFFLINE": "1" if offline else "0",
         "UV_LINK_MODE": "copy",
     }
     command = [
         os.environ.get("UV", "uv"),
         "sync",
-        "--offline",
+        *(["--offline"] if offline else []),
         "--frozen",
         "--directory",
         git_root,
@@ -180,6 +243,92 @@ def finalize_prebuilt_venv(py_executable: str, venv_name: str) -> str:
     subprocess.run(inventory, env=env, check=True)
     _mark_venv_ready(marker, py_executable)
     return str(python)
+
+
+def image_venvs_enabled() -> bool:
+    """Whether workers use the image's prebuilt venvs exactly as built."""
+    return os.environ.get("NEMO_RL_IMAGE_VENVS", "0") == "1"
+
+
+def image_venv_python(py_executable: str, venv_name: str) -> str:
+    """Interpreter of a prebuilt worker venv, used as built.
+
+    Nothing is installed or synced at launch. The venv either already holds what
+    the checkout's lock resolves for this worker, or the launch fails and names
+    the image as the thing to update. The worker command is not compared: it
+    names the source tree the image was built from, and the checkout's source
+    reaches every actor through ``add_checkout_to_pythonpath`` in ``init_ray``.
+    """
+    worker = Path(os.environ.get("NEMO_RL_VENV_DIR", DEFAULT_VENV_DIR)) / venv_name
+    python = worker / "bin/python"
+    if not python.is_file():
+        raise FileNotFoundError(
+            f"NEMO_RL_IMAGE_VENVS=1 but the image has no prebuilt venv for "
+            f"{venv_name} at {worker}. Add the actor to the image, or unset "
+            f"NEMO_RL_IMAGE_VENVS to build the venv at launch."
+        )
+    built = _read_marker(worker / VENV_READY_MARKER) or {}
+    wanted = _dependency_fingerprint(py_executable)
+    if built.get("uv") != wanted["uv"]:
+        raise RuntimeError(
+            f"NEMO_RL_IMAGE_VENVS=1 but the prebuilt venv for {venv_name} was marked "
+            f"by {built.get('uv')} and this launch runs {wanted['uv']}; resolved "
+            f"environments are only comparable under one uv. Point UV at the image's uv."
+        )
+    if built.get("environment") != wanted["environment"]:
+        raise RuntimeError(
+            f"NEMO_RL_IMAGE_VENVS=1 but the prebuilt venv for {venv_name} was built "
+            f"from a different resolved environment than this checkout's lock "
+            f"(image {built.get('environment')}, checkout {wanted['environment']}). "
+            f"Overlay or rebuild the image, or unset NEMO_RL_IMAGE_VENVS to sync it "
+            f"at launch."
+        )
+    return str(python)
+
+
+@lru_cache(maxsize=None)
+def _checkout_import_roots() -> tuple[str, ...]:
+    """The checkout, then the import root of every other editable project in its lock.
+
+    The checkout comes first: sibling projects also carry top-level ``tools``,
+    ``tests`` and ``examples`` packages, and the checkout's must win.
+    """
+    with open(Path(git_root) / "uv.lock", "rb") as f:
+        packages = tomllib.load(f)["package"]
+    roots = [git_root]
+    for package in packages:
+        editable = package.get("source", {}).get("editable")
+        if editable in (None, "."):
+            continue
+        project = Path(git_root, editable)
+        if not (project / "pyproject.toml").is_file():
+            raise FileNotFoundError(
+                f"{package['name']} is an editable dependency but {project} holds no "
+                f"project; run `git submodule update --init --recursive`."
+            )
+        source = project / "src"
+        roots.append(str(source if source.is_dir() else project))
+    return tuple(roots)
+
+
+def add_checkout_to_pythonpath(
+    env_vars: MutableMapping[str, str],
+) -> MutableMapping[str, str]:
+    """Make image venvs import the checkout instead of the image's baked source.
+
+    ``sys.path`` is searched before a venv's editable finders, so these entries
+    win over the source tree the image was built from. Does nothing unless
+    NEMO_RL_IMAGE_VENVS=1.
+    """
+    if not image_venvs_enabled():
+        return env_vars
+    roots = _checkout_import_roots()
+    pythonpath = env_vars.get("PYTHONPATH", "")
+    path_entries = pythonpath.split(os.pathsep) if pythonpath else []
+    env_vars["PYTHONPATH"] = os.pathsep.join(
+        [*roots, *(entry for entry in path_entries if entry not in roots)]
+    )
+    return env_vars
 
 
 def add_hf_modules_cache_to_pythonpath(env_vars: dict[str, str]) -> dict[str, str]:
@@ -431,6 +580,9 @@ def create_local_venv_on_each_node(py_executable: str, venv_name: str):
     Returns:
         str: Path to the python executable in the created virtual environment
     """
+    if image_venvs_enabled():
+        return image_venv_python(py_executable, venv_name)
+
     # Skip nodes with 0 CPUs (e.g. unschedulable head nodes) — including them
     # makes the STRICT_SPREAD placement group infeasible.
     nodes = [

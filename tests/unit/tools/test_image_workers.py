@@ -154,12 +154,19 @@ class NemoWorkerTests(unittest.TestCase):
             and node.name
             in {
                 "_normalized_worker_command",
+                "_command_extras",
+                "_uv_version",
+                "_export_requirements",
+                "_resolved_environment",
                 "_dependency_fingerprint",
+                "_read_marker",
+                "_mark_venv_ready",
                 "venv_is_current",
             }
         ]
         readiness = (
-            "import hashlib, os, shlex\nfrom pathlib import Path\n"
+            "import hashlib, json, os, shlex, subprocess, tomllib\n"
+            "from pathlib import Path\n"
             "from functools import lru_cache\n"
             f"git_root = {str(self.source)!r}\n"
             + ast.unparse(ast.Module(body=functions, type_ignores=[]))
@@ -194,7 +201,7 @@ class NemoWorkerTests(unittest.TestCase):
         namespace = {}
         exec(readiness, namespace)
         self.marker = self.prefix / "NEMO_RL_VENV_READY"
-        self.marker.write_text(namespace["_dependency_fingerprint"](self.command))
+        namespace["_mark_venv_ready"](self.marker, self.command)
         (self.source / "tools").mkdir()
         shutil.copyfile(
             ROOT / "tools/generate_fingerprint.py",
@@ -305,7 +312,7 @@ class NemoWorkerTests(unittest.TestCase):
         )
         namespace = {}
         exec((self.source / "nemo_rl/utils/venvs.py").read_text(), namespace)
-        self.marker.write_text(namespace["_dependency_fingerprint"](self.command))
+        namespace["_mark_venv_ready"](self.marker, self.command)
         self.fingerprint_path.write_text(
             subprocess.check_output(
                 [sys.executable, str(self.source / "tools/generate_fingerprint.py")],
