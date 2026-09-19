@@ -41,6 +41,79 @@ log_phase "ray.sub started (job=${SLURM_JOB_ID:-?} nodes=${SLURM_JOB_NUM_NODES:-
 _nrl_log_exit() { local rc=$?; trap - EXIT; log_phase "ray.sub exiting (exit_code=$rc)"; exit $rc; }
 trap _nrl_log_exit EXIT TERM HUP INT
 
+# Killing a step while its container is still in use can leave the image's FUSE
+# daemon waiting on its own connection forever, and the node is then drained.
+# Aborting the connection lets the daemon exit.
+abort_stuck_image_mounts() {
+  local root=${1:-/sys/fs/fuse/connections} conn waiting
+  for conn in "$root"/*/; do
+    [[ -O "$conn" ]] || continue
+    waiting=$(cat "$conn/waiting" 2>/dev/null || echo 0)
+    if (( waiting > 0 )); then
+      echo 1 > "$conn/abort" || true
+    fi
+  done
+}
+
+# On one host: once the image's mount daemon is all that is left of the step,
+# nothing can be using the image any more, so a connection with waiters is stuck.
+watch_image_mounts() {
+  local job=$1 step=$2 seconds=$3 cgroups=${4:-/sys/fs/cgroup}
+  local connections=${5:-/sys/fs/fuse/connections} device=${6:-/dev/fuse}
+  local deadline=$((SECONDS + seconds)) procs pids pid only_daemons
+  while (( SECONDS < deadline )); do
+    procs=$(find "$cgroups" -path "*/job_${job}/step_${step}/user/task_*/cgroup.procs" 2>/dev/null)
+    [[ -z "$procs" ]] && return 0
+    pids=$(cat $procs 2>/dev/null)
+    only_daemons=1
+    for pid in $pids; do
+      find "/proc/$pid/fd" -lname "$device" 2>/dev/null | grep -q . || only_daemons=0
+    done
+    if [[ -n "$pids" && "$only_daemons" == 1 ]]; then
+      abort_stuck_image_mounts "$connections"
+    fi
+    sleep 2
+  done
+}
+
+# Runs the watcher on the host of every node in the job, outside any container,
+# while the shared step is ending.
+start_image_mount_watcher() {
+  local step=$1
+  [[ "$step" =~ ^[0-9]+\.[0-9]+$ ]] || return 0
+  timeout --kill-after=5s 200s srun --overlap --jobid="$SLURM_JOB_ID" --nodes="$SLURM_JOB_NUM_NODES" \
+    --ntasks="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 --cpu-bind=none \
+    bash -c "$(declare -f abort_stuck_image_mounts watch_image_mounts); watch_image_mounts ${step%%.*} ${step##*.} 180" &
+}
+
+# Ray daemons, engine cores and environment servers detach from the task that
+# started them but inherit its NRL_TASK_SCOPE. A task stops them before it
+# leaves the container, so Slurm never has to kill a step that is still in use.
+reap_task_processes() {
+  local scope=$1 grace=${2:-10} keep=" " ancestor=$BASHPID signal deadline pids pid
+  while [[ -n "$ancestor" && "$ancestor" -gt 1 ]]; do
+    keep+="$ancestor "
+    ancestor=$(awk '/^PPid:/ {print $2}' "/proc/$ancestor/status" 2>/dev/null || true)
+  done
+  for signal in TERM KILL; do
+    deadline=$((SECONDS + grace))
+    while :; do
+      pids=""
+      for pid in /proc/[0-9]*; do
+        pid=${pid#/proc/}
+        [[ "$keep" == *" $pid "* || ! -O "/proc/$pid" ]] && continue
+        if tr '\0' '\n' 2>/dev/null < "/proc/$pid/environ" | grep -qxF "NRL_TASK_SCOPE=$scope"; then
+          pids+=" $pid"
+        fi
+      done
+      [[ -z "$pids" ]] && return 0
+      kill -"$signal" $pids 2>/dev/null || true
+      (( SECONDS >= deadline )) && break
+      sleep 1
+    done
+  done
+}
+
 # Called only after the head has finished. Container descendants can keep srun
 # alive even after all command scripts exit, so bound the submit-side wait too.
 wait_for_ray_cluster() {
@@ -67,6 +140,51 @@ wait_for_ray_cluster() {
     sleep 1
   done
   wait "$pid"
+}
+
+# One script for every task of the shared srun: task 0 runs the head, the others
+# a worker. Each task reaps what it started before it exits.
+write_cluster_dispatch() {
+  cat > "$CLUSTER_DISPATCH_FILE" <<EOF
+#!/bin/bash
+set -uo pipefail
+
+$(declare -f reap_task_processes)
+
+export NRL_TASK_SCOPE="\$SLURM_JOB_ID.\$SLURM_STEP_ID.\$SLURM_PROCID"
+trap 'reap_task_processes "\$NRL_TASK_SCOPE"; exit 143' TERM
+
+if [[ "\$SLURM_PROCID" -eq 0 ]]; then
+  printf '%s.%s\n' "\$SLURM_JOB_ID" "\$SLURM_STEP_ID" > "$LOG_DIR/RAY_CLUSTER_STEP_ID"
+  if [[ "\$SLURMD_NODENAME" != "$head_node" ]]; then
+    echo "[ERROR] Slurm task 0 landed on \$SLURMD_NODENAME, expected Ray head $head_node." >&2
+    exit 1
+  fi
+  set +e
+  bash -x "$HEAD_COMMAND_FILE" > "$LOG_DIR/ray-head.log" 2>&1
+  _head_rc=\$?
+  set -e
+  printf '%s\n' "\$_head_rc" > "$LOG_DIR/.ray_head_exit_code.tmp"
+  mv "$LOG_DIR/.ray_head_exit_code.tmp" "$LOG_DIR/RAY_HEAD_EXIT_CODE"
+  touch "$LOG_DIR/RAY_HEAD_FINISHED"
+  reap_task_processes "\$NRL_TASK_SCOPE"
+  # The driver's status travels in RAY_HEAD_EXIT_CODE. A non-zero task exit
+  # would make Slurm kill the workers while they are still cleaning up.
+  exit 0
+fi
+
+if [[ "\$SLURMD_NODENAME" == "$head_node" ]]; then
+  echo "[ERROR] Nonzero Slurm task \$SLURM_PROCID landed on Ray head $head_node." >&2
+  exit 1
+fi
+_worker_index=\$((SLURM_PROCID - 1))
+printf -v _worker_log 'ray-worker-%0${_task_digits}d.log' "\$_worker_index"
+bash -x "$WORKER_COMMAND_FILE" > "$LOG_DIR/\$_worker_log" 2>&1
+_worker_rc=\$?
+reap_task_processes "\$NRL_TASK_SCOPE"
+exit "\$_worker_rc"
+EOF
+  chmod +x "$CLUSTER_DISPATCH_FILE"
 }
 
 ########################################################
@@ -1224,35 +1342,7 @@ if [[ "$RAY_SINGLE_SRUN" == "1" ]]; then
   log_phase "launching Ray head + workers in one srun"
   _task_digits=${#_num_workers}
   CLUSTER_DISPATCH_FILE="$LOG_DIR/ray_cluster_dispatch.sh"
-  cat > "$CLUSTER_DISPATCH_FILE" <<EOF
-#!/bin/bash
-set -uo pipefail
-
-if [[ "\$SLURM_PROCID" -eq 0 ]]; then
-  printf '%s.%s\n' "\$SLURM_JOB_ID" "\$SLURM_STEP_ID" > "$LOG_DIR/RAY_CLUSTER_STEP_ID"
-  if [[ "\$SLURMD_NODENAME" != "$head_node" ]]; then
-    echo "[ERROR] Slurm task 0 landed on \$SLURMD_NODENAME, expected Ray head $head_node." >&2
-    exit 1
-  fi
-  set +e
-  bash -x "$HEAD_COMMAND_FILE" > "$LOG_DIR/ray-head.log" 2>&1
-  _head_rc=\$?
-  set -e
-  printf '%s\n' "\$_head_rc" > "$LOG_DIR/.ray_head_exit_code.tmp"
-  mv "$LOG_DIR/.ray_head_exit_code.tmp" "$LOG_DIR/RAY_HEAD_EXIT_CODE"
-  touch "$LOG_DIR/RAY_HEAD_FINISHED"
-  exit "\$_head_rc"
-fi
-
-if [[ "\$SLURMD_NODENAME" == "$head_node" ]]; then
-  echo "[ERROR] Nonzero Slurm task \$SLURM_PROCID landed on Ray head $head_node." >&2
-  exit 1
-fi
-_worker_index=\$((SLURM_PROCID - 1))
-printf -v _worker_log 'ray-worker-%0${_task_digits}d.log' "\$_worker_index"
-exec bash -x "$WORKER_COMMAND_FILE" > "$LOG_DIR/\$_worker_log" 2>&1
-EOF
-  chmod +x "$CLUSTER_DISPATCH_FILE"
+  write_cluster_dispatch
 
   srun $COMMON_SRUN_ARGS --container-name=ray-cluster --exact \
     --nodes="$SLURM_JOB_NUM_NODES" \
@@ -1324,6 +1414,7 @@ if [[ -n "$COMMAND" ]]; then
     fi
     touch "$LOG_DIR/ENDED"
     cluster_step=$(cat "$LOG_DIR/RAY_CLUSTER_STEP_ID" 2>/dev/null || true)
+    start_image_mount_watcher "$cluster_step"
     wait_for_ray_cluster "${SRUN_PIDS["ray-cluster"]}" "$cluster_step"
     cluster_exit_code=$?
     set -e
