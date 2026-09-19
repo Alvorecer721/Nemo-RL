@@ -200,6 +200,9 @@ def finalize_prebuilt_venv(py_executable: str, venv_name: str) -> str:
     replaces them again. Sync the actor directly and use copies for the small
     release delta: cross-layer hardlink replacements can fail with EINVAL.
     Record the successful frozen installation before declaring the worker ready.
+
+    The sync is offline unless the build sets ``UV_OFFLINE=0``, which an overlay
+    needs when the lock adds wheels that only one actor's extras install.
     """
     from nemo_rl.distributed.actor_environments import ACTOR_ENVIRONMENTS
 
@@ -213,16 +216,17 @@ def finalize_prebuilt_venv(py_executable: str, venv_name: str) -> str:
     if not python.is_file():
         raise FileNotFoundError(f"Prebuilt worker interpreter is missing: {python}")
 
+    offline = os.environ.get("UV_OFFLINE", "1") != "0"
     env = {
         **os.environ,
         "UV_PROJECT_ENVIRONMENT": str(worker),
-        "UV_OFFLINE": "1",
+        "UV_OFFLINE": "1" if offline else "0",
         "UV_LINK_MODE": "copy",
     }
     command = [
         os.environ.get("UV", "uv"),
         "sync",
-        "--offline",
+        *(["--offline"] if offline else []),
         "--frozen",
         "--directory",
         git_root,

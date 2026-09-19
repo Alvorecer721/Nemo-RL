@@ -129,6 +129,29 @@ def test_non_uv_worker_command_runs_verbatim(tmp_path):
     ]
 
 
+def test_prebuilt_finalization_fetches_new_wheels_when_the_build_allows_network(
+    tmp_path, monkeypatch
+):
+    """An overlay that adds wheels to one actor's extra cannot finalize offline."""
+    actor = "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker"
+    worker = tmp_path / actor
+    (worker / "bin").mkdir(parents=True)
+    (worker / "bin/python").touch()
+    monkeypatch.setenv("UV_OFFLINE", "0")
+    syncs = []
+
+    def execute(cmd, **kwargs):
+        if cmd[1] == "sync":
+            syncs.append((cmd, kwargs["env"]["UV_OFFLINE"]))
+
+    with patch.object(venvs_module.subprocess, "run", execute):
+        venvs_module.finalize_prebuilt_venv("uv run --locked --extra vllm", actor)
+
+    ((cmd, offline),) = syncs
+    assert "--frozen" in cmd and "--offline" not in cmd
+    assert offline == "0"
+
+
 @pytest.mark.parametrize("failure", [None, "sync", "inventory"])
 def test_prebuilt_finalization_selects_actor_and_gates_readiness(tmp_path, failure):
     """Finalize the actor directly and mark ready only after recording its state."""

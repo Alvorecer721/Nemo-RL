@@ -41,7 +41,7 @@ test -s /opt/actor_venvs.tsv
 UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --all-groups --no-install-project
 mapfile -t actors < <(cut -f1 /opt/actor_venvs.tsv)
 (( ${#actors[@]} > 0 ))
-UV_OFFLINE=1 uv run --no-sync python -m nemo_rl.utils.prefetch_venvs --prebuilt "${actors[@]}"
+UV_OFFLINE=0 uv run --no-sync python -m nemo_rl.utils.prefetch_venvs --prebuilt "${actors[@]}"
 UV_OFFLINE=1 python tools/check_image_workers.py --output /opt/nemo-rl-image-qualification.json
 EOF
 
