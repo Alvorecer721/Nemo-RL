@@ -496,11 +496,6 @@ constraint-dependencies = [
   "opencv-python-headless>=5.0.0",            # CVE floor: patches CVE-2025-9951, CVE-2025-1594, CVE-2024-31582 (bundled FFmpeg 5.1.6 in 4.x)
 ]
 
-# Workaround for https://github.com/NVIDIA/cutlass/issues/3259: libs-base
-# and libs-cu13 wheels overlap and race on shared paths. libs-cu13 is a
-# functional superset at 4.5.2, so drop libs-base to make installs deterministic.
-exclude-dependencies = ["nvidia-cutlass-dsl-libs-base"]
-
 conflicts = [
   [
     { extra = "fsdp" },
@@ -716,6 +711,33 @@ requires-dist = [
   "pydantic-settings>=2.11.0,<3.0.0",
   "requests>=2.32.5,<3.0.0",
 ]
+
+# Workaround for https://github.com/NVIDIA/cutlass/issues/3259: at 4.5.x the
+# libs-base and libs-cu13 wheels overlap and race on shared paths, and libs-cu13
+# is a functional superset, so 4.5.x resolves without libs-base. From 4.6 the
+# wheels no longer overlap and libs-base brings libs-core (cutlass.cute), so
+# later versions keep their published metadata.
+[[tool.uv.dependency-metadata]]
+name = "nvidia-cutlass-dsl"
+version = "4.5.0"
+requires-dist = ["nvidia-cutlass-dsl-libs-cu13==4.5.0 ; extra == 'cu13'"]
+provides-extras = ["cu13"]
+
+[[tool.uv.dependency-metadata]]
+name = "nvidia-cutlass-dsl"
+version = "4.5.2"
+requires-dist = ["nvidia-cutlass-dsl-libs-cu13==4.5.2 ; extra == 'cu13'"]
+provides-extras = ["cu13"]
+
+[[tool.uv.dependency-metadata]]
+name = "nvidia-cutlass-dsl-libs-cu13"
+version = "4.5.0"
+requires-dist = ["numpy", "typing-extensions", "cuda-python>=12.8"]
+
+[[tool.uv.dependency-metadata]]
+name = "nvidia-cutlass-dsl-libs-cu13"
+version = "4.5.2"
+requires-dist = ["numpy", "typing-extensions", "cuda-python>=12.8"]
 
 # Override drain3 to relax cachetools==4.2.1 pin (conflicts with mlflow's cachetools>=5.0.0)
 # Tracking: https://github.com/logpai/Drain3/issues/119
