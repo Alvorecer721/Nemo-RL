@@ -122,6 +122,45 @@ def test_watcher_runs_on_the_hosts_of_every_node_in_the_job(tmp_path):
     assert "--environment" not in call and "--container" not in call
 
 
+def test_launcher_does_not_return_before_the_watcher_has_finished(tmp_path):
+    """A cancelled step ends srun at once; leaving then would kill the watcher with the job."""
+    srun = tmp_path / "srun"
+    srun.write_text('#!/bin/sh\nsleep 2\necho finished > "$WATCHER_DONE"\n')
+    srun.chmod(0o755)
+    env = dict(
+        os.environ,
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        WATCHER_DONE=str(tmp_path / "watcher.done"),
+        SLURM_JOB_ID="777",
+        SLURM_JOB_NUM_NODES="2",
+    )
+    script = "".join(
+        shell_function(name)
+        for name in (
+            "abort_stuck_image_mounts",
+            "watch_image_mounts",
+            "start_image_mount_watcher",
+            "wait_for_ray_cluster",
+            "finish_ray_cluster",
+        )
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script
+            + '(exit 7) &\npid=$!\nfinish_ray_cluster "$pid" 777.4 1\nrc=$?\n'
+            + '[ -e "$WATCHER_DONE" ] && echo watcher-finished-first\nexit $rc\n',
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 7, result.stderr
+    assert result.stdout.strip() == "watcher-finished-first"
+
+
 def watch(tmp_path, pids, seconds=3):
     """Run the watcher against a fake step cgroup holding ``pids`` and one connection with waiters."""
     task = tmp_path / "cgroup/slurmstepd.scope/job_777/step_4/user/task_1"

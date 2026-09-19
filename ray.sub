@@ -81,10 +81,12 @@ watch_image_mounts() {
 # while the shared step is ending.
 start_image_mount_watcher() {
   local step=$1
+  IMAGE_MOUNT_WATCHER_PID=""
   [[ "$step" =~ ^[0-9]+\.[0-9]+$ ]] || return 0
   timeout --kill-after=5s 200s srun --overlap --jobid="$SLURM_JOB_ID" --nodes="$SLURM_JOB_NUM_NODES" \
     --ntasks="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 --cpu-bind=none \
     bash -c "$(declare -f abort_stuck_image_mounts watch_image_mounts); watch_image_mounts ${step%%.*} ${step##*.} 180" &
+  IMAGE_MOUNT_WATCHER_PID=$!
 }
 
 # Ray daemons, engine cores and environment servers detach from the task that
@@ -141,6 +143,19 @@ wait_for_ray_cluster() {
     sleep 1
   done
   wait "$pid"
+}
+
+# The watcher lives in this job, so the launcher stays until it has finished. A
+# cancelled step ends srun at once, which is exactly when a mount can be stuck.
+finish_ray_cluster() {
+  local pid=$1 step=$2 grace=${3:-120} rc
+  start_image_mount_watcher "$step"
+  wait_for_ray_cluster "$pid" "$step" "$grace"
+  rc=$?
+  if [[ -n "$IMAGE_MOUNT_WATCHER_PID" ]]; then
+    wait "$IMAGE_MOUNT_WATCHER_PID" 2>/dev/null || true
+  fi
+  return "$rc"
 }
 
 # One script for every task of the shared srun: task 0 runs the head, the others
@@ -1415,8 +1430,7 @@ if [[ -n "$COMMAND" ]]; then
     fi
     touch "$LOG_DIR/ENDED"
     cluster_step=$(cat "$LOG_DIR/RAY_CLUSTER_STEP_ID" 2>/dev/null || true)
-    start_image_mount_watcher "$cluster_step"
-    wait_for_ray_cluster "${SRUN_PIDS["ray-cluster"]}" "$cluster_step"
+    finish_ray_cluster "${SRUN_PIDS["ray-cluster"]}" "$cluster_step"
     cluster_exit_code=$?
     set -e
     if [[ "$exit_code" -eq 0 && "$cluster_exit_code" -ne 0 ]]; then
