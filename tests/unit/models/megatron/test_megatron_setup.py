@@ -3697,6 +3697,69 @@ class TestSetupModelAndOptimizer:
 
         assert result.param_sync_func == mock_model_chunk.start_param_sync
 
+    @patch("nemo_rl.models.megatron.setup.ProcessGroupCollection")
+    @patch("nemo_rl.models.megatron.setup.GlobalState")
+    @patch("nemo_rl.models.megatron.setup.initialize_megatron")
+    @patch("nemo_rl.models.megatron.setup.set_jit_fusion_options")
+    @patch("nemo_rl.models.megatron.setup.init_checkpointing_context")
+    @patch("nemo_rl.models.megatron.setup.build_tokenizer")
+    @patch("nemo_rl.models.megatron.setup.get_model")
+    @patch("nemo_rl.models.megatron.setup.setup_optimizer")
+    @patch("nemo_rl.models.megatron.setup.load_checkpoint")
+    @patch("nemo_rl.models.megatron.setup.checkpoint_exists")
+    @patch("torch.distributed.all_reduce")
+    @patch("torch.distributed.barrier")
+    @patch("torch.tensor")
+    def test_configured_pretrained_checkpoint_that_cannot_be_loaded_raises(
+        self,
+        mock_tensor,
+        mock_barrier,
+        mock_all_reduce,
+        mock_checkpoint_exists,
+        mock_load_checkpoint,
+        mock_setup_optimizer,
+        mock_get_model,
+        mock_build_tokenizer,
+        mock_init_ckpt_context,
+        mock_set_jit,
+        mock_init_megatron,
+        mock_global_state,
+        mock_pg_collection,
+    ):
+        """A conversion cache without its tracker files must stop the run, not start it from random init."""
+        from nemo_rl.models.megatron.setup import setup_model_and_optimizer
+
+        mock_state = MagicMock()
+        mock_state.start_time = 0.0
+        mock_global_state.return_value = mock_state
+
+        mock_megatron_cfg = MagicMock()
+        mock_megatron_cfg.ft = None
+        mock_megatron_cfg.peft = None
+        mock_megatron_cfg.model.vocab_size = 32000
+        mock_megatron_cfg.model.make_vocab_size_divisible_by = 128
+        mock_megatron_cfg.model.tensor_model_parallel_size = 1
+        mock_megatron_cfg.checkpoint.load = None
+        mock_megatron_cfg.checkpoint.pretrained_checkpoint = "/cache/model__glm"
+
+        mock_get_model.return_value = [MagicMock()]
+        mock_setup_optimizer.return_value = (MagicMock(), MagicMock())
+
+        mock_tensor_instance = MagicMock()
+        mock_tensor_instance.item.return_value = 0.0
+        mock_tensor.return_value = mock_tensor_instance
+
+        mock_checkpoint_exists.return_value = False
+
+        with pytest.raises(ValueError, match="/cache/model__glm"):
+            setup_model_and_optimizer(
+                policy_cfg={"megatron_cfg": {"freeze_moe_router": False}},
+                megatron_cfg=mock_megatron_cfg,
+                load_optimizer=True,
+            )
+
+        mock_load_checkpoint.assert_not_called()
+
 
 @pytest.mark.mcore
 class TestSetupReferenceModelState:
