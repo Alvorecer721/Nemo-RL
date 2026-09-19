@@ -136,8 +136,10 @@ def watch(tmp_path, pids, seconds=3):
         + shell_function("watch_image_mounts")
         + f"watch_image_mounts 777 4 {seconds} {tmp_path}/cgroup {tmp_path}/connections {tmp_path}/fuse\n"
     )
-    subprocess.run(["bash", "-c", script], check=True, timeout=30)
-    return (connection / "abort").read_text().strip()
+    result = subprocess.run(
+        ["bash", "-c", script], check=True, timeout=30, capture_output=True, text=True
+    )
+    return (connection / "abort").read_text().strip(), result.stdout
 
 
 def holding(path):
@@ -149,7 +151,9 @@ def holding(path):
 def test_watcher_aborts_the_mount_once_its_daemon_is_all_that_is_left(tmp_path):
     daemon_process = holding(tmp_path / "fuse")
     try:
-        assert watch(tmp_path, [daemon_process.pid]) == "1"
+        aborted, log = watch(tmp_path, [daemon_process.pid])
+        assert aborted == "1"
+        assert "released a stuck image mount" in log
     finally:
         daemon_process.kill()
 
@@ -158,7 +162,7 @@ def test_watcher_leaves_the_mount_alone_while_the_task_still_runs(tmp_path):
     daemon_process = holding(tmp_path / "fuse")
     worker = subprocess.Popen(["sleep", "600"])
     try:
-        assert watch(tmp_path, [daemon_process.pid, worker.pid]) == ""
+        assert watch(tmp_path, [daemon_process.pid, worker.pid]) == ("", "")
     finally:
         daemon_process.kill()
         worker.kill()

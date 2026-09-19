@@ -51,6 +51,7 @@ abort_stuck_image_mounts() {
     waiting=$(cat "$conn/waiting" 2>/dev/null || echo 0)
     if (( waiting > 0 )); then
       echo 1 > "$conn/abort" || true
+      echo "[INFO] $(hostname): released a stuck image mount ($waiting requests waiting on $conn)"
     fi
   done
 }
