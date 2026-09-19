@@ -5,6 +5,8 @@ set -euo pipefail
 [[ $(git -C "$AP_EXPERIMENT_DIR" rev-parse HEAD) == "$AP_EXPECTED_SOURCE_HEAD" ]] || { echo 'Source HEAD drift'; exit 1; }
 [[ -z $(git -C "$AP_EXPERIMENT_DIR" status --porcelain --untracked-files=no) ]] || { echo 'Source dirty'; exit 1; }
 export PYTHONPATH=$AP_EXPERIMENT_DIR
+export NEMO_RL_IMAGE_VENVS=1
+export NEMO_RL_VENV_DIR=/opt/ray_venvs
 unset NRL_IGNORE_VERSION_MISMATCH
 /root/.local/bin/uv run --no-config --no-project --offline --python /opt/nemo_rl_venv/bin/python python - <<'PYRUNTIME'
 from infra.slurm.cscs.autoresearch.launch_gsm8k_baked import configure_baked_workers

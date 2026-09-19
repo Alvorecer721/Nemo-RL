@@ -19,9 +19,10 @@
 #   PHASE=build  build docker/Dockerfile.overlay from a committed checkout,
 #                export the SquashFS, and gate it.
 #
-# Required: BASE_SQSH, the release SquashFS to extend. Its registry tag is
-# derived from the file name, so the base must have been built by
-# build_nemo_rl_image.slurm on this scratch cache.
+# Required: BASE_SQSH, the release SquashFS to extend. The release receipt
+# beside it (BASE_RECEIPT) names the image in the persistent registry and its
+# vLLM version, so the base must have been built by build_nemo_rl_image.slurm
+# on this scratch cache.
 
 set -euo pipefail
 
@@ -33,7 +34,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-$SCRATCH_ROOT/ce-images/nemo-rl}
 REGISTRY_IMAGE_ARCHIVE=${REGISTRY_IMAGE_ARCHIVE:-$SCRATCH_ROOT/podman-cache/bootstrap/registry-3.oci}
 PHASE=${PHASE:-build}
 BASE_SQSH=${BASE_SQSH:?set BASE_SQSH to the release SquashFS to extend}
-VLLM_VERSION=0.26.0
+BASE_RECEIPT=${BASE_RECEIPT:-${BASE_SQSH%.sqsh}.release.json}
 NRL_IMAGE_PROFILE=${NRL_IMAGE_PROFILE:-apertus}
 case "$NRL_IMAGE_PROFILE" in
     full) NRL_ACTORS="" ;;
@@ -58,18 +59,10 @@ nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
     exit 2
 }
 
-BASE_NAME=$(basename "$BASE_SQSH" .sqsh)
-BASE_TAG=${BASE_NAME#nemo-rl-apertus-}
-[[ "$BASE_TAG" == vllm-${VLLM_VERSION}-* ]] || {
-    echo "BASE_SQSH name does not match nemo-rl-apertus-vllm-${VLLM_VERSION}-<source-id>.sqsh" >&2
-    exit 2
-}
-
 cd "$REPO_DIR"
 echo "Repository:  $REPO_DIR"
 echo "Phase:       $PHASE"
 echo "Base image:  $BASE_SQSH"
-echo "Base tag:    $BASE_TAG"
 
 if [[ "$PHASE" == lock ]]; then
     mkdir -p "$OUTPUT_DIR"
@@ -110,14 +103,32 @@ fi
     exit 1
 }
 
+[[ -r "$BASE_RECEIPT" ]] || {
+    echo "BASE_RECEIPT is not readable: $BASE_RECEIPT" >&2
+    exit 2
+}
+base_receipt_fields=$("$HOST_PYTHON" infra/slurm/cscs/image_release_receipt.py fields "$BASE_RECEIPT")
+mapfile -t base_fields <<< "$base_receipt_fields"
+BASE_RELEASE_IMAGE=${base_fields[0]}
+[[ "${base_fields[1]}" == "$(basename "$BASE_SQSH" .sqsh)" ]] || {
+    echo "BASE_RECEIPT describes ${base_fields[1]}, not $BASE_SQSH" >&2
+    exit 2
+}
+VLLM_VERSION=${base_fields[2]}
+echo "Base release: $BASE_RELEASE_IMAGE"
+
 SOURCE_COMMIT=$(git rev-parse HEAD)
 SOURCE_REV=${SOURCE_COMMIT:0:12}
 SUBMODULE_STATUS=$(git submodule status --recursive)
+if grep -E '^[-+U]' <<< "$SUBMODULE_STATUS" >&2; then
+    echo "Submodules are not checked out at their pins; run git submodule update --init --recursive" >&2
+    exit 1
+fi
 BUILD_INPUTS_SHA256=$(
     {
         printf 'commit\0%s\0' "$SOURCE_COMMIT"
         printf 'submodules\0%s\0' "$SUBMODULE_STATUS"
-        printf 'base_release\0%s\0' "$BASE_TAG"
+        printf 'base_release\0%s\0' "$BASE_RELEASE_IMAGE"
         printf 'image_profile\0%s\0' "$NRL_IMAGE_PROFILE"
         printf 'actors\0%s\0' "$NRL_ACTORS"
         printf 'platform\0linux/arm64\0'
@@ -171,8 +182,22 @@ mkdir -p "$OUTPUT_DIR"
 SOURCE_CONTEXT="$PODMAN_STORAGE_BASE/source-context"
 rm -rf "$SOURCE_CONTEXT"
 mkdir -p "$SOURCE_CONTEXT"
-git ls-files -z \
-    | grep --null-data --invert-match '^3rdparty/' \
+"$HOST_PYTHON" infra/slurm/cscs/image_release_receipt.py fingerprint "$BASE_RECEIPT" \
+    > "$PODMAN_STORAGE_BASE/base-fingerprint.json"
+shipped=$(
+    NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64 "$HOST_PYTHON" \
+        tools/restamp_overlay_fingerprint.py shipped-submodules \
+        "$PODMAN_STORAGE_BASE/base-fingerprint.json" --lock uv.lock
+)
+SHIPPED_SUBMODULES=()
+[[ -z "$shipped" ]] || mapfile -t SHIPPED_SUBMODULES <<< "$shipped"
+echo "Shipped submodules: ${SHIPPED_SUBMODULES[*]:-none}"
+{
+    git ls-files -z | grep --null-data --invert-match '^3rdparty/'
+    if ((${#SHIPPED_SUBMODULES[@]})); then
+        git ls-files -z --recurse-submodules -- "${SHIPPED_SUBMODULES[@]}"
+    fi
+} \
     | tar --create --file=- --no-recursion --null --files-from=- \
     | tar --extract --file=- --directory="$SOURCE_CONTEXT"
 
@@ -216,15 +241,10 @@ load_registry_image
 start_local_registry
 trap stop_local_registry EXIT
 
-BASE_RELEASE_IMAGE="${LOCAL_REGISTRY}/nemo-rl-apertus:${BASE_TAG}"
-curl --fail --silent --output /dev/null \
-    --header 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
-    "http://${LOCAL_REGISTRY}/v2/nemo-rl-apertus/manifests/${BASE_TAG}" || {
-    echo "Base release ${BASE_TAG} is not in the persistent registry; rebuild it with build_nemo_rl_image.slurm" >&2
+podman pull --tls-verify=false "$BASE_RELEASE_IMAGE" || {
+    echo "Base release $BASE_RELEASE_IMAGE is not in the persistent registry; rebuild it with build_nemo_rl_image.slurm" >&2
     exit 1
 }
-echo "Base release: $BASE_RELEASE_IMAGE"
-podman pull --tls-verify=false "$BASE_RELEASE_IMAGE"
 
 podman build \
     --layers \
@@ -237,6 +257,7 @@ podman build \
     --build-arg "NEMO_RL_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
     --build-arg "NEMO_RL_BUILD_FINGERPRINT_B64=$BUILD_FINGERPRINT_B64" \
     --build-arg "NRL_ACTORS=$NRL_ACTORS" \
+    --build-arg "SHIPPED_SUBMODULES=${SHIPPED_SUBMODULES[*]}" \
     --tag "$IMAGE" \
     "$SOURCE_CONTEXT"
 
