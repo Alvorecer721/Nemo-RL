@@ -1,4 +1,4 @@
-image = "/iopsstor/scratch/cscs/xyixuan/ce-images/nemo-rl/nemo-rl-apertus-vllm-0.26.0-7197ac71505b-4b083e73f774.sqsh"
+image = "/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus-vllm-0.29.0-376a398a8005-daff4285ee30.sqsh"
 mounts = ["/capstor", "/iopsstor", "/users"]
 writable = true
 workdir = "/opt/nemo-rl"
@@ -23,3 +23,6 @@ FI_CXI_DEFAULT_TX_SIZE = "16384"
 FI_CXI_RX_MATCH_MODE = "software"
 FI_CXI_SAFE_DEVMEM_COPY_THRESHOLD = "16777216"
 FI_CXI_COMPAT = "0"
+TRITON_CACHE_DIR = "/tmp/nemo_rl_jit/triton"
+VLLM_CACHE_ROOT = "/tmp/nemo_rl_jit/vllm"
+TILELANG_CACHE_DIR = "/tmp/nemo_rl_jit/tilelang"

@@ -29,7 +29,7 @@ SOURCE_STATUS=$(git -C "$REPO_DIR" status \
   .gitmodules \
   3rdparty \
   infra/slurm/cscs/environments/nemo_rl_vllm0251.toml \
-  infra/slurm/cscs/environments/nemo_rl_vllm026.toml \
+  infra/slurm/cscs/environments/nemo_rl_vllm029.toml \
   examples/configs \
   examples/prompts \
   examples/run_grpo_single_controller.py \

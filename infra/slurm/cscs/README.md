@@ -108,7 +108,7 @@ The selected names enter the dependency manifest and cache identity. The shared
 actor registry defines dependencies and validates names without importing CSCS
 configuration.
 
-`infra/slurm/cscs/environments/nemo_rl_vllm026_ncclext.toml` selects the built overlay. The bounded
+`infra/slurm/cscs/environments/nemo_rl_vllm029.toml` selects the built overlay. The bounded
 probe is `AP_VARIANT=8b-smoke bash infra/slurm/cscs/autoresearch/submit_apertus_bench.sh`: three nodes, two updates,
 trainer TP2/PP2 and rollout TP2/PP1. The wrapper also provides `70b-bench`;
 it accepts only variants whose recipes are present. These recipes are separate
