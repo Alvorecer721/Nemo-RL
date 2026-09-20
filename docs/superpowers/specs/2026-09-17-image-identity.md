@@ -147,7 +147,7 @@ classification reads `uv.lock` with `tomllib`; nothing is downloaded.
 Each launch environment TOML under `infra/slurm/cscs/environments/` gets a
 sibling `<name>.fingerprint.json`, the verbatim stamp of the image it selects.
 The fork CI gate runs the verdict against the environment the sync line uses
-(`nemo_rl_vllm026.toml`) on every PR and writes the verdict to the job
+(`nemo_rl_vllm029.toml`) on every PR and writes the verdict to the job
 summary. The assemble script verifies the committed copy equals the image's
 stamp so the two cannot drift.
 
