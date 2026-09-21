@@ -590,6 +590,26 @@ def test_apply_vllm_patches_gates_nemotron_h_fp32_lm_head(monkeypatch, enabled):
         assert captured_extra_env_vars == [["USER_VAR"]]
 
 
+@pytest.mark.parametrize("pipeline_parallel", [False, True])
+def test_pipeline_correctness_patches_do_not_require_route_export(
+    monkeypatch, pipeline_parallel
+):
+    _install_fake_vllm_modules(monkeypatch)
+    _stub_non_fp32_vllm_patches(monkeypatch, [])
+    called = []
+    monkeypatch.setattr(
+        patches, "patch_pipeline_sampled_tokens", lambda: called.append("tokens")
+    )
+    monkeypatch.setattr(
+        patches, "patch_pipeline_hidden_states", lambda: called.append("hidden")
+    )
+    monkeypatch.setattr(
+        patches, "patch_pipeline_routed_experts", lambda: called.append("routes")
+    )
+    patches._apply_vllm_patches("py", pipeline_parallel=pipeline_parallel)
+    assert called == (["tokens", "hidden"] if pipeline_parallel else [])
+
+
 def test_apply_vllm_patches_ignores_ambient_fp32_lm_head_env_toggle(monkeypatch):
     _install_fake_vllm_modules(monkeypatch)
     monkeypatch.setenv(patches.VLLM_NEMOTRON_H_FP32_LM_HEAD_ENV_VAR, "1")

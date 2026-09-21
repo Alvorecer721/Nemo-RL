@@ -19,6 +19,9 @@ from importlib.util import find_spec
 from nemo_rl.models.generation.vllm.config import (
     VLLM_NEMOTRON_H_FP32_LM_HEAD_ENV_VAR,
 )
+from nemo_rl.models.generation.vllm.pipeline_hidden_states import (
+    patch_pipeline_hidden_states,
+)
 from nemo_rl.models.generation.vllm.pipeline_routed_experts import (
     patch_pipeline_routed_experts,
 )
@@ -973,6 +976,7 @@ def _apply_vllm_patches(
 ) -> None:
     if pipeline_parallel:
         patch_pipeline_sampled_tokens()
+        patch_pipeline_hidden_states()
     if pipeline_routed_experts:
         patch_pipeline_routed_experts()
 
