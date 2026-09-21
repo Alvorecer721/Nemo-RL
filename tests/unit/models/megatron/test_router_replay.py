@@ -18,6 +18,26 @@ import pytest
 import torch
 
 
+@pytest.mark.parametrize(
+    "num_layers,frequency,expected",
+    [
+        (4, 1, (True,) * 4),
+        (5, 2, (True, False, True, False, True)),
+        (4, [0, 1, 1, 0], (False, True, True, False)),
+        (78, [0] * 3 + [1] * 75, (False,) * 3 + (True,) * 75),
+    ],
+)
+def test_router_replay_layer_mask_uses_global_model_layers(
+    num_layers, frequency, expected
+):
+    from nemo_rl.models.megatron.router_replay import router_replay_layer_mask
+
+    config = SimpleNamespace(
+        num_layers=num_layers, moe_layer_freq=frequency, mtp_num_layers=1
+    )
+    assert router_replay_layer_mask(config) == expected
+
+
 @pytest.mark.mcore
 def test_configure_vllm_for_router_replay_preserves_prefix_cache():
     from nemo_rl.models.megatron.router_replay import (

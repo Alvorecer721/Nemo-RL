@@ -19,6 +19,9 @@ from importlib.util import find_spec
 from nemo_rl.models.generation.vllm.config import (
     VLLM_NEMOTRON_H_FP32_LM_HEAD_ENV_VAR,
 )
+from nemo_rl.models.generation.vllm.pipeline_routed_experts import (
+    patch_pipeline_routed_experts,
+)
 
 
 def _get_vllm_file(relative_path: str) -> str:
@@ -962,7 +965,11 @@ def _apply_vllm_patches(
     *,
     extra_env_vars: list[str] | None = None,
     nemotron_h_fp32_lm_head: bool | None = None,
+    pipeline_routed_experts: bool = False,
 ) -> None:
+    if pipeline_routed_experts:
+        patch_pipeline_routed_experts()
+
     # Import lazily so importing the worker module does not import vLLM.
     import vllm.envs as envs
     from vllm.logger import init_logger

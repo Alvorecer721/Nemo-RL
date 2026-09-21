@@ -14,6 +14,7 @@ from typing import Any
 
 import ray
 
+from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.models.policy.utils import get_runtime_env_for_policy_worker
 from nemo_rl.models.policy.workers.megatron_policy_worker import (
     MegatronPolicyWorkerImpl,
@@ -31,3 +32,9 @@ class PipelineRefitMegatronWorker(MegatronPolicyWorkerImpl):
 
     def inspect_refit_weights(self) -> dict[str, Any]:
         return inspect_megatron_destination(self)
+
+    def get_unreplayed_logprobs(
+        self, *, data: BatchedDataDict[Any]
+    ) -> BatchedDataDict[Any]:
+        """Paired control with identical weights and ordinary Megatron routing."""
+        return self.get_logprobs(data=data, require_router_replay=False)

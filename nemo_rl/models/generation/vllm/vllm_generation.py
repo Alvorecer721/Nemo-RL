@@ -171,12 +171,19 @@ class VllmGeneration(GenerationInterface):
         """
         # Store config
         self.cfg = config
-        self._defer_model_load = defer_model_load
         self.weight_synchronizer: WeightSynchronizer | None = None
         self.tp_size = self.cfg["vllm_cfg"]["tensor_parallel_size"]
         self.pp_size = self.cfg["vllm_cfg"]["pipeline_parallel_size"]
         self.ep_size = self.cfg["vllm_cfg"]["expert_parallel_size"]
         self.model_parallel_size = self.tp_size * self.pp_size
+        # Pipeline route export patches node-local vLLM sources. Start nested
+        # engines only after every outer actor has finished installing them.
+        self._defer_model_load = defer_model_load or (
+            self.pp_size > 1
+            and self.cfg.get("vllm_kwargs", {}).get(
+                "enable_return_routed_experts", False
+            )
+        )
 
         assert cluster.world_size() % self.model_parallel_size == 0, (
             "World size must be a multiple of model parallel size. "
@@ -280,7 +287,7 @@ class VllmGeneration(GenerationInterface):
             worker_cls = extension_fqn
         if self.cfg["vllm_cfg"]["async_engine"]:
             worker_builder = RayWorkerBuilder(
-                worker_cls, config, defer_model_load=defer_model_load
+                worker_cls, config, defer_model_load=self._defer_model_load
             )
         else:
             worker_builder = RayWorkerBuilder(worker_cls, config)
@@ -362,6 +369,8 @@ class VllmGeneration(GenerationInterface):
             # the heavy model loading (and HTTP server start) to load_and_start().
             self.dp_openai_server_base_urls = self._collect_reserved_urls()
             self.device_uuids = None
+        elif self._defer_model_load:
+            self.load_and_start()
         else:
             # Full init: call some collective rpc functions in the worker when
             # initializing the vLLM engine (necessary for async engine to work),
@@ -598,6 +607,11 @@ class VllmGeneration(GenerationInterface):
         heavy model loading. Updates dp_openai_server_base_urls with the actual
         running server URLs and populates device_uuids.
         """
+        # Actor factories return handles before constructors finish. Include
+        # nonleaders: their nodes must have compatible vLLM sources before any
+        # model owner creates its nested GPU workers.
+        ray.get(self.worker_group.run_all_workers_single_data("is_alive"))
+
         # Call load_model() on all model-owner workers
         futures = self.worker_group.run_all_workers_single_data(
             "load_model",
@@ -896,6 +910,13 @@ class VllmGeneration(GenerationInterface):
         # post_init and the URL report stay unconditional -- eager startup runs both too,
         # from VllmGeneration.__init__ rather than from load_and_start.
         if self._defer_model_load:
+            if self.model_parallel_size > 1:
+                ray.get(
+                    [
+                        self.worker_group.workers[index].is_alive.remote()
+                        for index in worker_indices
+                    ]
+                )
             ray.get(leader.load_model.remote())
         method_name = (
             "post_init_async" if self.cfg["vllm_cfg"]["async_engine"] else "post_init"
