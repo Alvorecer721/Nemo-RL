@@ -1,0 +1,64 @@
+# Forty-step Apertus 1.5 Math-with-Judge POC.  The launcher prepares the same
+# DeepScaler train split used by the standard Apertus probe into this Gym row
+# format, so 40 updates consume 160 distinct source prompts instead of repeating
+# the five-row integration fixture.
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe-gym-remote.yaml
+
+data:
+  shuffle: false
+  train:
+    data_path: ${oc.env:MATH_WITH_JUDGE_TRAIN_PATH}
+    repeat: 1
+    split_validation_size: null
+  validation: null
+
+grpo:
+  # Four prompt groups with four samples each keeps the 16-rollout batch used
+  # by the remote Gym probe.  num_generations_per_prompt is the GRPO setting
+  # corresponding to a rollout "max generations" count.
+  num_prompts_per_step: 4
+  num_generations_per_prompt: 4
+  max_num_epochs: 1
+  max_num_steps: 40
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+
+policy:
+  train_global_batch_size: 16
+  # Apertus needs room to reason on DeepScaler; the sibling Gym reasoning
+  # recipe documents flat rewards with the inherited 2048/512-token budget.
+  max_total_sequence_length: 8192
+  # At this 8K budget, a generated sequence already fills a microbatch.  The
+  # packed logprob path can give tensor-parallel peers different microbatch
+  # schedules when rollout lengths differ, leading to a mismatched NCCL
+  # collective. Dense microbatches keep every peer on the same schedule.
+  sequence_packing:
+    enabled: false
+  generation:
+    max_new_tokens: 7680
+    vllm_cfg:
+      max_model_len: 8192
+
+env:
+  should_log_nemo_gym_responses: false
+  nemo_gym:
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          uses_reasoning_parser: false
+          extra_body:
+            chat_template_kwargs:
+              enable_thinking: true
+
+logger:
+  log_dir: logs/grpo-apertus-gym-math-with-judge
+  wandb_enabled: true
+  # Do not upload unrestricted full_result payloads: they can carry verifier
+  # metadata or hidden state.
+  metric_denylist: []
+  wandb:
+    entity: anunay-yadav-epfl
+    project: nemo-gym
+    name: ap1p5-math_with_judge-40step
+    log_nemo_gym_full_result_tables: false

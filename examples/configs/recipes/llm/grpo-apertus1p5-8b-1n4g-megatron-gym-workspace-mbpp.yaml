@@ -1,0 +1,51 @@
+# Published MBPP function-level coding tasks, not a SWE-bench evaluation.
+# Prepare the official train/validation splits with prepare_mbpp_workspace.py.
+defaults: grpo-apertus1p5-8b-1n4g-megatron-probe-gym.yaml
+
+data:
+  max_input_seq_length: 8192
+  shuffle: true
+  train:
+    data_path: outputs/apertus-mbpp/mbpp_train.jsonl
+    repeat: 1
+  validation:
+    data_path: outputs/apertus-mbpp/mbpp_validation.jsonl
+
+grpo:
+  num_prompts_per_step: 1
+  num_generations_per_prompt: 4
+  max_num_epochs: 1
+  max_num_steps: 40
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+
+policy:
+  train_global_batch_size: 4
+  max_total_sequence_length: 8192
+  generation:
+    max_new_tokens: 512
+    vllm_cfg:
+      max_model_len: 8192
+
+env:
+  should_log_nemo_gym_responses: false
+  nemo_gym:
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/workspace_swe/configs/workspace_swe_remote.yaml
+    workspace_swe_gymnasium_agent:
+      responses_api_agents:
+        gymnasium_agent:
+          max_steps: 8
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          propagate_required_prefix_token_ids: true
+
+logger:
+  log_dir: logs/grpo-apertus-gym-workspace-mbpp
+  wandb_enabled: true
+  wandb:
+    name: ap1p5-workspace-mbpp
+    log_nemo_gym_full_result_tables: false
