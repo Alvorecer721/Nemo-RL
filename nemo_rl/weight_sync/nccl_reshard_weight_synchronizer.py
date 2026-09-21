@@ -52,6 +52,7 @@ from nemo_rl.weight_sync.membership import (
     should_rebuild,
 )
 from nemo_rl.weight_sync.nccl_reshard_utils import (
+    finalize_nccl_reshard_refit_info,
     make_nccl_reshard_refit_info_wire_safe,
 )
 
@@ -309,7 +310,6 @@ class NcclReshardWeightSynchronizer(WeightSynchronizer):
         #    model_update_group; the workers run the misc broadcast strictly
         #    after the bulk reshard (concurrent communicators can deadlock).
         pp_size = train_parallelism["pp_size"]
-        train_gpus_per_node = self._train_cluster.num_gpus_per_node
         train_ranks_per_stage = train_world_size // pp_size
         sub_world_size = train_ranks_per_stage + inference_world_size
         pp_stages = [r // train_ranks_per_stage for r in range(train_world_size)]
@@ -318,9 +318,15 @@ class NcclReshardWeightSynchronizer(WeightSynchronizer):
         pp_ips: list[str] = []
         pp_ports: list[int] = []
         for stage in range(pp_size):
-            node_idx = stage * train_ranks_per_stage // train_gpus_per_node
+            # The TCPStore master runs on this stage's first training worker.
+            # A unified placement group can span several nodes and reorder its
+            # bundles; a node index with bundle zero does not locate that worker.
+            leader = self._policy.worker_group.worker_metadata[
+                stage * train_ranks_per_stage
+            ]
+            pg_idx, bundle_indices = leader["bundle_indices"]
             stage_ip, stage_port = self._train_cluster.get_available_address_and_port(
-                pg_idx=node_idx, bundle_idx=0
+                pg_idx=pg_idx, bundle_idx=bundle_indices[0]
             )
             pp_ips.append(stage_ip)
             pp_ports.append(stage_port)
@@ -372,6 +378,15 @@ class NcclReshardWeightSynchronizer(WeightSynchronizer):
         wire_refit_info = make_nccl_reshard_refit_info_wire_safe(
             nccl_reshard_refit_info
         )
+        if gen_parallelism["pp_size"] > 1:
+            manifests = self._generation.discover_nccl_reshard_destination(
+                wire_refit_info
+            )
+            finalized = finalize_nccl_reshard_refit_info(
+                wire_refit_info, manifests, gen_parallelism
+            )
+            wire_refit_info = make_nccl_reshard_refit_info_wire_safe(finalized)
+            self._policy.install_nccl_reshard_refit_info(wire_refit_info)
         self._generation.prepare_nccl_reshard_refit_info(wire_refit_info)
         self._built_membership = membership
 

@@ -18,7 +18,10 @@ import inspect
 import logging
 import os
 import sys
-from typing import Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
+
+if TYPE_CHECKING:
+    from nemo_rl.weight_sync.nccl_reshard_utils import DestinationRefitManifest
 
 import ray
 import torch
@@ -1365,6 +1368,14 @@ class VllmGenerationWorkerImpl(VllmCheckpointEngineRpcMixin, BaseVllmGenerationW
                 train_ranks_per_stage,
                 sub_world_size,
             ),
+        )
+
+    def discover_nccl_reshard_destination(
+        self, refit_info: dict
+    ) -> list["DestinationRefitManifest"]:
+        """Collect ownership from all tensor/pipeline workers in this engine."""
+        return self.llm.collective_rpc(
+            "discover_nccl_reshard_destination", args=(refit_info,)
         )
 
     def prepare_nccl_reshard_refit_info(self, refit_info: dict) -> None:

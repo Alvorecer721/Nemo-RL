@@ -31,7 +31,16 @@ live in ``nemo_rl/weight_sync/xferdtensor.py`` — import both from there.
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Protocol, runtime_checkable
+from itertools import product
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Optional,
+    Protocol,
+    TypedDict,
+    runtime_checkable,
+)
 
 import torch
 from torch.distributed._tensor import Shard
@@ -57,6 +66,172 @@ class MeshInfo:
     @property
     def ndim(self):
         return self.mesh.ndim
+
+
+class DestinationShardMetadata(TypedDict):
+    """Logical wire storage for a locally owned HF parameter (no tensors)."""
+
+    shape: list[int]
+    dtype: str
+
+
+class DestinationRefitManifest(TypedDict):
+    """A worker's actual model coordinates and locally owned bulk parameters.
+
+    ``rank`` is the dense generation rank in the current refit communicator.
+    Parallel coordinates belong to the model's process groups, not refit's rank
+    order. DP labels may have gaps after a complete engine is removed.
+    """
+
+    rank: int
+    pp_rank: int
+    tp_rank: int
+    dp_rank: int
+    ep_rank: int
+    etp_rank: int
+    edp_rank: int
+    params: dict[str, DestinationShardMetadata]
+
+
+def finalize_nccl_reshard_refit_info(
+    refit_info: dict[str, Any],
+    manifests: list[DestinationRefitManifest],
+    gen_parallelism: dict[str, int],
+) -> dict[str, Any]:
+    """Validate destination ownership and return a fresh per-parameter plan.
+
+    Every logical shard must exist in every replica on its owning PP stage.
+    Vocabulary weights may have complete copies on several PP stages, as in
+    vLLM's Qwen3 MoE. Decoder weights must have exactly one owning stage.
+    Backend rank order and uneven layer partitions do not enter the arithmetic:
+    the mesh is built from reported model coordinates. PP aliases of tied vocab
+    weights continue to use the ordered misc-weight import path.
+    """
+    world = refit_info["gen_world_size"]
+    tp = gen_parallelism.get("tp_size", 1)
+    ep = gen_parallelism.get("ep_size", 1)
+    etp = gen_parallelism.get("etp_size", tp if ep == 1 else 1)
+    pp = gen_parallelism.get("pp_size", 1)
+    if min(tp, ep, etp, pp) < 1 or world % (tp * pp) or world % (etp * ep * pp):
+        raise ValueError(
+            f"Invalid destination parallelism {gen_parallelism} for {world} ranks"
+        )
+    if len(manifests) != world or {m["rank"] for m in manifests} != set(range(world)):
+        raise ValueError(
+            "Destination manifests must cover each generation rank exactly once"
+        )
+
+    # Validate the entire worker topology, including stages with no bulk weights.
+    # EP's data-parallel grid can differ from the non-expert TP/DP grid.
+    grids: list[
+        tuple[
+            list[int],
+            tuple[Literal["tp_rank", "ep_rank", "etp_rank"], ...],
+            tuple[int, ...],
+        ]
+    ] = []
+    for replica_key, shard_keys, shard_sizes in (
+        ("dp_rank", ("tp_rank",), (tp,)),
+        ("edp_rank", ("ep_rank", "etp_rank"), (ep, etp)),
+    ):
+        replicas = sorted({m[replica_key] for m in manifests})
+        expected = set(
+            product(range(pp), replicas, *(range(size) for size in shard_sizes))
+        )
+        actual = {
+            (m["pp_rank"], m[replica_key], *(m[key] for key in shard_keys))
+            for m in manifests
+        }
+        if len(actual) != world or actual != expected:
+            raise ValueError(
+                f"Incomplete or duplicate destination {replica_key} topology"
+            )
+        grids.append((replicas, shard_keys, shard_sizes))
+
+    plan = restore_refit_info_placements(
+        make_nccl_reshard_refit_info_wire_safe(refit_info)
+    )
+    params = [
+        p for layer in plan["layer_names"] for p in plan["per_layer_params"][layer]
+    ]
+    names = {p["name"] for p in params}
+    for manifest in manifests:
+        unknown = manifest["params"].keys() - names
+        if unknown:
+            raise ValueError(
+                f"Destination rank {manifest['rank']} reported unknown weights: {sorted(unknown)}"
+            )
+    offset = plan["train_world_size"] // plan["pp_size"]
+    for param in params:
+        name = param["name"]
+        expert = is_expert_param(name)
+        replicas, shard_keys, shard_sizes = grids[int(expert)]
+        replica_key = "edp_rank" if expert else "dp_rank"
+        owners = [m for m in manifests if name in m["params"]]
+        stages = sorted({m["pp_rank"] for m in owners})
+        coordinates = {
+            (m["pp_rank"], m[replica_key], *(m[key] for key in shard_keys)): m
+            for m in owners
+        }
+        expected = list(
+            product(stages, replicas, *(range(size) for size in shard_sizes))
+        )
+        if (
+            not owners
+            or len(coordinates) != len(owners)
+            or set(coordinates) != set(expected)
+            or (len(stages) != 1 and not name.endswith(VOCAB_PARALLEL_SUFFIXES))
+        ):
+            raise ValueError(
+                f"Incomplete or duplicate destination ownership for {name!r}"
+            )
+
+        # Include only actual owners. Complete vocabulary copies on different
+        # stages share the replica axis; decoder weights have only one stage.
+        mesh, dim_map = build_mesh_info(
+            len(owners),
+            rank_offset=0,
+            tp_size=etp if expert else tp,
+            ep_size=ep if expert else 1,
+        )
+        mesh.mesh.copy_(
+            torch.tensor([offset + coordinates[c]["rank"] for c in expected]).reshape(
+                mesh.mesh.shape
+            )
+        )
+        placements = get_placements(name, dim_map, len(param["global_shape"]))
+        mesh_shape = tuple(mesh.mesh.shape)
+        for flat_index, coordinate in enumerate(expected):
+            manifest = coordinates[coordinate]
+            local = manifest["params"][name]
+            logical_shape = list(param["global_shape"])
+            # Same ceil/chunk geometry used by xferdtensor, including empty tails.
+            remainder = flat_index
+            mesh_coordinate = [0] * len(mesh_shape)
+            for axis in reversed(range(len(mesh_shape))):
+                mesh_coordinate[axis] = remainder % mesh_shape[axis]
+                remainder //= mesh_shape[axis]
+            for axis, placement in enumerate(placements):
+                if isinstance(placement, Shard):
+                    dim = placement.dim
+                    chunk = (logical_shape[dim] + mesh_shape[axis] - 1) // mesh_shape[
+                        axis
+                    ]
+                    logical_shape[dim] = max(
+                        0,
+                        min(chunk, logical_shape[dim] - mesh_coordinate[axis] * chunk),
+                    )
+            if list(local["shape"]) != logical_shape or str(local["dtype"]) != str(
+                param["dtype"]
+            ):
+                raise ValueError(
+                    f"Destination {name!r} rank {manifest['rank']} reports {local}; "
+                    f"expected shape={logical_shape}, dtype={param['dtype']}"
+                )
+        param["dst_mesh_info"] = mesh
+        param["dst_placements"] = placements
+    plan["destination_ownership_validated"] = True
+    return plan
 
 
 # =========================================================================
@@ -99,6 +274,10 @@ class LocalParamSpec:
     base: Any
     pre: Optional[Callable[[Any], "RefitCtx"]] = None
     post: Optional[Callable[["RefitCtx"], None]] = None
+    # Logical wire storage may differ from base (a fused or quantized tensor).
+    # Explicit metadata lets ownership discovery avoid invoking allocating hooks.
+    wire_shape: tuple[int, ...] | None = None
+    wire_dtype: torch.dtype | None = None
 
 
 @dataclass
@@ -110,11 +289,48 @@ class HFToLocalParamMap:
 
     specs: dict[str, LocalParamSpec] = field(default_factory=dict)
 
+    def local_metadata(self) -> dict[str, DestinationShardMetadata]:
+        """Describe wire buffers without allocating them or running refit hooks."""
+        metadata: dict[str, DestinationShardMetadata] = {}
+        for name, spec in self.specs.items():
+            shape, dtype = spec.wire_shape, spec.wire_dtype
+            if isinstance(spec.base, torch.Tensor):
+                shape = tuple(spec.base.shape) if shape is None else shape
+                dtype = spec.base.dtype if dtype is None else dtype
+            if shape is None or dtype is None:
+                raise ValueError(f"Destination {name!r} has no logical wire metadata")
+            metadata[name] = {"shape": list(shape), "dtype": str(dtype)}
+        return metadata
+
     def get(
         self, hf_name: str, default: Optional[LocalParamSpec] = None
     ) -> Optional[LocalParamSpec]:
         """Spec for ``hf_name`` or ``default`` (``None``); loops assert non-None."""
         return self.specs.get(hf_name, default)
+
+
+def validate_destination_param_map(
+    refit_info: dict[str, Any], param_map: HFToLocalParamMap, *, rank: int
+) -> None:
+    """Fail before payload if a PP worker cannot implement the finalized plan."""
+    if refit_info.get("gen_pp_size", 1) == 1:
+        return
+    if not refit_info.get("destination_ownership_validated"):
+        raise ValueError(
+            "Generation PP requires a validated destination ownership plan"
+        )
+    expected = {
+        p["name"]
+        for layer in refit_info["layer_names"]
+        for p in refit_info["per_layer_params"][layer]
+        if rank in p["dst_mesh_info"].mesh
+    }
+    actual = set(param_map.specs)
+    if actual != expected:
+        raise ValueError(
+            f"Destination rank {rank} disagrees with the finalized plan: "
+            f"missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
+        )
 
 
 # =========================================================================
@@ -794,14 +1010,6 @@ def check_nccl_reshard_refit_support(master_config: Any) -> None:
                     "policy.megatron_cfg.fp8_cfg.fp8_param=True requires "
                     "policy.megatron_cfg.fp8_cfg.enabled=True."
                 )
-            gen_pp = mcore_generation_cfg.get("pipeline_model_parallel_size", 1)
-            if gen_pp != 1:
-                violations.append(
-                    "policy.generation.mcore_generation_config."
-                    "pipeline_model_parallel_size must be 1 for nccl_reshard refit "
-                    f"(got {gen_pp})."
-                )
-
             gen_fp8_cfg = mcore_generation_cfg.get("fp8_cfg", {}) or {}
             if gen_fp8_cfg.get("enabled") and gen_fp8_cfg.get("fp8_recipe") != "mxfp8":
                 violations.append(
@@ -851,11 +1059,10 @@ def check_nccl_reshard_refit_support(master_config: Any) -> None:
     # Gen-backend restrictions. The reshard supports gen-side TP, DP, EP, and
     # Megatron ETP. The vLLM backend shards experts by index across
     # its TP ranks, so its EP is either 1 (TP-sharded experts) or equal to TP
-    # (EP-sharded). PP is not yet supported gen-side.
+    # (EP-sharded). PP ownership is discovered from the loaded generation model.
     if backend == "vllm":
         gen_tp = vllm_cfg.get("tensor_parallel_size", 1)
         gen_ep = vllm_cfg.get("expert_parallel_size", 1)
-        gen_pp = vllm_cfg.get("pipeline_parallel_size", 1)
         # Megatron-source ETP has unit coverage but has not been fully tested
         # end to end with a vLLM destination. Keep it disabled until it has.
         train_etp = megatron_cfg.get("expert_tensor_parallel_size", 1)
@@ -869,10 +1076,6 @@ def check_nccl_reshard_refit_support(master_config: Any) -> None:
             violations.append(
                 "policy.generation.vllm_cfg.expert_parallel_size must be 1 or "
                 f"equal to tensor_parallel_size (got ep={gen_ep}, tp={gen_tp})."
-            )
-        if gen_pp != 1:
-            violations.append(
-                f"policy.generation.vllm_cfg.pipeline_parallel_size must be 1 (got {gen_pp})."
             )
 
     if violations:
@@ -1067,4 +1270,7 @@ def build_nccl_reshard_refit_info(
         "gen_world_size": gen_world_size,
         "pp_size": pp_size,
         "gen_tp_size": gen_parallelism.get("tp_size", 1),
+        "gen_pp_size": gen_pp,
+        "gen_ep_size": gen_ep,
+        "gen_etp_size": gen_etp,
     }

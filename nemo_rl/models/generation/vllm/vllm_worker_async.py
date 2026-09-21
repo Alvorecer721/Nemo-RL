@@ -24,7 +24,13 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, AsyncGenerator, Optional, cast
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nemo_rl.weight_sync.nccl_reshard_utils import DestinationRefitManifest
+
 import ray
+
 import torch
 import uvicorn
 from fastapi import FastAPI
@@ -1994,6 +2000,14 @@ class VllmAsyncGenerationWorkerImpl(
                 train_ranks_per_stage,
                 sub_world_size,
             ),
+        )
+
+    async def discover_nccl_reshard_destination_async(
+        self, refit_info: dict
+    ) -> list["DestinationRefitManifest"]:
+        """Collect ownership from all tensor/pipeline workers in this engine."""
+        return await self.llm.collective_rpc(
+            "discover_nccl_reshard_destination", args=(refit_info,)
         )
 
     async def prepare_nccl_reshard_refit_info_async(self, refit_info: dict) -> None:

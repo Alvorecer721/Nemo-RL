@@ -143,6 +143,7 @@ from nemo_rl.weight_sync.nccl_reshard_utils import (
     build_nccl_reshard_refit_info,
     is_nccl_reshard_param,
     make_nccl_reshard_refit_info_wire_safe,
+    restore_refit_info_placements,
     vocab_parallel_bulk_ok,
 )
 
@@ -3656,6 +3657,27 @@ class MegatronPolicyWorkerImpl(
         # The driver also runs without Megatron. Convert before the first Ray
         # boundary; keep the native meshes and placements for local transfers.
         return make_nccl_reshard_refit_info_wire_safe(self.nccl_reshard_refit_info)
+
+    def install_nccl_reshard_refit_info(self, refit_info: dict[str, Any]) -> None:
+        """Install destination routing without rebuilding source views or exports."""
+        if self.is_refit_destination:
+            raise ValueError("Source plan installation called on a destination worker")
+        if not refit_info.get("destination_ownership_validated"):
+            raise ValueError("Destination ownership has not been validated")
+        # Only destination mesh/placements may change in the finalization phase.
+        old = make_nccl_reshard_refit_info_wire_safe(self.nccl_reshard_refit_info)
+        new = make_nccl_reshard_refit_info_wire_safe(refit_info)
+        for info in (old, new):
+            info.pop("destination_ownership_validated", None)
+            for params in info["per_layer_params"].values():
+                for param in params:
+                    param.pop("dst_mesh_info")
+                    param.pop("dst_placements")
+        if old != new:
+            raise ValueError(
+                "Finalized destination plan does not match the prepared source catalog"
+            )
+        self.nccl_reshard_refit_info = restore_refit_info_placements(refit_info)
 
     def prepare_nccl_reshard_refit_info(
         self,

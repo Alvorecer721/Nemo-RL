@@ -201,9 +201,11 @@ def _region_numel(region):
 def _local_tensor(tensor):
     if tensor is None:
         return None
-    local = getattr(tensor, "_local_tensor", None)
-    if local is not None:
-        return local
+    if hasattr(tensor, "_local_tensor"):
+        # Metadata-only refs keep off-stage PP ranks in collective order without
+        # allocating a payload. _validate_local_inputs still requires a buffer
+        # on every actual source/destination rank.
+        return tensor._local_tensor
     to_local = getattr(tensor, "to_local", None)
     if callable(to_local):
         return to_local()

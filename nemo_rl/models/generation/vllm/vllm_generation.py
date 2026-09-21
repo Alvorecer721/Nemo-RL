@@ -72,6 +72,7 @@ from nemo_rl.weight_sync.membership import RefitMembership
 
 if TYPE_CHECKING:
     from nemo_rl.algorithms.single_controller_utils.config import MasterConfig
+    from nemo_rl.weight_sync.nccl_reshard_utils import DestinationRefitManifest
 
 logger = logging.getLogger(__name__)
 
@@ -1372,11 +1373,12 @@ class VllmGeneration(GenerationInterface):
                     if self.cfg["vllm_cfg"]["async_engine"]
                     else "reset_prefix_cache"
                 )
-            # Use run_all_workers_single_data for methods that don't need data
-            futures = self.worker_group.run_all_workers_single_data(
-                method_name,
-                run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
-            )
+            # A lost PP stage excludes its entire engine. Cache cleanup must use
+            # the same surviving leaders as refit after a membership rebuild.
+            futures = [
+                getattr(worker, method_name).remote()
+                for worker in self._refit_leader_workers()
+            ]
             # Wait for all futures to complete
             results = ray.get(futures)
             return all(result for result in results if result is not None)
@@ -1510,6 +1512,23 @@ class VllmGeneration(GenerationInterface):
         )
         # co-works with lm_policy; wait for all futures to complete outside
         return futures
+
+    def discover_nccl_reshard_destination(
+        self, refit_info: dict
+    ) -> list["DestinationRefitManifest"]:
+        """Gather wire-safe ownership manifests from the current complete engines."""
+        method = (
+            "discover_nccl_reshard_destination_async"
+            if self.cfg["vllm_cfg"]["async_engine"]
+            else "discover_nccl_reshard_destination"
+        )
+        results = ray.get(
+            [
+                getattr(worker, method).remote(refit_info=refit_info)
+                for worker in self._refit_leader_workers()
+            ]
+        )
+        return [manifest for engine in results for manifest in engine]
 
     def prepare_nccl_reshard_refit_info(self, refit_info: dict) -> None:
         """Forward per-layer param metadata to vLLM workers for nccl_reshard refit."""

@@ -304,6 +304,10 @@ class ColocatablePolicyInterface(PolicyInterface):
         """Prepare per-layer param metadata for nccl_reshard-based refit."""
         raise NotImplementedError
 
+    def install_nccl_reshard_refit_info(self, refit_info: dict[str, Any]) -> None:
+        """Install the plan finalized from generation's actual ownership."""
+        raise NotImplementedError
+
     def nccl_reshard_refit(
         self,
         kv_scales: Optional[dict[str, float]] = None,
