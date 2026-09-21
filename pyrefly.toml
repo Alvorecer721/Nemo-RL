@@ -252,6 +252,7 @@ project-includes = [
   "nemo_rl/models/generation/vllm/collective_rpc.py",
   "nemo_rl/models/generation/vllm/config.py",
   "nemo_rl/models/generation/vllm/patches.py",
+  "nemo_rl/models/generation/vllm/pipeline_hidden_states.py",
   "nemo_rl/models/generation/vllm/pipeline_routed_experts.py",
   "nemo_rl/models/generation/vllm/pipeline_sampled_tokens.py",
   "nemo_rl/models/generation/vllm/quantization/deepseek_v4_fp8.py",
