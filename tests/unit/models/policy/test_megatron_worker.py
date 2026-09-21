@@ -388,6 +388,7 @@ def test_nccl_reshard_all_misc_refit_supports_empty_bulk(pp_size: int) -> None:
         local_hf_param_specs=lambda: (),
     )
     worker = object.__new__(MegatronPolicyWorkerImpl)
+    worker.model = torch.nn.Module()
     worker.refit_conversion_tasks = [task]
     worker._calculate_refit_param_info = MagicMock(return_value={})
     worker._iter_params_with_optional_kv_scales = MagicMock(
@@ -409,6 +410,68 @@ def test_nccl_reshard_all_misc_refit_supports_empty_bulk(pp_size: int) -> None:
     assert worker.hf_to_local_param_map.specs == {}
     assert worker._misc_conversion_tasks == [task]
     worker._build_layer_to_pp_stage.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "mismatch", [None, "shape", "source_mesh", "misc", "unvalidated"]
+)
+def test_nccl_reshard_source_installs_only_matching_destination_plan(mismatch):
+    from copy import deepcopy
+
+    from nemo_rl.models.policy.workers.megatron_policy_worker import (
+        MegatronPolicyWorkerImpl,
+    )
+    from nemo_rl.weight_sync.nccl_reshard_utils import (
+        make_nccl_reshard_refit_info_wire_safe,
+    )
+
+    name = "model.layers.0.mlp.down_proj.weight"
+    original = {
+        "layer_names": ["model.layers.0"],
+        "per_layer_params": {
+            "model.layers.0": [
+                {
+                    "name": name,
+                    "global_shape": [8, 16],
+                    "dtype": "torch.bfloat16",
+                    "src_mesh_info": {"mesh": [0, 1]},
+                    "src_placements": [{"dim": 1}],
+                    "dst_mesh_info": {"mesh": [2, 3]},
+                    "dst_placements": [{}],
+                }
+            ]
+        },
+        "misc_meta": {"model.norm.weight": {"shape": [8], "dtype": "torch.bfloat16"}},
+    }
+    finalized = deepcopy(original)
+    finalized["destination_ownership_validated"] = True
+    param = finalized["per_layer_params"]["model.layers.0"][0]
+    param["dst_mesh_info"] = {"mesh": [3]}
+    if mismatch == "shape":
+        param["global_shape"] = [8, 8]
+    elif mismatch == "source_mesh":
+        param["src_mesh_info"] = {"mesh": [1, 0]}
+    elif mismatch == "misc":
+        finalized["misc_meta"] = {}
+    elif mismatch == "unvalidated":
+        finalized.pop("destination_ownership_validated")
+    worker = object.__new__(MegatronPolicyWorkerImpl)
+    worker.is_refit_destination = False
+    worker.nccl_reshard_refit_info = deepcopy(original)
+    source_views = worker.hf_to_local_param_map = HFToLocalParamMap()
+    if mismatch:
+        with pytest.raises(ValueError, match="not.*validated|does not match"):
+            worker.install_nccl_reshard_refit_info(finalized)
+        assert worker.nccl_reshard_refit_info == original
+    else:
+        worker.install_nccl_reshard_refit_info(finalized)
+        installed = make_nccl_reshard_refit_info_wire_safe(
+            worker.nccl_reshard_refit_info
+        )
+        assert installed["per_layer_params"]["model.layers.0"][0]["dst_mesh_info"] == {
+            "mesh": [3]
+        }
+        assert worker.hf_to_local_param_map is source_views
 
 
 def test_refit_destination_uses_common_worker_interface(
@@ -4873,3 +4936,59 @@ def test_megatron_policy_flops_range_check(tiny_llama_model_path):
     finally:
         policy.shutdown()
         cluster.shutdown()
+
+
+def test_pipeline_destination_map_uses_bridge_local_tasks():
+    from nemo_rl.models.generation.megatron.megatron_worker import (
+        MegatronGenerationRefitMixin,
+    )
+    from nemo_rl.weight_sync.nccl_reshard_utils import build_nccl_reshard_refit_info
+
+    names = [f"model.layers.{i}.mlp.down_proj.weight" for i in range(2)]
+    info = build_nccl_reshard_refit_info(
+        {name: {"shape": [8, 8], "dtype": "torch.bfloat16"} for name in names},
+        {},
+        {"pp_size": 2},
+        1,
+        2,
+    )
+    info["gen_pp_size"] = 2
+    destination = torch.empty(8, 8, dtype=torch.bfloat16)
+    task = _make_refit_task(
+        param_name="decoder.layers.0.mlp.linear_fc2.weight",
+        destination=destination,
+        dependencies=(names[1],),
+        local_specs=((names[1], "full"),),
+    )
+    worker = object.__new__(MegatronGenerationRefitMixin)
+    mapping = worker._build_destination_hf_to_local_param_map(info, [task])
+    assert set(mapping.specs) == {names[1]}
+    assert mapping.specs[names[1]].base is destination
+    assert mapping.local_metadata() == {
+        names[1]: {"shape": [8, 8], "dtype": "torch.bfloat16"}
+    }
+
+
+@pytest.mark.parametrize("name", ["model.embed_tokens.weight", "lm_head.weight"])
+def test_megatron_destination_maps_vocab_selected_by_source(name):
+    from nemo_rl.models.generation.megatron.megatron_worker import (
+        MegatronGenerationRefitMixin,
+    )
+    from nemo_rl.weight_sync.nccl_reshard_utils import build_nccl_reshard_refit_info
+
+    info = build_nccl_reshard_refit_info(
+        {name: {"shape": [8, 8], "dtype": "torch.bfloat16"}},
+        {},
+        {},
+        1,
+        1,
+    )
+    task = _make_refit_task(
+        param_name="vocab.weight",
+        destination=torch.empty(8, 8, dtype=torch.bfloat16),
+        dependencies=(name,),
+        local_specs=((name, "full"),),
+    )
+    worker = object.__new__(MegatronGenerationRefitMixin)
+    mapping = worker._build_destination_hf_to_local_param_map(info, [task])
+    assert set(mapping.specs) == {name}

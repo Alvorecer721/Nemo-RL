@@ -37,18 +37,20 @@ from nemo_rl.utils.nsys import wrap_with_nvtx_name
 from nemo_rl.utils.packed_tensor import packed_broadcast_consumer
 from nemo_rl.weight_sync.nccl_reshard_utils import (
     _STR_TO_DTYPE,
+    DestinationRefitManifest,
     HFToLocalParamMap,
     LocalParamSpec,
     RefitBuilderInterface,
     RefitCtx,
     _extract_layer_prefix,
+    validate_destination_param_map,
 )
 
 logger = logging.getLogger(__name__)
 
 try:
     import vllm  # noqa: F401
-    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.distributed.parallel_state import get_pp_group, get_tp_group
     from vllm.v1.worker.gpu_worker import Worker as VllmWorker
 except ImportError:
     raise ImportError(
@@ -1410,6 +1412,38 @@ class VllmInternalWorkerExtension(RefitBuilderInterface):
     def finish_sparse_delta_refit(self) -> dict[str, Any]:
         return self._get_sparse_delta_applier().finish_sparse_delta_refit()
 
+    def discover_nccl_reshard_destination(
+        self, refit_info: dict
+    ) -> DestinationRefitManifest:
+        """Report actual local model ownership before either side installs a plan."""
+        from nemo_rl.weight_sync.nccl_reshard_utils import restore_refit_info_placements
+
+        info = restore_refit_info_placements(refit_info)
+        if not self.pp_comm_groups:
+            raise RuntimeError("Destination discovery requires refit communicators")
+        offset = info["train_world_size"] // info["pp_size"]
+        rank = self.pp_comm_groups[0].rank - offset
+        tp_rank = get_tp_group().rank_in_group
+        pp_rank = get_pp_group().rank_in_group
+        tp = info["gen_tp_size"]
+        pp = info["gen_pp_size"]
+        if get_tp_group().world_size != tp or get_pp_group().world_size != pp:
+            raise ValueError(
+                "vLLM runtime TP/PP groups disagree with the refit configuration"
+            )
+        dp_rank = rank // (tp * pp)
+        ep = info["gen_ep_size"]
+        return {
+            "rank": rank,
+            "pp_rank": pp_rank,
+            "tp_rank": tp_rank,
+            "dp_rank": dp_rank,
+            "ep_rank": tp_rank if ep > 1 else 0,
+            "etp_rank": 0 if ep > 1 else tp_rank,
+            "edp_rank": dp_rank,
+            "params": self.build_hf_to_local_param_map(info).local_metadata(),
+        }
+
     def prepare_nccl_reshard_refit_info(self, refit_info: dict) -> None:
         """Restore per-layer param metadata and build the HF→vLLM mapping.
 
@@ -1432,6 +1466,16 @@ class VllmInternalWorkerExtension(RefitBuilderInterface):
         else:
             self.hf_to_local_param_map = self.build_hf_to_local_param_map(
                 self.nccl_reshard_refit_info
+            )
+        if self.nccl_reshard_refit_info.get("gen_pp_size", 1) > 1:
+            if not self.pp_comm_groups:
+                raise RuntimeError(
+                    "Generation PP preparation requires refit communicators"
+                )
+            validate_destination_param_map(
+                self.nccl_reshard_refit_info,
+                self.hf_to_local_param_map,
+                rank=self.pp_comm_groups[0].rank,
             )
 
     def build_hf_to_local_param_map(self, refit_info: dict) -> HFToLocalParamMap:
@@ -1460,7 +1504,13 @@ class VllmInternalWorkerExtension(RefitBuilderInterface):
             def post(ctx: RefitCtx) -> None:
                 ctx.extra["region"].copy_(ctx.buf)
 
-            return LocalParamSpec(base=vllm_param, pre=pre, post=post)
+            return LocalParamSpec(
+                base=vllm_param,
+                pre=pre,
+                post=post,
+                wire_shape=tuple(vllm_param[merged_slice].shape),
+                wire_dtype=vllm_param.dtype,
+            )
 
         def _trtllm_grouped_expert_spec(
             param_info: dict[str, Any],
@@ -1577,7 +1627,9 @@ class VllmInternalWorkerExtension(RefitBuilderInterface):
                         f"vLLM reported {sorted(loaded_names)!r}"
                     )
 
-            return LocalParamSpec(base=None, pre=pre, post=post)
+            return LocalParamSpec(
+                base=None, pre=pre, post=post, wire_shape=local_shape, wire_dtype=dtype
+            )
 
         def _bf16_to_mxfp8_receiver_quant_spec(
             value_param: torch.Tensor,
@@ -1609,7 +1661,17 @@ class VllmInternalWorkerExtension(RefitBuilderInterface):
                 ctx.extra["value_region"].copy_(value)
                 ctx.extra["scale_region"].copy_(scale)
 
-            return LocalParamSpec(base=value_param.data, pre=pre, post=post)
+            return LocalParamSpec(
+                base=value_param.data,
+                pre=pre,
+                post=post,
+                wire_shape=tuple(
+                    value_param.shape
+                    if merged_slice is None
+                    else value_param[merged_slice].shape
+                ),
+                wire_dtype=torch.bfloat16,
+            )
 
         # Get dict of vllm_param and merged_slice for each hf_name
         vllm_param_map_and_slices = self._build_hf_to_gen_backend_mapping(refit_info)
@@ -1774,7 +1836,25 @@ class VllmInternalWorkerExtension(RefitBuilderInterface):
                 return vllm_by_relative[relative]
             return vllm_by_relative_flat.get(relative, n)
 
+        missing_prefixes: list[str] = []
+        if refit_info.get("gen_pp_size", 1) > 1:
+            # Use vLLM's explicit stage placeholders, including wrapper-prefix
+            # renames. An unresolved weight on a present stage remains an error.
+            from vllm.model_executor.models.utils import is_pp_missing_parameter
+
+            model = self.model_runner.model
+            missing_prefixes = [
+                _layer_relative(name) + "."
+                for name, _module in model.named_modules()
+                if name and is_pp_missing_parameter(name + ".weight", model)
+            ]
+
         for hf_name in hf_shapes:
+            if any(
+                _layer_relative(hf_name).startswith(prefix)
+                for prefix in missing_prefixes
+            ):
+                continue
             # 1) Grouped MoE expert params (gate_proj/up_proj/down_proj, each
             #    [E, ...]). vLLM fuses them as w13_weight (gate||up on the
             #    intermediate axis) and w2_weight (down). The received
@@ -1906,34 +1986,16 @@ class VllmInternalWorkerExtension(RefitBuilderInterface):
         import os
         from collections import OrderedDict
 
-        from nemo_rl.weight_sync.xferdtensor import DTensorRef, xferdtensor
+        from nemo_rl.weight_sync.xferdtensor import receive_resharded_param
 
         def _recv_one_param(param_info, group, stream):
-            # Coverage guard: every bulk param must have a spec; a missing entry
-            # would silently discard its weights.
-            spec = self.hf_to_local_param_map.get(param_info["name"])
-            assert spec is not None, (
-                f"nccl_reshard_refit: {param_info['name']!r} has no spec in "
-                "hf_to_local_param_map (would silently discard its weights)"
-            )
-            # spec.pre/post run on the caller's current stream (this stage's
-            # stream); xferdtensor should use the same stream.
-            ctx = (
-                spec.pre(spec.base) if spec.pre is not None else RefitCtx(buf=spec.base)
-            )
-            dst_tensor = DTensorRef(ctx.buf, param_info["global_shape"])
-            xferdtensor(
-                None,
-                param_info["src_mesh_info"],
-                param_info["src_placements"],
-                dst_tensor,
-                param_info["dst_mesh_info"],
-                param_info["dst_placements"],
+            receive_resharded_param(
+                param_info,
+                self.hf_to_local_param_map.get(param_info["name"]),
                 group,
                 stream,
+                device=self.device,
             )
-            if spec.post is not None:
-                spec.post(ctx)
 
         # Group params by PP stage so different stages' bulk reshards run
         # concurrently on their own streams.  Non-PP = single stage 0 (params

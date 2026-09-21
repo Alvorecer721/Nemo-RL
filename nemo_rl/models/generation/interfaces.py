@@ -29,6 +29,7 @@ RefitPayloadMode = Literal["hf_export", "logical_weights"]
 
 if TYPE_CHECKING:
     from nemo_rl.algorithms.single_controller_utils.config import MasterConfig
+    from nemo_rl.weight_sync.nccl_reshard_utils import DestinationRefitManifest
 
 # Routed-expert index tensors ([seq, layers, topk]) are carried in the narrowest
 # signed dtype that fits ids 0..num_experts-1 plus the -1 missing-route sentinel:
@@ -572,6 +573,12 @@ class GenerationInterface(ABC):
     def get_refit_payload_mode(self) -> RefitPayloadMode:
         """Return the backend's required representation for transferred weights."""
         return "hf_export"
+
+    def discover_nccl_reshard_destination(
+        self, refit_info: dict
+    ) -> list["DestinationRefitManifest"]:
+        """Report stage-local bulk ownership from every live generation rank."""
+        raise NotImplementedError
 
     def prepare_nccl_reshard_refit_info(self, refit_info: dict) -> None:
         """Prepare per-layer param metadata for nccl_reshard-based refit."""

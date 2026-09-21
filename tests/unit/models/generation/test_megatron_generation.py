@@ -283,7 +283,14 @@ def test_megatron_generation_rebuild_dispatches_only_selected_ranks() -> None:
         worker.nccl_reshard_refit.remote.return_value = f"refit-{idx}"
 
     generation = object.__new__(MegatronGeneration)
-    generation._policy = SimpleNamespace(worker_group=SimpleNamespace(workers=workers))
+    generation._policy = SimpleNamespace(
+        worker_group=SimpleNamespace(
+            workers=workers,
+            sharding_annotations=SimpleNamespace(
+                get_worker_coords=lambda rank: {"data_parallel": rank}
+            ),
+        )
+    )
     generation._owns_policy = False
     generation._refit_membership = None
     membership = RefitMembership(
@@ -1545,3 +1552,31 @@ def test_frontend_ranks_matches_is_mp_coordinator(tp, cp, pp, world_size):
     assert MegatronGeneration.frontend_ranks(cluster, config) == _mp_coordinator_ranks(
         tp, pp, world_size
     )
+
+
+@pytest.mark.mcore
+def test_megatron_refit_membership_retains_complete_pipeline_engines():
+    import numpy as np
+
+    from nemo_rl.distributed.named_sharding import NamedSharding
+
+    workers = [object() for _ in range(8)]
+    generation = object.__new__(MegatronGeneration)
+    annotations = NamedSharding(
+        np.arange(8).reshape(2, 2, 2),
+        ("pipeline_parallel", "data_parallel", "tensor_parallel"),
+    )
+    generation._owns_policy = False
+    generation._policy = SimpleNamespace(
+        worker_group=SimpleNamespace(workers=workers, sharding_annotations=annotations)
+    )
+    generation._refit_membership = RefitMembership(
+        world_size=5,
+        train_world_size=1,
+        shard_prefixes={1: 0},
+        workers_per_shard=4,
+    )
+    assert generation._refit_ranked_workers() == [
+        (workers[original], rank, original)
+        for rank, original in enumerate((2, 3, 6, 7))
+    ]

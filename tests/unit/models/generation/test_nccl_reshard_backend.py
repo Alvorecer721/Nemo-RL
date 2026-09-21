@@ -1327,3 +1327,36 @@ def test_build_hf_to_local_param_map_accepts_matching_direct_shards():
         == o_proj.data_ptr()
     )
     assert pmap.get("model.embed_tokens.weight").base.data_ptr() == embed.data_ptr()
+
+
+@pytest.mark.parametrize("hf_prefix", ["model", "backbone", "model.language_model"])
+def test_pipeline_mapping_skips_only_actual_missing_stages(hf_prefix):
+    from vllm.model_executor.models.utils import PPMissingLayer
+
+    from nemo_rl.weight_sync.nccl_reshard_utils import build_nccl_reshard_refit_info
+
+    metadata = {
+        f"{hf_prefix}.layers.{i}.mlp.{projection}.weight": {
+            "shape": [8, 8],
+            "dtype": "torch.float32",
+        }
+        for i in range(2)
+        for projection in ("gate_proj", "up_proj", "down_proj")
+    }
+    info = build_nccl_reshard_refit_info(metadata, {}, {"pp_size": 2}, 1, 2)
+    info["gen_pp_size"] = 2
+    ext = _make_ext(
+        {
+            "model.layers.1.mlp.gate_up_proj.weight": _param(16, 8),
+            "model.layers.1.mlp.down_proj.weight": _param(8, 8),
+        }
+    )
+    ext.model_runner.model.named_modules = lambda: [
+        ("model.layers.0", PPMissingLayer())
+    ]
+    mapping = ext.build_hf_to_local_param_map(info)
+    assert set(mapping.specs) == {name for name in metadata if ".layers.1." in name}
+    # A missing weight on a local stage must not turn into an off-stage skip.
+    ext.model_runner.model.named_parameters = lambda: []
+    with pytest.raises(ValueError, match="no vLLM param"):
+        ext.build_hf_to_local_param_map(info)

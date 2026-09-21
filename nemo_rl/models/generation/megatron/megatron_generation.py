@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from nemo_rl.distributed.worker_groups import RayWorkerGroup
     from nemo_rl.models.policy.lm_policy import Policy
     from nemo_rl.weight_sync.membership import RefitMembership
+    from nemo_rl.weight_sync.nccl_reshard_utils import DestinationRefitManifest
 
 
 class MegatronGeneration(GenerationInterface):
@@ -490,20 +491,27 @@ class MegatronGeneration(GenerationInterface):
             ]
 
         workers = self.worker_group.workers
-        ranked_workers: list[tuple[Any, int, int]] = []
-        for shard_idx, rank_prefix in active.shard_prefixes.items():
-            worker_start = shard_idx * active.workers_per_shard
-            for local_rank in range(active.workers_per_shard):
-                worker_idx = worker_start + local_rank
-                if worker_idx >= len(workers):
-                    raise RuntimeError(
-                        f"shard {shard_idx} maps to worker {worker_idx}, but the "
-                        f"group has {len(workers)} workers"
-                    )
-                ranked_workers.append(
-                    (workers[worker_idx], rank_prefix + local_rank, worker_idx)
-                )
-        return ranked_workers
+        annotations = self.worker_group.sharding_annotations
+        if annotations is None:
+            raise RuntimeError(
+                "Megatron refit membership requires worker sharding annotations"
+            )
+        # Megatron's PP stages surround DP in rank order. Reuse the framework's
+        # actual layout; contiguous TP*PP blocks would splice different engines.
+        selected = [
+            rank
+            for rank in range(len(workers))
+            if annotations.get_worker_coords(rank)["data_parallel"]
+            in active.shard_prefixes
+        ]
+        if len(selected) != active.world_size - active.train_world_size:
+            raise ValueError(
+                "Megatron refit membership does not contain complete DP engines"
+            )
+        return [
+            (workers[original], rank, original)
+            for rank, original in enumerate(selected)
+        ]
 
     def rebuild_collective(
         self, membership: "RefitMembership", ip: str, port: int
@@ -545,6 +553,17 @@ class MegatronGeneration(GenerationInterface):
             )
             for worker, rank, _original_rank in self._refit_ranked_workers(membership)
         ]
+
+    def discover_nccl_reshard_destination(
+        self, refit_info: dict
+    ) -> list["DestinationRefitManifest"]:
+        """Collect Bridge-local ownership from the selected inference workers."""
+        return ray.get(
+            [
+                worker.discover_nccl_reshard_destination.remote(refit_info=refit_info)
+                for worker, _rank, _original_rank in self._refit_ranked_workers()
+            ]
+        )
 
     def prepare_nccl_reshard_refit_info(self, refit_info: dict[str, Any]) -> None:
         """Build each inference worker's HF-to-Megatron M-to-N receive map."""

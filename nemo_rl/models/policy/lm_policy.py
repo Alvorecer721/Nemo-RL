@@ -1436,6 +1436,14 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         )
         return results[0]
 
+    def install_nccl_reshard_refit_info(self, refit_info: dict[str, Any]) -> None:
+        """Install the same finalized destination meshes on every source rank."""
+        ray.get(
+            self.worker_group.run_all_workers_single_data(
+                "install_nccl_reshard_refit_info", refit_info=refit_info
+            )
+        )
+
     def nccl_reshard_refit(
         self, kv_scales=None, refit_timeout_s: Optional[float] = None
     ) -> list[ray.ObjectRef]:
