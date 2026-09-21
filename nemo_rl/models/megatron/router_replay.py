@@ -156,6 +156,15 @@ def router_replay_dimensions(model_config: Any) -> tuple[int, int]:
     return num_moe_layers, top_k
 
 
+def router_replay_layer_mask(model_config: Any) -> tuple[bool, ...]:
+    """Return the MoE mask in global transformer order, excluding MTP layers."""
+    moe_layers = set(_global_moe_layer_numbers(model_config))
+    return tuple(
+        layer_number in moe_layers
+        for layer_number in range(1, int(model_config.num_layers) + 1)
+    )
+
+
 def _router_replay_instances_for_model(model: Any) -> list[tuple[Any, int]]:
     instances: list[tuple[Any, int]] = []
     seen: set[int] = set()

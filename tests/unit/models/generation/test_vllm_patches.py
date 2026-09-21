@@ -647,11 +647,16 @@ def test_vllm_worker_threads_nemotron_h_fp32_lm_head_cfg_into_source_patches(
     monkeypatch.setattr(
         vllm_worker,
         "_apply_vllm_patches",
-        lambda py, *, extra_env_vars, nemotron_h_fp32_lm_head: patch_calls.append(
+        lambda py,
+        *,
+        extra_env_vars,
+        nemotron_h_fp32_lm_head,
+        pipeline_routed_experts: patch_calls.append(
             {
                 "py": py,
                 "extra_env_vars": extra_env_vars,
                 "nemotron_h_fp32_lm_head": nemotron_h_fp32_lm_head,
+                "pipeline_routed_experts": pipeline_routed_experts,
             }
         ),
     )
@@ -676,6 +681,7 @@ def test_vllm_worker_threads_nemotron_h_fp32_lm_head_cfg_into_source_patches(
             "py": sys.executable,
             "extra_env_vars": ["EXPLICIT_VAR"],
             "nemotron_h_fp32_lm_head": expected_nemotron_h_fp32_lm_head,
+            "pipeline_routed_experts": False,
         }
     ]
 

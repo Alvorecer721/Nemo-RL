@@ -113,6 +113,7 @@ def execute_route_plan(
     *,
     dims: tuple[int, int],
     canonical_len: int,
+    full_layer_mask: tuple[bool, ...] | None = None,
 ) -> tuple[Optional[torch.Tensor], Optional[str]]:
     """Assemble one canonical route tensor from staged fragments.
 
@@ -125,6 +126,9 @@ def execute_route_plan(
             direct-mode finalizer supplies dims learned from the fetched
             fragments.
         canonical_len: The published row's token length.
+        full_layer_mask: Optional model-owned mask of MoE layers in global
+            transformer order. Accepts full-layer fragments as well as compact
+            MoE-only fragments. Integrity is checked before selecting layers.
 
     Returns:
         ``(tensor, None)`` on success — ``[canonical_len, num_moe_layers,
@@ -137,6 +141,8 @@ def execute_route_plan(
     if canonical_len != plan.expected_token_length:
         return None, ROUTE_FAILURE_CANONICAL_LENGTH
     num_moe_layers, top_k = dims
+    if full_layer_mask is not None and sum(full_layer_mask) != num_moe_layers:
+        raise ValueError("route layer mask must match the model's MoE layer count")
     routed = torch.full(
         (canonical_len, num_moe_layers, top_k),
         ROUTE_MISSING_SENTINEL,
@@ -165,6 +171,12 @@ def execute_route_plan(
                 return None, ROUTE_FAILURE_RANK
             if int(routes.shape[0]) != span.staged_route_len:
                 return None, ROUTE_FAILURE_LENGTH
+            if (
+                tuple(routes.shape[1:]) != dims
+                and full_layer_mask is not None
+                and tuple(routes.shape[1:]) == (len(full_layer_mask), top_k)
+            ):
+                routes = routes[:, list(full_layer_mask)]
             if tuple(routes.shape[1:]) != (num_moe_layers, top_k):
                 return None, ROUTE_FAILURE_MODEL_SHAPE
             if mode == "full":

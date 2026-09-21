@@ -88,6 +88,21 @@ class _Worker(TQWorkerMixin):
         return 1, 2
 
 
+class _MixedLayerWorker(_Worker):
+    def __init__(
+        self, client: _RouteClient, layer_mask: tuple[bool, ...], top_k: int
+    ) -> None:
+        super().__init__(client)
+        self.layer_mask = layer_mask
+        self.top_k = top_k
+
+    def _routed_experts_dimensions(self) -> tuple[int, int]:
+        return sum(self.layer_mask), self.top_k
+
+    def _routed_experts_layer_mask(self) -> tuple[bool, ...]:
+        return self.layer_mask
+
+
 def _plan(
     spans: tuple[RouteSpan, ...], *, expected: int, cleanup: tuple[str, ...]
 ) -> dict:
@@ -191,6 +206,70 @@ def test_wrong_model_shape_falls_back_for_entire_rollout() -> None:
 
     routed = worker._maybe_assemble_routed_experts(meta, data)[ROUTED_EXPERTS_FIELD]
 
+    assert bool(routed.eq(-1).all())
+    assert worker._route_fallback_counts == Counter({"fragment_model_shape": 1})
+
+
+@pytest.mark.parametrize(
+    "layer_mask,top_k",
+    [((False,) * 3 + (True,) * 75, 8), ((True, False, True, False), 2)],
+)
+@pytest.mark.parametrize("compact", [False, True])
+def test_full_and_compact_routes_select_global_moe_layers_for_full_and_tail_spans(
+    layer_mask, top_k, compact
+):
+    full = torch.arange(3 * len(layer_mask) * top_k, dtype=torch.int16).reshape(
+        3, len(layer_mask), top_k
+    )
+    expected = full[:, list(layer_mask)]
+    payload = expected if compact else full
+    client = _RouteClient({"r/full": payload[:2], "r/tail": payload[2:]})
+    worker = _MixedLayerWorker(client, layer_mask, top_k)
+    plan = _plan(
+        (_span(client, "r/full", 0, 2, 2), _span(client, "r/tail", 1, 1, 1)),
+        expected=4,
+        cleanup=("r/full", "r/tail"),
+    )
+    meta, data = _meta([plan], [4])
+    routed = worker._maybe_assemble_routed_experts(meta, data)[ROUTED_EXPERTS_FIELD]
+    torch.testing.assert_close(routed[0, :2], expected[:2])
+    torch.testing.assert_close(routed[0, 3], expected[2])
+    assert bool(routed[0, 2].eq(-1).all())
+    assert bool(routed[0, 4].eq(-1).all())
+    assert not worker._route_fallback_counts
+
+
+def test_corruption_in_discarded_dense_layer_still_fails_integrity():
+    client = _RouteClient({"r/c0": torch.zeros((2, 4, 2), dtype=torch.int16)})
+    worker = _MixedLayerWorker(client, (False, True, False, True), 2)
+    plan = _plan((_span(client, "r/c0", 0, 2, 2),), expected=2, cleanup=("r/c0",))
+    client.fragments["r/c0"][0, 0, 0] = 1
+    meta, data = _meta([plan], [2])
+    routed = worker._maybe_assemble_routed_experts(meta, data)[ROUTED_EXPERTS_FIELD]
+    assert bool(routed.eq(-1).all())
+    assert worker._route_fallback_counts == Counter({"fragment_integrity": 1})
+
+
+def test_model_mask_must_match_declared_moe_layer_count():
+    class _InvalidModelWorker(_MixedLayerWorker):
+        def _routed_experts_dimensions(self) -> tuple[int, int]:
+            return 3, self.top_k
+
+    client = _RouteClient({"r/c0": torch.zeros((2, 4, 2), dtype=torch.int16)})
+    worker = _InvalidModelWorker(client, (False, True, False, True), 2)
+    plan = _plan((_span(client, "r/c0", 0, 2, 2),), expected=2, cleanup=("r/c0",))
+    meta, data = _meta([plan], [2])
+    with pytest.raises(ValueError, match="route layer mask"):
+        worker._maybe_assemble_routed_experts(meta, data)
+
+
+@pytest.mark.parametrize("shape", [(2, 3, 2), (2, 4, 3)])
+def test_full_layer_projection_rejects_wrong_layer_count_or_top_k(shape):
+    client = _RouteClient({"r/c0": torch.zeros(shape, dtype=torch.int16)})
+    worker = _MixedLayerWorker(client, (False, True, False, True), 2)
+    plan = _plan((_span(client, "r/c0", 0, 2, 2),), expected=2, cleanup=("r/c0",))
+    meta, data = _meta([plan], [2])
+    routed = worker._maybe_assemble_routed_experts(meta, data)[ROUTED_EXPERTS_FIELD]
     assert bool(routed.eq(-1).all())
     assert worker._route_fallback_counts == Counter({"fragment_model_shape": 1})
 

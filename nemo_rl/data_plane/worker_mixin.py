@@ -379,6 +379,10 @@ class TQWorkerMixin:
             "the router-replay policy worker must provide route dimensions"
         )
 
+    def _routed_experts_layer_mask(self) -> tuple[bool, ...] | None:
+        """Return the model's global MoE layer mask, if full-layer routes are supported."""
+        return None
+
     def _pad_value_dict(self) -> dict[str, Any]:
         """Per-field pad value used by :func:`materialize` to detile the jagged wire format.
 
@@ -668,6 +672,7 @@ class TQWorkerMixin:
 
         # The worker supplies real model dims — the authoritative shape check.
         num_moe_layers, top_k = self._routed_experts_dimensions()
+        full_layer_mask = self._routed_experts_layer_mask()
         input_ids = data["input_ids"]
         input_lengths = data["input_lengths"].reshape(-1)
         routed = torch.full(
@@ -688,6 +693,7 @@ class TQWorkerMixin:
                 fragments,
                 dims=(num_moe_layers, top_k),
                 canonical_len=canonical_len,
+                full_layer_mask=full_layer_mask,
             )
             if tensor is None:
                 # The row stays all-sentinel: the model falls back to its own

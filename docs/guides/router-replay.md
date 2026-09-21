@@ -111,6 +111,40 @@ return routed expert indices by setting `enable_return_routed_experts=True` in
 the vLLM kwargs. The generation payload is then carried through the normal
 rollout and policy data path as the `routed_experts` field.
 
+### Pipeline-parallel rollout
+
+This fork carries a vLLM 0.29.0 compatibility patch for route export with
+`policy.generation.vllm_cfg.pipeline_parallel_size > 1`. It activates when
+`enable_return_routed_experts` is enabled. Each stage forwards its accumulated
+expert IDs on the same GPU tensor channel as its pipeline activations. The next
+stage restores those IDs before recording its own layers; the final stage
+returns the full global layer axis through vLLM's usual token/slot bookkeeping.
+This supports the existing in-memory `nccl_reshard` flow without exporting an
+HF checkpoint between updates.
+
+The route rows describe tokens that actually ran through the model: the prompt
+and all response tokens except the final sampled token. NeMo aligns these rows
+to the input sequence and pads the unused final row as on the PP1 path.
+
+The patch uses the ordinary GPU generation runner and requires a supported MoE
+router and full-attention KV group on every stage. It rejects external-launcher
+execution, pooling, speculative decoding, and dual batch overlap with PP.
+vLLM's context-parallel and KV-connector exclusions remain in place. NeMo's PP
+rollout requires `async_engine=true`; Megatron virtual pipeline parallelism is
+not qualified by this change.
+
+Source installation checks both vLLM files before changing the config guard and
+rejects version or source mismatches. All outer workers finish source preparation
+before any nested engine starts, including during shard recovery. A vLLM upgrade
+requires reviewing this compatibility patch against the new upstream code.
+
+GPU qualification is tracked separately from exact weight-refit validation.
+`tests/functional/pipeline_routed_experts.py` compares returned IDs with captures
+on every actual stage, using changing batches, chunked prefill, and repeated
+prefixes. Its observation copies synchronize CUDA, so its timings are not
+throughput measurements. Exact route transport alone does not establish
+Megatron/vLLM logprob agreement.
+
 For models that also train MoE-based MTP heads, Router Replay skips MTP
 routers by default. This keeps MTP routers on their native routing decisions
 while replaying vLLM routes only in the decoder layers. Set

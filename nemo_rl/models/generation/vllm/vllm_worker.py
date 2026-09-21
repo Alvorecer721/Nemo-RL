@@ -447,6 +447,12 @@ class BaseVllmGenerationWorker:
             self.py_executable,
             extra_env_vars=extra_env_vars,
             nemotron_h_fp32_lm_head=vllm_nemotron_h_fp32_lm_head_enabled(vllm_cfg),
+            pipeline_routed_experts=(
+                self.pipeline_parallel_size > 1
+                and self.cfg.get("vllm_kwargs", {}).get(
+                    "enable_return_routed_experts", False
+                )
+            ),
         )
 
         # Skip model loading if we're not the model owner

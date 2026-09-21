@@ -42,6 +42,7 @@ from nemo_rl.distributed.virtual_cluster import RayVirtualCluster, init_ray
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.models.generation.megatron.megatron_generation import MegatronGeneration
 from nemo_rl.models.generation.vllm import VllmGeneration
+from nemo_rl.models.megatron.router_replay import configure_vllm_for_router_replay
 from nemo_rl.models.policy.lm_policy import Policy
 from nemo_rl.utils.config import load_config, register_omegaconf_resolvers
 from nemo_rl.utils.venvs import image_venv_python, image_venvs_enabled
@@ -148,6 +149,62 @@ def training_batch(
     )
 
 
+def get_unreplayed_logprobs(
+    policy: Policy, data: BatchedDataDict[Any]
+) -> BatchedDataDict[Any]:
+    """Use the normal policy sharding with the test-only no-replay worker RPC."""
+    sharded, unsorted_indices = policy._shard_for_logprob(data)
+    futures = policy.worker_group.run_all_workers_sharded_data(
+        "get_unreplayed_logprobs",
+        data=sharded,
+        in_sharded_axes=["data_parallel"],
+        replicate_on_axes=["context_parallel", "tensor_parallel", "pipeline_parallel"],
+        output_is_replicated=[
+            "context_parallel",
+            "tensor_parallel",
+            "pipeline_parallel",
+        ],
+    )
+    result = BatchedDataDict.from_batches(
+        policy.worker_group.get_all_worker_results(futures)
+    )
+    if unsorted_indices is not None:
+        result.reorder_data(unsorted_indices)
+    return result
+
+
+def check_complete_routes(
+    result: BatchedDataDict[Any], hf_config: dict[str, Any]
+) -> dict[str, int]:
+    """Require every executed token's MoE layers, excluding the final sampled token."""
+    routes = result["routed_experts"]
+    assert routes.shape[:2] == result["output_ids"].shape
+    assert routes.shape[2:] == (
+        hf_config["num_hidden_layers"],
+        hf_config["num_experts_per_tok"],
+    )
+    first_layer = hf_config.get("first_k_dense_replace", 0)
+    num_experts = hf_config.get("n_routed_experts", hf_config.get("num_experts"))
+    assert num_experts is not None
+    compared = 0
+    for row, length in enumerate(result["unpadded_sequence_lengths"]):
+        executed = routes[row, : int(length) - 1, first_layer:]
+        assert executed.numel() > 0
+        # The exclusive bound may not fit the compact wire dtype: comparing
+        # int8 routes directly with 128 wraps the scalar to -128 in PyTorch.
+        min_id, max_id = int(executed.min()), int(executed.max())
+        assert 0 <= min_id and max_id < num_experts, (
+            "Missing or invalid route for an executed token's MoE layer: "
+            f"min={min_id}, max={max_id}, num_experts={num_experts}"
+        )
+        sorted_ids = executed.sort(dim=-1).values
+        assert torch.all(sorted_ids[..., 1:] != sorted_ids[..., :-1]), (
+            "Duplicate expert IDs in a top-k route"
+        )
+        compared += executed.numel()
+    return {"complete_expert_ids": compared, "missing_expert_ids": 0}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=["vllm", "megatron"], required=True)
@@ -167,6 +224,11 @@ def main() -> None:
     parser.add_argument("--gen-etp", type=int)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.3)
     parser.add_argument("--warm-refits", type=int, default=5)
+    parser.add_argument(
+        "--router-replay",
+        action="store_true",
+        help="Compare Megatron with and without replay of the same PP rollout routes",
+    )
     parser.add_argument(
         "--update-mode",
         choices=["scale", "optimizer"],
@@ -208,6 +270,12 @@ def main() -> None:
     hf_config = json.loads((Path(args.model) / "config.json").read_text())
     if hf_config["model_type"] not in ("qwen3", "qwen3_moe", "apertus", "glm_moe_dsa"):
         parser.error("The independent storage oracle supports Qwen3, Apertus and GLM-5")
+    if args.router_replay and (
+        args.backend != "vllm"
+        or hf_config["model_type"] not in ("qwen3_moe", "glm_moe_dsa")
+        or use_optimizer
+    ):
+        parser.error("The paired replay diagnostic requires vLLM MoE and scale updates")
     if (args.train_tp * args.train_dp) % (args.train_ep * args.train_etp):
         parser.error("Training TP*DP must divide evenly into EP*ETP groups")
     if hf_config["num_key_value_heads"] % args.gen_tp:
@@ -301,6 +369,9 @@ def main() -> None:
     gen.mcore_generation_config.buffer_size_gb = 1
     check_nccl_reshard_refit_support(config)
     policy_cfg = OmegaConf.to_container(config.policy, resolve=True)
+    if args.router_replay:
+        policy_cfg["router_replay"] = {"enabled": True}
+        configure_vllm_for_router_replay(policy_cfg)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -467,6 +538,7 @@ def main() -> None:
         if reference_dir is not None:
             shutil.rmtree(reference_dir)
         report["checks"].append(checked)
+        out.write_text(json.dumps(report, indent=2) + "\n")
         print(f"EXACT_CHECK iteration={iteration} {checked}", flush=True)
         if iteration in (0, 1, args.warm_refits, last_iteration):
             generation.prepare_for_generation()
@@ -489,20 +561,43 @@ def main() -> None:
                 result = generation.generate(inputs, greedy=True)
             generation.finish_generation()
             policy.prepare_for_lp_inference()
-            computed = policy.get_logprobs(
-                BatchedDataDict(
-                    {
-                        # Supply one identical reference sequence per training
-                        # DP rank, as the policy requires evenly sized shards.
-                        "input_ids": result["output_ids"].repeat(args.train_dp, 1),
-                        "input_lengths": result["unpadded_sequence_lengths"].repeat(
-                            args.train_dp
-                        ),
-                    }
-                )
+            policy_data = BatchedDataDict(
+                {
+                    # Supply one identical reference sequence per training
+                    # DP rank, as the policy requires evenly sized shards.
+                    "input_ids": result["output_ids"].repeat(args.train_dp, 1),
+                    "input_lengths": result["unpadded_sequence_lengths"].repeat(
+                        args.train_dp
+                    ),
+                }
             )
             length = int(result["unpadded_sequence_lengths"][0])
             a = result["logprobs"][0, prompt_length:length]
+            if args.router_replay:
+                route_file = out.with_name(f"{out.stem}.routes-{iteration}.json")
+                route_file.write_text(
+                    json.dumps(result["routed_experts"].tolist()) + "\n"
+                )
+                checked["route_file"] = str(route_file)
+                checked["tokens"] = result["output_ids"][0].tolist()
+                checked["prompt_length"] = prompt_length
+                checked["generation_logprobs"] = a.tolist()
+                out.write_text(json.dumps(report, indent=2) + "\n")
+                checked["route_coverage"] = check_complete_routes(result, hf_config)
+                control = get_unreplayed_logprobs(policy, policy_data)
+                control_lp = control["logprobs"][0, prompt_length:length]
+                checked["source_logprobs_without_replay"] = control_lp.tolist()
+                checked["unreplayed_logprob_max_abs_error"] = (
+                    (a - control_lp).abs().max().item()
+                )
+                checked["unreplayed_logprob_mean_abs_error"] = (
+                    (a - control_lp).abs().mean().item()
+                )
+                policy_data["routed_experts"] = result["routed_experts"].repeat(
+                    args.train_dp, 1, 1, 1
+                )
+                out.write_text(json.dumps(report, indent=2) + "\n")
+            computed = policy.get_logprobs(policy_data)
             b = computed["logprobs"][0, prompt_length:length]
             diff = (a - b).abs()
             assert len(diff) > 0 and torch.isfinite(diff).all()
@@ -514,7 +609,9 @@ def main() -> None:
             checked["logprob_max_abs_error"] = diff.max().item()
             checked["logprob_mean_abs_error"] = diff.mean().item()
             checked["tokens"] = result["output_ids"][0].tolist()
+            checked["prompt_length"] = prompt_length
             checked["generation_logprobs"] = a.tolist()
+            checked["source_logprobs"] = b.tolist()
             if reference_report is not None:
                 reference_check = reference_report["checks"][iteration]
                 assert checked["tokens"] == reference_check["tokens"]

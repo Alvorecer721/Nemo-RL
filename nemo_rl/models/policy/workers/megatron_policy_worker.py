@@ -82,6 +82,7 @@ from nemo_rl.models.megatron.pipeline_parallel import (
 from nemo_rl.models.megatron.router_replay import (
     router_replay_dimensions,
     router_replay_enabled,
+    router_replay_layer_mask,
 )
 from nemo_rl.models.megatron.setup import (
     build_inference_model,
@@ -470,6 +471,10 @@ class MegatronPolicyWorkerImpl(
     def _routed_experts_dimensions(self) -> tuple[int, int]:
         """Return route dimensions from the initialized Megatron model config."""
         return router_replay_dimensions(self._get_model_config())
+
+    def _routed_experts_layer_mask(self) -> tuple[bool, ...]:
+        """Select MoE columns from full-layer rollout routes before replay."""
+        return router_replay_layer_mask(self._get_model_config())
 
     def _get_replica_group(self) -> Optional[Any]:
         """Replica group = TP × CP × PP siblings within this DP rank.
