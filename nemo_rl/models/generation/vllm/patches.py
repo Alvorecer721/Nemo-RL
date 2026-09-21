@@ -22,6 +22,9 @@ from nemo_rl.models.generation.vllm.config import (
 from nemo_rl.models.generation.vllm.pipeline_routed_experts import (
     patch_pipeline_routed_experts,
 )
+from nemo_rl.models.generation.vllm.pipeline_sampled_tokens import (
+    patch_pipeline_sampled_tokens,
+)
 
 
 def _get_vllm_file(relative_path: str) -> str:
@@ -966,7 +969,10 @@ def _apply_vllm_patches(
     extra_env_vars: list[str] | None = None,
     nemotron_h_fp32_lm_head: bool | None = None,
     pipeline_routed_experts: bool = False,
+    pipeline_parallel: bool = False,
 ) -> None:
+    if pipeline_parallel:
+        patch_pipeline_sampled_tokens()
     if pipeline_routed_experts:
         patch_pipeline_routed_experts()
 

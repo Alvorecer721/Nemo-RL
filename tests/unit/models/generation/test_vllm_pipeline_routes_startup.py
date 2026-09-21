@@ -10,8 +10,9 @@ from nemo_rl.models.generation.vllm import vllm_generation
 
 
 @pytest.mark.parametrize("caller_deferred", [False, True])
+@pytest.mark.parametrize("capture_routes", [False, True])
 def test_every_actor_finishes_source_preparation_before_engine_start(
-    monkeypatch, caller_deferred
+    monkeypatch, caller_deferred, capture_routes
 ):
     prepared = [False, False]
     engines = []
@@ -70,7 +71,7 @@ def test_every_actor_finishes_source_preparation_before_engine_start(
             "expert_parallel_size": 1,
             "async_engine": True,
         },
-        vllm_kwargs={"enable_return_routed_experts": True},
+        vllm_kwargs={"enable_return_routed_experts": capture_routes},
     )
     cluster = SimpleNamespace(
         world_size=lambda: 2,

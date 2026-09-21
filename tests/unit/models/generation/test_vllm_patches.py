@@ -651,12 +651,14 @@ def test_vllm_worker_threads_nemotron_h_fp32_lm_head_cfg_into_source_patches(
         *,
         extra_env_vars,
         nemotron_h_fp32_lm_head,
+        pipeline_parallel,
         pipeline_routed_experts: patch_calls.append(
             {
                 "py": py,
                 "extra_env_vars": extra_env_vars,
                 "nemotron_h_fp32_lm_head": nemotron_h_fp32_lm_head,
                 "pipeline_routed_experts": pipeline_routed_experts,
+                "pipeline_parallel": pipeline_parallel,
             }
         ),
     )
@@ -682,6 +684,7 @@ def test_vllm_worker_threads_nemotron_h_fp32_lm_head_cfg_into_source_patches(
             "extra_env_vars": ["EXPLICIT_VAR"],
             "nemotron_h_fp32_lm_head": expected_nemotron_h_fp32_lm_head,
             "pipeline_routed_experts": False,
+            "pipeline_parallel": False,
         }
     ]
 

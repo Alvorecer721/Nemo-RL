@@ -176,14 +176,9 @@ class VllmGeneration(GenerationInterface):
         self.pp_size = self.cfg["vllm_cfg"]["pipeline_parallel_size"]
         self.ep_size = self.cfg["vllm_cfg"]["expert_parallel_size"]
         self.model_parallel_size = self.tp_size * self.pp_size
-        # Pipeline route export patches node-local vLLM sources. Start nested
+        # Pipeline fixes patch node-local vLLM sources. Start nested
         # engines only after every outer actor has finished installing them.
-        self._defer_model_load = defer_model_load or (
-            self.pp_size > 1
-            and self.cfg.get("vllm_kwargs", {}).get(
-                "enable_return_routed_experts", False
-            )
-        )
+        self._defer_model_load = defer_model_load or self.pp_size > 1
 
         assert cluster.world_size() % self.model_parallel_size == 0, (
             "World size must be a multiple of model parallel size. "
