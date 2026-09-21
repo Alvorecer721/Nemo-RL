@@ -30,9 +30,12 @@ separate GPUs with dedicated memory.
 
 from collections.abc import Sequence
 from contextlib import nullcontext
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import ray
+
+if TYPE_CHECKING:
+    from nemo_rl.models.generation.vllm.vllm_generation import VllmRefitTargets
 
 from nemo_rl.utils.timer import Timer
 from nemo_rl.weight_sync.interfaces import WeightSynchronizer
@@ -121,6 +124,7 @@ class CollectiveWeightSynchronizer(WeightSynchronizer):
         *,
         timer: Optional[Timer] = None,
         kv_scales: Optional[dict[str, float]] = None,
+        generation_targets: "VllmRefitTargets | None" = None,
     ) -> None:
         timer_context = (
             timer.time("prepare_for_generation/transfer_and_update_weights")
@@ -128,6 +132,8 @@ class CollectiveWeightSynchronizer(WeightSynchronizer):
             else nullcontext()
         )
         with timer_context:
+            if generation_targets is not None:
+                self._generation.validate_refit_targets(generation_targets)
             sender_spec = self._generation.get_collective_sender_spec()
             futures_train = self._policy.broadcast_weights_for_collective(
                 kv_scales=kv_scales,
@@ -135,9 +141,15 @@ class CollectiveWeightSynchronizer(WeightSynchronizer):
                 buffer_size_bytes=sender_spec.buffer_size_bytes,
                 num_buffers=sender_spec.num_buffers,
             )
-            futures_inference = self._generation.update_weights_from_collective(
-                refit_timeout_s=self._refit_timeout_s
-            )
+            if generation_targets is None:
+                futures_inference = self._generation.update_weights_from_collective(
+                    refit_timeout_s=self._refit_timeout_s
+                )
+            else:
+                futures_inference = self._generation.update_weights_from_collective(
+                    refit_timeout_s=self._refit_timeout_s,
+                    targets=generation_targets,
+                )
 
             try:
                 ray.get(futures_train)

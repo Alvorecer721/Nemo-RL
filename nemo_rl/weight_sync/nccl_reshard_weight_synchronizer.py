@@ -39,9 +39,12 @@ phase transitions are owned by the caller.
 import logging
 from collections.abc import Sequence
 from contextlib import nullcontext
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import ray
+
+if TYPE_CHECKING:
+    from nemo_rl.models.generation.vllm.vllm_generation import VllmRefitTargets
 
 from nemo_rl.models.generation.megatron.config import merged_inference_megatron_cfg
 from nemo_rl.utils.timer import Timer
@@ -188,6 +191,7 @@ class NcclReshardWeightSynchronizer(WeightSynchronizer):
         *,
         timer: Optional[Timer] = None,
         kv_scales: Optional[dict[str, float]] = None,
+        generation_targets: "VllmRefitTargets | None" = None,
     ) -> None:
         timer_context = (
             timer.time("prepare_for_generation/transfer_and_update_weights")
@@ -195,15 +199,23 @@ class NcclReshardWeightSynchronizer(WeightSynchronizer):
             else nullcontext()
         )
         with timer_context:
+            if generation_targets is not None:
+                self._generation.validate_refit_targets(generation_targets)
             # Shard-to-shard reshard: train sends its TP/EP-local shards, gen
             # receives directly into its own (different) layout.  kv_scales ride
             # the misc packed-broadcast for FP8 KV cache.
             futures_train = self._policy.nccl_reshard_refit(
                 kv_scales=kv_scales, refit_timeout_s=self._refit_timeout_s
             )
-            futures_inference = self._generation.nccl_reshard_refit(
-                refit_timeout_s=self._refit_timeout_s
-            )
+            if generation_targets is None:
+                futures_inference = self._generation.nccl_reshard_refit(
+                    refit_timeout_s=self._refit_timeout_s
+                )
+            else:
+                futures_inference = self._generation.nccl_reshard_refit(
+                    refit_timeout_s=self._refit_timeout_s,
+                    targets=generation_targets,
+                )
 
             try:
                 ray.get(futures_train)

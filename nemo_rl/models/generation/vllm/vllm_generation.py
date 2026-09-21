@@ -18,6 +18,7 @@ import os
 import time
 import warnings
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -75,6 +76,14 @@ if TYPE_CHECKING:
     from nemo_rl.weight_sync.nccl_reshard_utils import DestinationRefitManifest
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class VllmRefitTargets:
+    """The shard indices and actor identities participating in one refit attempt."""
+
+    shard_indices: tuple[int, ...]
+    workers: tuple[Any, ...]
 
 
 def _record_vllm_generation_metrics(
@@ -657,14 +666,21 @@ class VllmGeneration(GenerationInterface):
         )
         ray.get(futures)
 
-    def set_rollout_weight_version(self, version: int) -> None:
+    def set_rollout_weight_version(
+        self,
+        version: int,
+        *,
+        targets: VllmRefitTargets | None = None,
+        timeout_s: float | None = None,
+    ) -> None:
         """Rotate the weight version workers stamp on captured model calls."""
-        futures = self.worker_group.run_all_workers_single_data(
-            "set_rollout_weight_version",
-            version=version,
-            run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
-        )
-        ray.get(futures)
+        targets = self.capture_refit_targets() if targets is None else targets
+        self.validate_refit_targets(targets)
+        futures = [
+            worker.set_rollout_weight_version.remote(version=version)
+            for worker in targets.workers
+        ]
+        ray.get(futures, timeout=timeout_s)
 
     def _get_raw_spec_counters(self) -> dict[str | tuple[str, int], float]:
         """Collect raw spec decode counters from workers."""
@@ -942,23 +958,44 @@ class VllmGeneration(GenerationInterface):
         Falls back to every leader when no membership has been recorded, which is the
         state for the entire life of a run that never loses a shard.
         """
+        return list(self.capture_refit_targets().workers)
+
+    def capture_refit_targets(self) -> VllmRefitTargets:
+        """Snapshot settled transport membership, including each actor's identity."""
         if not self.worker_group or not self.worker_group.workers:
             raise RuntimeError("Worker group is not initialized")
         workers = self.worker_group.workers
         membership = self._refit_membership
         if membership is None:
             per_shard = len(workers) // self.dp_size
-            return [workers[idx * per_shard] for idx in range(self.dp_size)]
+            shard_indices = tuple(range(self.dp_size))
+        else:
+            per_shard = membership.workers_per_shard
+            shard_indices = tuple(membership.shard_prefixes)
         leaders = []
-        for shard_idx in membership.shard_prefixes:
-            leader_idx = shard_idx * membership.workers_per_shard
+        for shard_idx in shard_indices:
+            leader_idx = shard_idx * per_shard
             if leader_idx >= len(workers):
                 raise RuntimeError(
                     f"shard {shard_idx} maps to worker {leader_idx}, but the group has "
                     f"{len(workers)} workers"
                 )
             leaders.append(workers[leader_idx])
-        return leaders
+        if not leaders:
+            raise RuntimeError("No vLLM engines participate in the refit")
+        return VllmRefitTargets(shard_indices, tuple(leaders))
+
+    def validate_refit_targets(self, targets: VllmRefitTargets) -> None:
+        """Reject a replaced actor or changed membership before it can be resumed."""
+        current = self.capture_refit_targets()
+        if current.shard_indices != targets.shard_indices or any(
+            before is not after
+            for before, after in zip(targets.workers, current.workers, strict=True)
+        ):
+            raise RuntimeError(
+                "vLLM refit participants changed during the weight update; "
+                "replacement engines cannot resume without a complete refit"
+            )
 
     def rebuild_collective(
         self, membership: "RefitMembership", ip: str, port: int
@@ -1465,7 +1502,10 @@ class VllmGeneration(GenerationInterface):
         return futures
 
     def update_weights_from_collective(
-        self, refit_timeout_s: Optional[float] = None
+        self,
+        refit_timeout_s: Optional[float] = None,
+        *,
+        targets: VllmRefitTargets | None = None,
     ) -> list[ray.ObjectRef]:
         """Update weights of the policy using collective communication."""
         if not self.worker_group or not self.worker_group.workers:
@@ -1483,7 +1523,9 @@ class VllmGeneration(GenerationInterface):
         # actor and fail the refit, undoing the rebuild that just happened.
         futures = [
             getattr(worker, method_name).remote(refit_timeout_s=refit_timeout_s)
-            for worker in self._refit_leader_workers()
+            for worker in (
+                self._refit_leader_workers() if targets is None else targets.workers
+            )
         ]
 
         # this function should co-work with lm_policy, so we should wait for all futures to complete outside
@@ -1604,7 +1646,10 @@ class VllmGeneration(GenerationInterface):
         return futures
 
     def nccl_reshard_refit(
-        self, refit_timeout_s: Optional[float] = None
+        self,
+        refit_timeout_s: Optional[float] = None,
+        *,
+        targets: VllmRefitTargets | None = None,
     ) -> list[ray.ObjectRef]:
         """Receive weights from training workers via nccl_reshard (xferdtensor)."""
         if not self.worker_group or not self.worker_group.workers:
@@ -1618,7 +1663,9 @@ class VllmGeneration(GenerationInterface):
         # Surviving leaders only; see update_weights_from_collective.
         return [
             getattr(worker, method_name).remote(refit_timeout_s=refit_timeout_s)
-            for worker in self._refit_leader_workers()
+            for worker in (
+                self._refit_leader_workers() if targets is None else targets.workers
+            )
         ]
 
     def start_gpu_profiling(self) -> None:
@@ -1739,37 +1786,55 @@ class VllmGeneration(GenerationInterface):
             print(f"Error invalidating vLLM caches: {e}")
             return False
 
-    def pause_generation_for_refit(self, *, clear_cache: bool) -> bool:
+    def pause_generation_for_refit(
+        self,
+        *,
+        clear_cache: bool,
+        targets: VllmRefitTargets | None = None,
+        timeout_s: float | None = None,
+    ) -> bool:
         """Pause every async vLLM engine while preserving in-flight requests."""
         if not self.cfg["vllm_cfg"]["async_engine"]:
             raise RuntimeError("pause_generation_for_refit requires async_engine=True")
-        if not self.worker_group or not self.worker_group.workers:
-            raise RuntimeError("Worker group is not initialized")
-
-        futures = self.worker_group.run_all_workers_single_data(
-            "pause_generation_async",
-            clear_cache=clear_cache,
-            run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
-        )
+        targets = self.capture_refit_targets() if targets is None else targets
+        self.validate_refit_targets(targets)
+        futures = [
+            worker.pause_generation_async.remote(clear_cache=clear_cache)
+            for worker in targets.workers
+        ]
+        # Async Ray actors do not promise RPC execution order. Settle every
+        # pause before propagating an actor failure: an outstanding old pause
+        # could otherwise arrive after recovery resumes a surviving engine.
+        _, pending = ray.wait(futures, num_returns=len(futures), timeout=timeout_s)
+        if pending:
+            raise TimeoutError(
+                "vLLM pause calls did not settle before the refit deadline; "
+                "recovery cannot safely resume these engines"
+            )
         if not all(ray.get(futures)):
             raise RuntimeError("Failed to pause every async vLLM engine")
+        self.validate_refit_targets(targets)
         return True
 
-    def resume_generation_after_refit(self) -> bool:
+    def resume_generation_after_refit(
+        self,
+        *,
+        targets: VllmRefitTargets | None = None,
+        timeout_s: float | None = None,
+    ) -> bool:
         """Resume every async vLLM engine paused for refit."""
         if not self.cfg["vllm_cfg"]["async_engine"]:
             raise RuntimeError(
                 "resume_generation_after_refit requires async_engine=True"
             )
-        if not self.worker_group or not self.worker_group.workers:
-            raise RuntimeError("Worker group is not initialized")
-
-        futures = self.worker_group.run_all_workers_single_data(
-            "resume_generation_async",
-            run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
-        )
-        if not all(ray.get(futures)):
+        targets = self.capture_refit_targets() if targets is None else targets
+        self.validate_refit_targets(targets)
+        futures = [
+            worker.resume_generation_async.remote() for worker in targets.workers
+        ]
+        if not all(ray.get(futures, timeout=timeout_s)):
             raise RuntimeError("Failed to resume every async vLLM engine")
+        self.validate_refit_targets(targets)
         return True
 
     @property

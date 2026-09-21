@@ -526,25 +526,26 @@ def test_vllm_generation_broadcasts_native_refit_pause_and_resume(
 ) -> None:
     generation = VllmGeneration.__new__(VllmGeneration)
     generation.cfg = {"vllm_cfg": {"async_engine": True}}
+    generation.dp_size = 2
+    generation._refit_membership = None
     generation.worker_group = MagicMock()
-    generation.worker_group.workers = [object(), object()]
-    futures = [object(), object()]
-    generation.worker_group.run_all_workers_single_data.return_value = futures
+    generation.worker_group.workers = [MagicMock() for _ in range(4)]
     ray_get = MagicMock(side_effect=[[True, True], [True, True]])
     monkeypatch.setattr(ray, "get", ray_get)
+    monkeypatch.setattr(ray, "wait", lambda refs, **kwargs: (refs, []))
 
     assert generation.pause_generation_for_refit(clear_cache=True)
     assert generation.resume_generation_after_refit()
 
-    generation.worker_group.run_all_workers_single_data.assert_any_call(
-        "pause_generation_async",
-        clear_cache=True,
-        run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
-    )
-    generation.worker_group.run_all_workers_single_data.assert_any_call(
-        "resume_generation_async",
-        run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
-    )
+    for index, worker in enumerate(generation.worker_group.workers):
+        if index in (0, 2):
+            worker.pause_generation_async.remote.assert_called_once_with(
+                clear_cache=True
+            )
+            worker.resume_generation_async.remote.assert_called_once_with()
+        else:
+            worker.pause_generation_async.remote.assert_not_called()
+            worker.resume_generation_async.remote.assert_not_called()
 
 
 def test_vllm_generation_rejects_partial_refit_pause_and_resume(
@@ -552,12 +553,11 @@ def test_vllm_generation_rejects_partial_refit_pause_and_resume(
 ) -> None:
     generation = VllmGeneration.__new__(VllmGeneration)
     generation.cfg = {"vllm_cfg": {"async_engine": True}}
+    generation.dp_size = 2
+    generation._refit_membership = None
     generation.worker_group = MagicMock()
-    generation.worker_group.workers = [object(), object()]
-    generation.worker_group.run_all_workers_single_data.return_value = [
-        object(),
-        object(),
-    ]
+    generation.worker_group.workers = [MagicMock(), MagicMock()]
+    monkeypatch.setattr(ray, "wait", lambda refs, **kwargs: (refs, []))
     monkeypatch.setattr(
         ray,
         "get",

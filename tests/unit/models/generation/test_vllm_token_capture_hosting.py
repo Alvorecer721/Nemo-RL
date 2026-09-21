@@ -152,6 +152,9 @@ def _generation_with_mock_group(*, async_engine: bool = True) -> VllmGeneration:
     gen = object.__new__(VllmGeneration)
     gen.cfg = {"vllm_cfg": {"async_engine": async_engine}}
     gen.worker_group = MagicMock()
+    gen.worker_group.workers = [MagicMock()]
+    gen.dp_size = 1
+    gen._refit_membership = None
     gen.worker_group.run_all_workers_single_data.return_value = []
     return gen
 
@@ -181,14 +184,12 @@ def test_generation_set_rollout_weight_version_fans_out(monkeypatch):
     gen = _generation_with_mock_group()
     monkeypatch.setattr(
         "nemo_rl.models.generation.vllm.vllm_generation.ray.get",
-        lambda futures: futures,
+        lambda futures, **kwargs: futures,
     )
     gen.set_rollout_weight_version(7)
-    gen.worker_group.run_all_workers_single_data.assert_called_once_with(
-        "set_rollout_weight_version",
-        version=7,
-        run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
-    )
+    gen.worker_group.workers[
+        0
+    ].set_rollout_weight_version.remote.assert_called_once_with(version=7)
 
 
 # ---------------------------------------------------------------------------

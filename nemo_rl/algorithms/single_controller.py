@@ -176,8 +176,15 @@ from nemo_rl.models.generation.fleet_health import ShardState
 from nemo_rl.models.generation.megatron.megatron_generation import MegatronGeneration
 from nemo_rl.models.generation.sglang.sglang_generation import SGLangGeneration
 from nemo_rl.models.generation.vllm import VllmGeneration
+from nemo_rl.models.generation.vllm.vllm_generation import VllmRefitTargets
 from nemo_rl.models.policy.tq_policy import TQPolicy
 from nemo_rl.models.value.tq_value import TQValue
+from nemo_rl.weight_sync.collective_weight_synchronizer import (
+    CollectiveWeightSynchronizer,
+)
+from nemo_rl.weight_sync.nccl_reshard_weight_synchronizer import (
+    NcclReshardWeightSynchronizer,
+)
 from nemo_rl.utils.checkpoint import (
     CheckpointManager,
     PathLike,
@@ -4689,7 +4696,9 @@ class SingleControllerActor:
         deadline = self._async_cfg.generation_fleet_health.refit_timeout_s
         return None if deadline is None else deadline + self._REFIT_UNWIND_GRACE_S
 
-    async def _sync_weights_within(self, kv_scales, what: str) -> None:
+    async def _sync_weights_within(
+        self, kv_scales, what: str, targets: VllmRefitTargets | None = None
+    ) -> None:
         """Run the refit off-loop, and stop waiting if it outlives the deadline.
 
         WHY THIS IS NEEDED ON TOP OF EVERY WORKER-SIDE BOUND. A frozen-but-alive rank is a
@@ -4718,10 +4727,21 @@ class SingleControllerActor:
         is bounded-failure-first rather than resume-and-forget.
         """
         budget_s = self._refit_await_budget_s()
+
+        def _sync() -> None:
+            if targets is None:
+                self._weight_synchronizer.sync_weights(kv_scales=kv_scales)
+            else:
+                assert isinstance(
+                    self._weight_synchronizer,
+                    (CollectiveWeightSynchronizer, NcclReshardWeightSynchronizer),
+                )
+                self._weight_synchronizer.sync_weights(
+                    kv_scales=kv_scales, generation_targets=targets
+                )
+
         if budget_s is None:
-            await asyncio.to_thread(
-                self._weight_synchronizer.sync_weights, kv_scales=kv_scales
-            )
+            await asyncio.to_thread(_sync)
             return
 
         loop = asyncio.get_running_loop()
@@ -4735,7 +4755,7 @@ class SingleControllerActor:
 
         def _run() -> None:
             try:
-                self._weight_synchronizer.sync_weights(kv_scales=kv_scales)
+                _sync()
             except BaseException as exc:  # noqa: BLE001 - re-raised on the loop below
                 loop.call_soon_threadsafe(_settle, settled.set_exception, exc)
             else:
@@ -4753,6 +4773,27 @@ class SingleControllerActor:
                 "is unbounded. Giving up so the fleet can be reconciled and retried."
             ) from None
 
+    async def _pause_vllm_for_refit(self) -> VllmRefitTargets | None:
+        """Quiesce the engines in the settled refit membership, off the event loop."""
+        if not isinstance(self._gen, VllmGeneration):
+            return None
+        if not isinstance(
+            self._weight_synchronizer,
+            (CollectiveWeightSynchronizer, NcclReshardWeightSynchronizer),
+        ):
+            return None
+        if not self._gen.cfg["vllm_cfg"]["async_engine"]:
+            return None
+        targets = self._gen.capture_refit_targets()
+        self._rollout_manager.suspend_request_deadlines()
+        await asyncio.to_thread(
+            self._gen.pause_generation_for_refit,
+            clear_cache=self._async_cfg.recompute_kv_cache_after_weight_updates,
+            targets=targets,
+            timeout_s=self._refit_await_budget_s(),
+        )
+        return targets
+
     async def _sync_weights(
         self,
         *,
@@ -4760,16 +4801,16 @@ class SingleControllerActor:
     ) -> int:
         """Pause new rollout dispatches, synchronize weights, resume.
 
-        SC owns the pause gate. vLLM serves through the refit; it supports live weight updates.
-        A colocated engine is instead already stood down: the synchronizer's sync is the wake,
-        and step 4 resumes dispatch.
+        SC owns the dispatch gate and pauses async vLLM engines at a completed
+        execution boundary before NCCL writes live weights. Megatron generation's
+        synchronizer owns its own suspend/wake lifecycle.
 
         Flow:
           1. _rollout_permitted.clear()  — no new dispatches
           2. Optionally calibrate FP8 KV-cache scales.
           3. Materialize deferred policy parameter all-gathers.
-          4. weight_synchronizer.sync_weights(kv_scales=...)
-          5. _rollout_permitted.set()   — resume
+          4. Pause participating vLLM engines, then synchronize weights.
+          5. Stamp capture versions, resume engines and reopen dispatch.
 
         Args:
             calibration_data: Optional data used to calibrate FP8 KV-cache
@@ -4788,8 +4829,6 @@ class SingleControllerActor:
             if should_use_nemo_gym(self._master_config)
             else await self._abort_stale_inflight()
         )
-
-        # TODO(#2625): Add drain-gate support during refit.
 
         # Reconcile before the refit, not on a death event. The refit group is provably
         # idle here and every rank is synchronized, which is required because the
@@ -4833,8 +4872,15 @@ class SingleControllerActor:
         with self._timer.time("prepare_for_generation/sync_policy_params"):
             await asyncio.to_thread(self._trainer.sync_params_before_refit)
 
+        targets = None
         try:
-            await self._sync_weights_within(kv_scales, "first")
+            targets = await self._pause_vllm_for_refit()
+            if targets is not None:
+                participants = set(targets.shard_indices)
+            await self._sync_weights_within(kv_scales, "first", targets)
+            if targets is not None:
+                assert isinstance(self._gen, VllmGeneration)
+                self._gen.validate_refit_targets(targets)
         except (RefitAborted, RayActorError) as failure:
             # DETECT AND FAIL FAST, because this one cannot be recovered from.
             #
@@ -4866,9 +4912,15 @@ class SingleControllerActor:
                 # is the likelier of the two windows -- the shard is restarting precisely
                 # because this refit just failed.
                 participants = self._refit_participants()
+                targets = await self._pause_vllm_for_refit()
+                if targets is not None:
+                    participants = set(targets.shard_indices)
                 # Once only: a second failure is a real fault, not a membership problem,
                 # and retrying forever would recreate the wedge this exists to remove.
-                await self._sync_weights_within(kv_scales, "retry")
+                await self._sync_weights_within(kv_scales, "retry", targets)
+                if targets is not None:
+                    assert isinstance(self._gen, VllmGeneration)
+                    self._gen.validate_refit_targets(targets)
                 # Inside the window: this is what refills the serving set, so releasing
                 # the flag before it runs would reopen the gap it exists to close.
                 self._record_refit_landed(participants)
@@ -4879,7 +4931,7 @@ class SingleControllerActor:
             # promoted inside its window, and everything below this must still run on
             # both paths.
             self._record_refit_landed(participants)
-        if self._async_cfg.recompute_kv_cache_after_weight_updates:
+        if targets is None and self._async_cfg.recompute_kv_cache_after_weight_updates:
             # to_thread, like every other call into the workers here. Run directly on
             # the loop this is a blocking Ray call, and a wedged generation worker would
             # freeze the event loop itself -- taking the watchdog, which is an asyncio
@@ -4891,8 +4943,24 @@ class SingleControllerActor:
         if self._master_config.token_capture.enabled:
             # Rotate the version vLLM workers stamp on captured model calls
             # (per-call tagging; group staleness = min over the group's calls).
+            if targets is None:
+                await asyncio.to_thread(
+                    self._gen.set_rollout_weight_version, self._trainer_version
+                )
+            else:
+                assert isinstance(self._gen, VllmGeneration)
+                await asyncio.to_thread(
+                    self._gen.set_rollout_weight_version,
+                    self._trainer_version,
+                    targets=targets,
+                    timeout_s=self._refit_await_budget_s(),
+                )
+        if targets is not None:
+            assert isinstance(self._gen, VllmGeneration)
             await asyncio.to_thread(
-                self._gen.set_rollout_weight_version, self._trainer_version
+                self._gen.resume_generation_after_refit,
+                targets=targets,
+                timeout_s=self._refit_await_budget_s(),
             )
         self._rollout_permitted.set()
         self._rollout_manager.resume_request_deadlines()
