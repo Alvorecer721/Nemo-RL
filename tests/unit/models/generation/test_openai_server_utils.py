@@ -124,6 +124,46 @@ def test_replace_prefix_tokens_counts_all_generation_config_eos_ids():
     assert result == [100, 17, 77, 88]
 
 
+@pytest.mark.parametrize("generated_terminator", [2, 68, 72])
+def test_replace_prefix_tokens_preserves_distinct_generated_terminator(
+    generated_terminator: int,
+) -> None:
+    """Apertus tool/sequence endings must survive a templated assistant ending."""
+
+    class _T:
+        eos_token_id = 2
+
+    model_prefix = [100, 101, generated_terminator]
+    observation_and_next_turn = [200, 201, 67]
+    result = replace_prefix_tokens(
+        tokenizer=_T(),
+        model_prefix_token_ids=model_prefix,
+        template_prefix_token_ids=[90, 91, 68],
+        template_token_ids=[90, 91, 68, *observation_and_next_turn],
+        eos_token_ids=[2, 68, 72],
+    )
+
+    assert result[: len(model_prefix)] == model_prefix
+    assert result == model_prefix + observation_and_next_turn
+
+
+def test_replace_prefix_tokens_preserves_generation_without_terminal_eos() -> None:
+    """A length-limited generation still needs the template's closing token."""
+
+    class _T:
+        eos_token_id = 2
+
+    result = replace_prefix_tokens(
+        tokenizer=_T(),
+        model_prefix_token_ids=[100, 101],
+        template_prefix_token_ids=[90, 91, 68],
+        template_token_ids=[90, 91, 68, 200, 201, 67],
+        eos_token_ids=[2, 68, 72],
+    )
+
+    assert result == [100, 101, 68, 200, 201, 67]
+
+
 def test_replace_prefix_tokens_uses_last_eos_in_template_prefix():
     """When the prefix contains multiple EOS tokens, the splice cuts at the last one."""
 
