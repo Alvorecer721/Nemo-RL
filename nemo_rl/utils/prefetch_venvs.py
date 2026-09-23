@@ -20,35 +20,38 @@ from pathlib import Path
 from nemo_rl.distributed.ray_actor_environment_registry import (
     ACTOR_ENVIRONMENT_REGISTRY,
 )
-from nemo_rl.utils.venvs import create_local_venv
+from nemo_rl.utils.venvs import create_local_venv, finalize_prebuilt_venv
 
 
-def prefetch_venvs(filters=None, negative_filters=None):
+def prefetch_venvs(filters=None, *, prebuilt: bool = False, max_attempts: int = 3):
     """Prefetch all virtual environments that will be used by workers.
 
     Args:
         filters: List of strings to match against actor FQNs. If provided, only
                 actors whose FQN contains at least one of the filter strings will
                 be prefetched. If None, all venvs are prefetched.
-        negative_filters: List of strings to exclude from prefetching. Actors whose
-                FQN contains any of these strings will be skipped.
+        prebuilt: Finalize existing image workers with an offline frozen actor
+                sync, avoiding the base-environment switch and recording the result.
+        max_attempts: How many times to retry each venv build before recording
+                it as failed.
+
+    Returns:
+        The FQNs whose venv failed to build. Empty when everything succeeded.
+        Callers are expected to treat a non-empty list as a failure -- see the
+        __main__ block, which exits 1.
     """
     print("Prefetching virtual environments...")
     if filters:
         print(f"Filtering for: {filters}")
-    if negative_filters:
-        print(f"Excluding: {negative_filters}")
 
     # Track statistics for summary
     skipped_by_filter = []
-    skipped_by_negative_filter = []
     skipped_system_python = []
     prefetched = []
     failed = []
     venv_paths = {}
-    max_attempts = int(os.environ.get("NRL_VENV_PREFETCH_MAX_ATTEMPTS", "3"))
     if max_attempts < 1:
-        raise ValueError("NRL_VENV_PREFETCH_MAX_ATTEMPTS must be at least 1")
+        raise ValueError("max_attempts must be at least 1")
 
     # Group venvs by py_executable to avoid duplicating work
     venv_configs = {}
@@ -56,10 +59,6 @@ def prefetch_venvs(filters=None, negative_filters=None):
         # Apply filters if provided
         if filters and not any(f in actor_fqn for f in filters):
             skipped_by_filter.append(actor_fqn)
-            continue
-        # Apply negative filters if provided
-        if negative_filters and any(f in actor_fqn for f in negative_filters):
-            skipped_by_negative_filter.append(actor_fqn)
             continue
         # Skip system python as it doesn't need a venv
         if py_executable == "python" or py_executable == sys.executable:
@@ -80,7 +79,10 @@ def prefetch_venvs(filters=None, negative_filters=None):
             print(f"  Creating venv for: {actor_fqn}")
             for attempt in range(1, max_attempts + 1):
                 try:
-                    python_path = create_local_venv(py_executable, actor_fqn)
+                    if prebuilt:
+                        python_path = finalize_prebuilt_venv(py_executable, actor_fqn)
+                    else:
+                        python_path = create_local_venv(py_executable, actor_fqn)
                     print(f"    Success: {python_path}")
                     prefetched.append(actor_fqn)
                     venv_paths[actor_fqn] = python_path
@@ -106,22 +108,15 @@ def prefetch_venvs(filters=None, negative_filters=None):
         print(f"  Skipped (filtered out): {len(skipped_by_filter)}")
         for actor_fqn in skipped_by_filter:
             print(f"    - {actor_fqn}")
-    if negative_filters:
-        print(f"  Skipped (negative filter): {len(skipped_by_negative_filter)}")
-        for actor_fqn in skipped_by_negative_filter:
-            print(f"    - {actor_fqn}")
     if failed:
         print(f"  Failed: {len(failed)}")
         for actor_fqn in failed:
             print(f"    - {actor_fqn}")
 
-    if failed:
-        raise RuntimeError(
-            "Failed to prefetch frozen environments: " + ", ".join(failed)
-        )
-
     # Create convenience python wrapper scripts for frozen environment support (container-only)
     create_frozen_environment_symlinks(venv_paths)
+
+    return failed
 
 
 def create_frozen_environment_symlinks(venv_paths):
@@ -220,12 +215,6 @@ Examples:
 
   # Prefetch multiple specific venvs
   python -m nemo_rl.utils.prefetch_venvs vllm policy environment
-
-  # Prefetch all venvs except vLLM-related ones
-  python -m nemo_rl.utils.prefetch_venvs --negative-filters vllm
-
-  # Prefetch all venvs except vLLM and SGLang
-  python -m nemo_rl.utils.prefetch_venvs --negative-filters vllm sglang
         """,
     )
     parser.add_argument(
@@ -236,14 +225,21 @@ Examples:
         "If not provided, all venvs are prefetched.",
     )
     parser.add_argument(
-        "--negative-filters",
-        nargs="*",
-        help="Filter strings to exclude from prefetching. Actors whose FQN "
-        "contains any of these strings will be skipped.",
+        "--prebuilt",
+        action="store_true",
+        help="Finalize existing image workers with their frozen backend selection.",
     )
     args = parser.parse_args()
 
-    prefetch_venvs(
+    failed = prefetch_venvs(
         filters=args.filters if args.filters else None,
-        negative_filters=args.negative_filters if args.negative_filters else None,
+        prebuilt=args.prebuilt,
+        max_attempts=int(os.environ.get("NRL_VENV_PREFETCH_MAX_ATTEMPTS", "3")),
     )
+    # Exit non-zero if any venv failed to build. The per-actor loop above keeps
+    # going after a failure so one broken venv does not hide the others, but the
+    # process must still fail: this runs in the image build, and exiting 0 here
+    # ships an image that is missing a venv, with the actor only dying the first
+    # time someone launches it.
+    if failed:
+        raise SystemExit(1)

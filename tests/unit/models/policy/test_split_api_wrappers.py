@@ -43,6 +43,8 @@ from nemo_rl.data_plane import KVBatchMeta
 from nemo_rl.data_plane.schema import (
     DP_TRAIN_FIELDS,
     GLOBAL_FORWARD_PAD_SEQLEN,
+    OPD_FULL_HIDDEN_STATES_FIELD,
+    OPD_FULL_LOGITS_FIELD,
     ROUTED_EXPERTS_FIELD,
 )
 from nemo_rl.data_plane.worker_mixin import TQWorkerMixin
@@ -177,6 +179,8 @@ def _make_tq_policy() -> tuple[TQPolicy, MagicMock]:
         "make_sequence_length_divisible_by": 2,
     }
     p._router_replay_enabled = False
+    # opd_full off, as __init__ leaves it when the config block is absent.
+    p._opd_full_field = None
     p.flops_tracker = None
     wg = MagicMock()
     wg.run_all_workers_single_data.return_value = ["f0", "f1"]
@@ -333,3 +337,48 @@ class TestTQPolicySplitFanout:
             "abort_train_step_presharded"
         )
         mock_ray.get.assert_called_once_with(["f0", "f1"])
+
+
+class TestTQPolicyOPDFullColumn:
+    def test_train_microbatches_request_the_teacher_payload_column(self):
+        p, _ = _make_tq_policy()
+        p._opd_full_field = OPD_FULL_HIDDEN_STATES_FIELD
+        meta = _meta()
+        with (
+            patch.object(TQPolicy, "_stamp_pad_seqlen"),
+            patch.object(TQPolicy, "_packing_args", return_value=(None, None)),
+            patch(
+                "nemo_rl.models.policy.tq_policy.shard_meta_for_dp",
+                return_value=([meta, meta], None),
+            ) as mock_shard,
+        ):
+            p.train_microbatches_from_meta(meta)
+
+        train_meta = mock_shard.call_args.args[0]
+        assert train_meta.fields == [*DP_TRAIN_FIELDS, OPD_FULL_HIDDEN_STATES_FIELD]
+
+    def test_prepare_step_registers_the_teacher_payload_column(self):
+        """The TQ schema is fixed at registration.
+
+        A column missing there is rejected on the teacher's write rather than
+        silently created.
+        """
+        p, _ = _make_tq_policy()
+        p._opd_full_field = OPD_FULL_LOGITS_FIELD
+        p.tq_partition_id = "train"
+        p.dp_client = MagicMock()
+
+        p.prepare_step(num_samples=4, group_size=2)
+
+        fields = p.dp_client.register_partition.call_args.kwargs["fields"]
+        assert fields == [*DP_TRAIN_FIELDS, OPD_FULL_LOGITS_FIELD]
+
+    def test_prepare_step_leaves_the_schema_alone_when_opd_full_is_off(self):
+        p, _ = _make_tq_policy()
+        p.tq_partition_id = "train"
+        p.dp_client = MagicMock()
+
+        p.prepare_step(num_samples=4)
+
+        fields = p.dp_client.register_partition.call_args.kwargs["fields"]
+        assert fields == list(DP_TRAIN_FIELDS)

@@ -25,6 +25,7 @@ from nemo_rl.algorithms.single_controller_utils.config import (
     AsyncRLConfig,
     MasterConfig,
 )
+from nemo_rl.models.policy.draft_config import Eagle3DraftConfig
 
 
 @pytest.fixture
@@ -34,7 +35,7 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         policy={
             "tokenizer": {},
             "generation": generation_config,
-            "draft": {"enabled": False},
+            "draft": Eagle3DraftConfig(enabled=False),
             "megatron_cfg": {"mtp_num_layers": 2},
             "train_global_batch_size": 128,
         },
@@ -50,6 +51,7 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         async_rl=AsyncRLConfig(
             min_groups_for_streaming_train=32,
             max_buffered_rollouts=64,
+            generation_fleet_health={"enabled": False},
         ),
         grpo=GRPOConfig(async_grpo=None, num_generations_per_prompt=4),
     )
@@ -63,6 +65,7 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         trainer_handle=SimpleNamespace(shutdown=MagicMock()),
         value_handle=None,
     )
+    setup_single_controller = MagicMock(return_value=(actor_args, SetupTimingMetrics()))
     ray_get = MagicMock(return_value={})
     # The driver now polls ping() around the run. Report the run as ready on the first
     # check so these tests keep exercising the same path they always did.
@@ -105,7 +108,7 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(
         run_grpo_single_controller,
         "setup_single_controller",
-        lambda *_args: (actor_args, SetupTimingMetrics()),
+        setup_single_controller,
     )
     monkeypatch.setattr(
         run_grpo_single_controller.SingleControllerActor,
@@ -126,6 +129,7 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         ray_get=ray_get,
         ray_wait=ray_wait,
         ray_kill=ray_kill,
+        setup_single_controller=setup_single_controller,
     )
 
 
@@ -187,4 +191,64 @@ def test_main_configures_generation_for_trained_mtp(
     )
     assert (
         main_context.config.policy["generation"] is main_context.configured_generation
+    )
+
+
+def test_main_accepts_policy_without_draft_config(
+    main_context: SimpleNamespace,
+) -> None:
+    main_context.config.policy.pop("draft")
+
+    run_grpo_single_controller.main()
+
+    main_context.configure_generation.assert_called_once_with(
+        main_context.generation_config,
+        "tokenizer",
+        has_refit_draft_weights=False,
+        trains_mtp=True,
+    )
+
+
+def test_main_preserves_generation_config_through_setup(
+    main_context: SimpleNamespace,
+) -> None:
+    """main() forwards normalized generation config to setup_single_controller."""
+    main_context.generation_config["vllm_cfg"] = {"refit_with_reload_api": True}
+    main_context.configure_generation.side_effect = (
+        lambda generation, *_args, **_kwargs: generation
+    )
+
+    run_grpo_single_controller.main()
+
+    config_for_setup = main_context.setup_single_controller.call_args.args[0]
+    assert (
+        config_for_setup.policy["generation"]["vllm_cfg"]["refit_with_reload_api"]
+        is True
+    )
+
+
+def test_main_passes_processor_for_vlm(
+    main_context: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = SimpleNamespace(tokenizer="vlm-tokenizer")
+    get_tokenizer = MagicMock(return_value=processor)
+    setup_single_controller = MagicMock(
+        return_value=(main_context.actor_args, SetupTimingMetrics())
+    )
+    main_context.config.policy["is_vlm"] = True
+    monkeypatch.setattr(run_grpo_single_controller, "get_tokenizer", get_tokenizer)
+    monkeypatch.setattr(
+        run_grpo_single_controller,
+        "setup_single_controller",
+        setup_single_controller,
+    )
+
+    run_grpo_single_controller.main()
+
+    get_tokenizer.assert_called_once_with(
+        main_context.config.policy["tokenizer"], get_processor=True
+    )
+    setup_single_controller.assert_called_once_with(
+        main_context.config, "vlm-tokenizer", processor=processor
     )

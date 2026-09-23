@@ -2,14 +2,15 @@
 # Incremental image on top of a published release: replace the project
 # metadata and source, re-sync the baked environments against the new lock,
 # and restamp the container fingerprint. The build context is the tracked
-# source tree without 3rdparty/, which the base image already carries.
+# source tree plus the editable submodules whose pin moved; the base image
+# already carries the rest of 3rdparty/.
 ARG BASE_RELEASE_IMAGE
 FROM ${BASE_RELEASE_IMAGE}
 
 ARG NEMO_RL_COMMIT
 ARG NEMO_RL_BUILD_INPUTS_SHA256
 ARG NEMO_RL_BUILD_FINGERPRINT_B64
-ARG OVERLAY_NEGATIVE_FILTERS="trtllm dynamo nemo_gym"
+ARG NRL_ACTORS=""
 ARG OVERLAY_GATE_VENVS="nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
 
 ENV NEMO_RL_COMMIT=${NEMO_RL_COMMIT:-<unknown>}
@@ -17,19 +18,32 @@ ENV NEMO_RL_BUILD_INPUTS_SHA256=${NEMO_RL_BUILD_INPUTS_SHA256:-<unknown>}
 LABEL org.opencontainers.image.revision="${NEMO_RL_COMMIT}"
 LABEL org.opencontainers.image.source-inputs="${NEMO_RL_BUILD_INPUTS_SHA256}"
 
+# Editable submodules whose pin moved arrive in the build context; drop the
+# base's tree first so files the new pin deleted do not survive the copy.
+ARG SHIPPED_SUBMODULES=""
 WORKDIR /opt/nemo-rl
+RUN for submodule in ${SHIPPED_SUBMODULES}; do rm -rf "/opt/nemo-rl/${submodule}"; done
 COPY . /opt/nemo-rl/
 
-# Retain the base image's submodule pins: 3rdparty/ is inherited, not copied.
+# Every other submodule is inherited from the base image and its pin must match.
 # Validate before restamping the changed lock and before anything imports nemo_rl.
-RUN python tools/restamp_overlay_fingerprint.py \
+RUN python tools/restamp_overlay_fingerprint.py restamp \
     /opt/nemo_rl_container_fingerprint \
-    /opt/nemo-rl/.nemo_rl_source_fingerprint.json
+    /opt/nemo-rl/.nemo_rl_source_fingerprint.json \
+    --lock /opt/nemo-rl/uv.lock --shipped ${SHIPPED_SUBMODULES}
 
-RUN UV_LINK_MODE=symlink bash tools/uv-sync-retry.sh --frozen --all-groups --no-install-project
-
-RUN UV_LINK_MODE=symlink uv run --no-sync python -m nemo_rl.utils.prefetch_venvs \
-    --negative-filters ${OVERLAY_NEGATIVE_FILTERS}
+# Overlay dependencies may change. The selected actor manifest determines every
+# environment to reconcile; workers are finalized offline as in the release build.
+RUN <<"EOF" bash -exu -o pipefail
+python3 nemo_rl/distributed/actor_environments.py --actors "$NRL_ACTORS" \
+    all trtllm > /opt/actor_venvs.tsv
+test -s /opt/actor_venvs.tsv
+UV_LINK_MODE=hardlink bash tools/uv-sync-retry.sh --frozen --all-groups --no-install-project
+mapfile -t actors < <(cut -f1 /opt/actor_venvs.tsv)
+(( ${#actors[@]} > 0 ))
+UV_OFFLINE=0 uv run --no-sync python -m nemo_rl.utils.prefetch_venvs --prebuilt "${actors[@]}"
+UV_OFFLINE=1 python tools/check_image_workers.py --output /opt/nemo-rl-image-qualification.json
+EOF
 
 RUN <<"EOF" bash -exu -o pipefail
 for venv in ${OVERLAY_GATE_VENVS}; do

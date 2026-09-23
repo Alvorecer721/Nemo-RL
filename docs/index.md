@@ -307,8 +307,10 @@ adding-new-models.md
 apertus-quickstart.md
 apertus-traps-and-invariants.md
 apertus-xielu.md
+apertus-reference-runs.md
 guides/sft.md
 guides/dpo.md
+guides/nemotron-omni-mpo.md
 guides/dapo.md
 guides/lora.md
 guides/cispo.md
@@ -349,6 +351,7 @@ docker.md
 
 ```{toctree}
 :caption: Development
+:glob:
 
 ci-cd.md
 testing.md
@@ -358,7 +361,8 @@ nsys-profiling.md
 fp8.md
 guides/use-custom-vllm.md
 guides/pp-foundation-activation.md
-superpowers/plans/2026-09-05-pp-foundation.md
+superpowers/plans/*
+superpowers/specs/*
 ```
 
 ```{toctree}

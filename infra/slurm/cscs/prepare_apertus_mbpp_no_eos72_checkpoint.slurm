@@ -18,7 +18,7 @@ set -euo pipefail
 REPO_DIR=${REPO_DIR:-$PWD}
 export SOURCE_CHECKPOINT=/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200
 export OVERLAY_CHECKPOINT="${OVERLAY_CHECKPOINT:-$REPO_DIR/outputs/model_overlays/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200-mbpp-no-eos72}"
-export CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm026_ncclext.toml}
+export CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm029.toml}
 
 mkdir -p "$REPO_DIR/logs"
 

@@ -19,7 +19,7 @@
 # sourced into the fixgate launcher (its #SBATCH headers are inert comments
 # when sourced).
 REPO_DIR=${REPO_DIR:-$PWD}
-export CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm026_ncclext.toml}
+export CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm029.toml}
 export RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-gym.yaml}
 export RUN_SCRIPT=${RUN_SCRIPT:-examples/nemo_gym/run_grpo_nemo_gym.py}
 export RUN_PREFIX=${RUN_PREFIX:-"/root/.local/bin/uv run --locked --extra mcore --extra nemo_gym python"}

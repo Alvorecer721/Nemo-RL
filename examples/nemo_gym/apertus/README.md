@@ -1,6 +1,6 @@
 # Apertus remote Gym probes
 
-The three Slurm entry points run Apertus 1.5 8B with the vLLM 0.26.0 image,
+The three Slurm entry points run Apertus 1.5 8B with the vLLM 0.29.0 image,
 local NeMo-Gym agents, and the hosted resources at `gym-dev`. They are designed
 to be submitted one at a time; each training job performs 40 GRPO steps.
 
@@ -17,7 +17,7 @@ sbatch --chdir="$PWD" infra/slurm/cscs/prepare_gym_workspace_mbpp.slurm
 sbatch --chdir="$PWD" infra/slurm/cscs/train_grpo_gym_workspace_mbpp.slurm
 ```
 
-All jobs use `docker/nemo_rl_vllm026_ncclext.toml` and the `preemptable`
+All jobs use `infra/slurm/cscs/environments/nemo_rl_vllm029.toml` and the `preemptable`
 partition. The two preparation jobs run inside their own allocations; neither
 training launcher performs a remote-server preflight.
 
@@ -45,8 +45,8 @@ exercise a server-side LLM-judge fallback.
 
 ## W&B and generated rollouts
 
-All three 40-step recipes enable the existing W&B logger in
-[`anunay-yadav-epfl/nemo-gym`](https://wandb.ai/anunay-yadav-epfl/nemo-gym).
+All three 40-step recipes enable the existing W&B logger in the `nemo-gym`
+project. The entity comes from your W&B configuration or `WANDB_ENTITY`.
 No additional logging service is needed.
 
 Each training step reports scalar task metrics to W&B. A recipe can also log
@@ -63,8 +63,8 @@ writes `rollouts/step_<N>.jsonl` below the same experiment directory, with one
 record per rollout. It contains the decoded agent actions, visible workspace
 turns, token counts, scalar rewards, and selected dataset provenance. It
 deliberately excludes the raw Gym result and verifier metadata, so hidden-test
-sources are not copied into this local artifact. The MBPP recipe enables this
-dump for its Workspace rollouts.
+sources are not copied into this local artifact. This optional dump is disabled
+in these recipes; enable it explicitly when needed.
 
 Authentication must be available **inside the compute container**. The wrappers
 use `#SBATCH --export=NONE`; merely exporting a key on the login node is not
@@ -96,8 +96,8 @@ held-out game splits, or claim this custom server is identical to Farama's
 The Blackjack POC therefore uses its five valid Gym request rows repeated 32
 times: four prompts and four generations per update produce 16 independently
 dealt games per step and 640 total games in 40 steps. The recipe explicitly
-sets those values and writes both the native training JSONL and safe per-game
-`rollouts/step_<N>.jsonl` records.
+sets those values and writes the native training JSONL. Enable
+`env.log_nemo_gym_rollouts_jsonl` for additional per-game records.
 
 The default Apertus probe's HF source is
 [`agentica-org/DeepScaleR-Preview-Dataset`](https://huggingface.co/datasets/agentica-org/DeepScaleR-Preview-Dataset),
@@ -114,7 +114,7 @@ The Blackjack POC uses the `preemptable` partition without a reservation:
 sbatch --chdir="$PWD" infra/slurm/cscs/probe_grpo_gym_blackjack_remote_40step.slurm
 ```
 
-The wrapper uses `docker/nemo_rl_vllm026_ncclext.toml` and runs 40 steps with
+The wrapper uses `infra/slurm/cscs/environments/nemo_rl_vllm029.toml` and runs 40 steps with
 16 rollouts per step.
 
 For the existing Workspace service, the optional MBPP recipe uses the published
@@ -143,10 +143,19 @@ sbatch --chdir="$PWD" infra/slurm/cscs/train_grpo_gym_workspace_mbpp.slurm
 
 This launcher uses the `preemptable` partition, an
 8192-token context, eight agent actions, 512 generated tokens per action and
-four concurrent rollouts. It inherits W&B and per-step rollout logging. It
+four concurrent rollouts. It enables W&B and retains native training JSONL. It
 runs at most 40 training steps; the full training split is available but a
 40-step run with one prompt per step does not cover it all. Validation is
 configured separately but the inherited probe has periodic validation disabled.
+
+Blackjack and Workspace enable native Gym token capture and verified prefix
+supply. Each continuation sends the exact previous tokens to NeMo-RL's vLLM
+endpoint and checks the generation-time prompt IDs. Capture uses node-local
+`/tmp/nemo_gym_token_capture`; set `NEMO_GYM_TOKEN_CAPTURE_DIR` to another
+absolute path if needed. The runner retires each frozen capture only after the
+rollout consumer accepts its result; failed or abandoned deliveries retain their
+records for diagnosis. These recipes use the synchronous Gym runner; the
+SingleController external-staging path has its own capture configuration.
 
 ## Optional stopping-token experiment
 

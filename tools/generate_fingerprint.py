@@ -18,6 +18,7 @@
 This script computes hashes for individual dependency components:
 - pyproject.toml contents
 - uv.lock contents
+- Actor environment manifest contents
 - Git submodule commit SHAs
 
 The fingerprint is printed to stdout as JSON and can be used to detect container/code drift.
@@ -135,6 +136,7 @@ def generate_fingerprint() -> dict[str, str]:
         Dictionary mapping component names to their hashes/commits:
         - "pyproject.toml": MD5 hash of pyproject.toml
         - "uv.lock": MD5 hash of uv.lock
+        - "nemo_rl/distributed/actor_environments.py": MD5 hash of the actor -> extras table
         - "submodules/<path>": Commit SHA for each submodule
     """
     repo_root = get_repo_root()
@@ -146,6 +148,15 @@ def generate_fingerprint() -> dict[str, str]:
 
     # Hash uv.lock
     fingerprint["uv.lock"] = compute_file_hash(repo_root / "uv.lock")
+
+    # Hash the actor -> uv extras table. Changing an actor's extras changes what its
+    # pre-built venv should contain, and venvs are reused rather than rebuilt, so this
+    # has to invalidate the fingerprint the same way a dependency change does.
+    # Without it a stale venv keeps packages from the extra the actor no longer declares
+    # and nothing tells the user to set NRL_FORCE_REBUILD_VENVS=true.
+    fingerprint["nemo_rl/distributed/actor_environments.py"] = compute_file_hash(
+        repo_root / "nemo_rl" / "distributed" / "actor_environments.py"
+    )
 
     # Get submodule SHAs (sorted by path for consistency)
     submodules = get_submodule_shas(repo_root)

@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 EXPECTED_HEAD=$(git -C "$REPO_DIR" rev-parse HEAD)
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm026_ncclext.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm029.toml}
 AP_VARIANT=${AP_VARIANT:?set AP_VARIANT to 70b-bench or 8b-smoke}
 case "$AP_VARIANT" in
   70b-bench)
@@ -29,7 +29,7 @@ case "$AP_VARIANT" in 70b-bench*) AP_WANDB_DISABLED=${AP_WANDB_DISABLED:-false} 
 AP_TOKENIZER=${AP_TOKENIZER:-/capstor/store/cscs/swissai/infra01/users/xyixuan/rl-bench/models/ap1p5-70b-sft-262k-2700_corr}
 AP_RUN_ROOT=${AP_RUN_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_apertus_bench/$AP_VARIANT/$EXPECTED_HEAD/seed$AP_SEED}
 SBATCH_LOG_ROOT=${SBATCH_LOG_ROOT:-$REPO_DIR/.tmp/slurm-logs/apertus-bench-$AP_VARIANT/$EXPECTED_HEAD}
-AP_RESERVATION=${AP_RESERVATION-SD-69241-apertus-1-5-0}
+AP_RESERVATION=${AP_RESERVATION-}
 AP_EXPECTED_STEPS=${AP_EXPECTED_STEPS:-$AP_EXPECTED_STEPS_DEFAULT}
 AP_TIME=${AP_TIME:-$AP_TIME_DEFAULT}
 RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY:-68719476736}

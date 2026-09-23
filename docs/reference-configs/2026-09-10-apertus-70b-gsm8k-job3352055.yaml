@@ -1,0 +1,502 @@
+# Reference run: Apertus 1.5 70B GSM8K, 12 trainer nodes TP2/PP4 + 4 rollout nodes, 48x16, 2k context
+# Source commit: 7197ac71505b
+# Slurm job: 3352055
+# Resolved from: checkpoint step_2/config.yaml of job 3352055
+# Upstream ref for annotation: c49d53e2e46e95ba645870fead6d48e36c37259b
+# Scrubbed prefixes: /capstor, /iopsstor, /users
+# Note: reference of what ran on the fork; not loadable by upstream as-is
+# Fork-only keys (absent from the upstream ref):
+#   - async_rl.weight_sync_period
+#   - env.bracket_math
+#   - env.bracket_math.answer_marker
+#   - grpo.cot_think_token_ids
+#   - grpo.reward_shaping.alp_coef
+#   - grpo.reward_shaping.alp_success_source
+#   - policy.generation.vllm_cfg.sleep_level
+
+async_rl:
+  diagnostics: false
+  generation_fleet_health:
+    enabled: false
+    healthy_threshold: 2
+    max_restart_attempts_per_shard: 5
+    min_healthy_shards: 1
+    on_dead_shard: fail_fast
+    probe_interval_s: 5.0
+    probe_timeout_s: 2.0
+    refit_timeout_s: 300.0
+    selection: least_outstanding
+    unhealthy_threshold: 3
+  generation_router:
+    backend_timeout_s: 600.0
+    connect_timeout_s: 5.0
+    enabled: false
+    no_healthy_backend_status: 409
+    port_range_high: 1300
+    port_range_low: 1202
+  max_buffered_rollouts: 96
+  max_inflight_prompts: 96
+  min_groups_for_streaming_train: 48
+  recompute_kv_cache_after_weight_updates: false
+  rollout_failure:
+    backoff_base_s: 1.0
+    max_backoff_s: 30.0
+    max_consecutive_dropped_prompts: 0
+    max_data_attempts_per_prompt: 2
+    max_infra_attempts_per_prompt: 5
+    max_replacement_attempts: 1
+    max_skipped_prompts: 0
+    min_step_batch_fraction: 1.0
+    native:
+      env_timeout_s: 120.0
+      generation_timeout_s: 600.0
+    nemo_gym:
+      max_row_attempts: 3
+      rollout_timeout_s: null
+    on_dropped_prompt: shrink
+    replacement_reserve_prompts: 1
+  sampler:
+    max_staleness_versions: 1
+    name: windowed
+    sample_freshest_first: false
+  stall_watchdog:
+    gym_subprocess_check: false
+    interval_s: 30.0
+    stall_action: abort
+    stall_timeout_s: 900.0
+  weight_sync_period: 1
+checkpointing:
+  checkpoint_dir: <site>/checkpoints
+  checkpoint_must_save_by: null
+  enabled: true
+  higher_is_better: true
+  keep_top_k: null
+  load_replay_buffer: true
+  metric_name: null
+  model_save_format: safetensors
+  save_consolidated: false
+  save_data_plane: true
+  save_optimizer: true
+  save_period: 2
+cluster:
+  gpus_per_node: 4
+  master_port_range_high: 1999
+  master_port_range_low: 1400
+  num_nodes: 16
+  segment_size: null
+data:
+  default:
+    env_name: bracket_math
+    processor: math_hf_data_processor
+    prompt_file: null
+    system_prompt_file: examples/prompts/apertus_bench_gsm8k_system_boxed.txt
+  max_input_seq_length: 512
+  num_workers: 1
+  shuffle: false
+  train:
+  - dataset_name: GSM8K
+    env_name: bracket_math
+    processor: math_hf_data_processor
+    prompt_file: null
+    seed: 42
+    split: train
+    split_validation_size: 0.0
+    system_prompt_file: examples/prompts/apertus_bench_gsm8k_system_boxed.txt
+  use_multiple_dataloader: false
+  validation: null
+data_plane:
+  backend: simple
+  claim_meta_poll_interval_s: 0.5
+  enabled: true
+  impl: transfer_queue
+  mooncake_cpu:
+    gdr_staging_buffer_mb: 1024
+    global_segment_size: 68719476736
+    local_buffer_size: 4294967296
+    reuse_registered_buffers: true
+    staging_buffer_size: 268435456
+    use_gdr: false
+  simple:
+    num_storage_units: 32
+    storage_capacity: 1000000
+env:
+  bracket_math:
+    answer_marker: boxed
+    num_workers: 16
+    reward: composite
+  math:
+    math_verify_impl: hf_math_verify
+    num_workers: 8
+grpo:
+  adv_estimator:
+    minus_baseline: true
+    name: grpo
+    normalize_rewards: true
+    reward_weights: null
+    use_leave_one_out_baseline: false
+  advantage_clip_high: null
+  advantage_clip_low: null
+  async_grpo: null
+  batch_multiplier: 1.0
+  calculate_advantages_on_gpu: false
+  cot_think_token_ids:
+  - 32
+  - 33
+  debug_payload_metrics: false
+  deduplicate_multimodal_data: false
+  dynamic_sampling_max_gen_batches: 10
+  invalid_tool_call_advantage: null
+  malformed_thinking_advantage: null
+  max_num_epochs: 1
+  max_num_steps: 2
+  max_rollout_turns: 1
+  max_val_samples: 256
+  normalize_rewards: true
+  num_generations_per_prompt: 16
+  num_prompts_per_step: 48
+  overlong_filtering: false
+  reward_scaling:
+    enabled: false
+    source_max: 1.0
+    source_min: 0.0
+    target_max: 1.0
+    target_min: 0.0
+  reward_shaping:
+    alp_coef: null
+    alp_success_source: episode_success
+    enabled: false
+    max_response_length: 2048
+    overlong_buffer_length: 128
+    overlong_buffer_penalty: 1.0
+    stop_properly_penalty_coef: null
+  seed: 42
+  seq_logprob_error_threshold: null
+  skip_reference_policy_logprobs_calculation: true
+  stop_at_validation_metric: null
+  stop_at_validation_threshold: null
+  use_dynamic_sampling: false
+  use_leave_one_out_baseline: false
+  val_at_end: false
+  val_at_start: false
+  val_batch_size: 256
+  val_num_generations_per_prompt: 1
+  val_period: 0
+  val_start_at: -1
+logger:
+  gpu_monitoring:
+    collection_interval: 2
+    flush_interval: 2
+  log_dir: <site>/exp_001
+  mlflow:
+    experiment_name: grpo-dev
+    run_name: sj_megatron_1B
+    tracking_uri: http://localhost:5000
+  mlflow_enabled: false
+  monitor_gpus: true
+  num_val_samples_to_print: 0
+  swanlab:
+    name: sj_megatron_1B
+    project: grpo-dev
+  swanlab_enabled: false
+  tensorboard: {}
+  tensorboard_enabled: true
+  wandb:
+    entity: <wandb-entity>
+    log_nemo_gym_full_result_tables: false
+    name: nemo-rl-70b-gsm8k-2k-windowed1-tis2-force-on-policy-seed42
+    project: apertus-benchmarks
+  wandb_enabled: false
+loss_fn:
+  disable_ppo_ratio: false
+  force_on_policy_ratio: true
+  kl_input_clamp_value: 20.0
+  kl_output_clamp_value: 10.0
+  positive_example_nll_weight: 0.0
+  ratio_clip_c: 3.0
+  ratio_clip_max: 0.2
+  ratio_clip_min: 0.2
+  reference_policy_kl_penalty: 0.0
+  reference_policy_kl_type: k3
+  sequence_level_importance_ratios: false
+  token_level_loss: true
+  truncated_importance_sampling_ratio: 2.0
+  truncated_importance_sampling_ratio_min: 0.0
+  truncated_importance_sampling_type: tis
+  use_cispo: false
+  use_importance_sampling_correction: true
+  use_kl_in_reward: false
+  use_on_policy_kl_approximation: false
+on_policy_distillation: null
+policy:
+  draft:
+    aux_layer_indices: null
+    enabled: false
+    loss_weight: 0.1
+    model_name: null
+    num_layers: null
+  dtensor_cfg:
+    _v2: true
+    activation_checkpointing: false
+    automodel_kwargs: {}
+    context_parallel_size: 1
+    cpu_offload: false
+    custom_parallel_plan: null
+    enabled: false
+    lora_cfg:
+      alpha: 32
+      dim: 8
+      dropout: 0.0
+      dropout_position: post
+      enabled: false
+      exclude_modules: []
+      lora_A_init: xavier
+      match_all_linear: true
+      restore_from: null
+      target_modules: []
+      use_triton: true
+    sequence_parallel: false
+    tensor_parallel_size: 1
+  dynamic_batching:
+    enabled: false
+    logprob_mb_tokens: 4096
+    sequence_length_round: 64
+    train_mb_tokens: 2048
+  generation:
+    _draft_weights_from_refit: false
+    _mtp_weights_from_refit: false
+    _pad_token_id: 3
+    backend: vllm
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 4
+        num_nodes: 4
+    max_new_tokens: 2048
+    mcore_generation_config:
+      block_size_tokens: 256
+      buffer_size_gb: 10
+      cuda_graph_impl: local
+      enable_chunked_prefill: true
+      enable_prefix_caching: false
+      expose_http_server: false
+      inference_cuda_graph_scope: block
+      kv_cache_management_mode: persist
+      logprobs_mode: processed_logprobs
+      materialize_only_last_token_logits: true
+      max_model_len: 2048
+      max_tokens: 16384
+      num_cuda_graphs: 4
+      num_speculative_tokens: 0
+      offload_policy_before_refit: false
+      parsers: []
+      refit_backend: nccl
+      use_cuda_graphs_for_non_decode_steps: true
+    model_name: <site>/ap1p5-70b-sft-262k-2700_corr
+    port_range_high: 4999
+    port_range_low: 3000
+    real_quant_export_cpu_offload: true
+    refit_cfg:
+      nixl:
+        backend_init_params: null
+        backend_name: UCX
+        device: cuda
+        release_after_refit: false
+        shard_expert_weights: false
+        update_weights_bucket_memory_ratio: 0.05
+    refit_transport: nccl_reshard
+    stop_strings: null
+    stop_token_ids:
+    - 2
+    - 68
+    - 72
+    temperature: 1.0
+    top_k: null
+    top_p: 1.0
+    val_temperature: 1.0
+    val_top_k: null
+    val_top_p: 1.0
+    vllm_cfg:
+      async_engine: true
+      enable_vllm_metrics_logger: true
+      enforce_eager: false
+      env_vars:
+        PYTHONPATH: <site>/upstream-sync
+      expert_parallel_size: 1
+      gpu_memory_utilization: 0.75
+      http_refit_api_key_env_var: null
+      http_refit_server_port: null
+      kv_cache_dtype: auto
+      load_format: dummy
+      logprobs_mode: processed_logprobs
+      max_model_len: 2048
+      num_first_layers_in_bf16: 0
+      num_last_layers_in_bf16: 0
+      pipeline_parallel_size: 1
+      precision: bfloat16
+      refit_with_reload_api: false
+      reset_encoder_cache_after_weight_update: false
+      skip_tokenizer_init: true
+      sleep_level: 1
+      tensor_parallel_size: 4
+      use_deep_gemm: false
+      use_tqdm: false
+      vllm_metrics_logger_interval: 0.5
+      zmq_refit_server_port: null
+    vllm_kwargs:
+      hf_overrides: {}
+    worker_extension_cls_fqn: null
+  generation_batch_size: 32
+  hf_config_overrides: {}
+  logprob_batch_size: 2
+  logprob_chunk_size: 256
+  make_sequence_length_divisible_by: 2
+  max_grad_norm: 1.0
+  max_total_sequence_length: 2048
+  megatron_cfg:
+    activation_checkpointing: true
+    apply_rope_fusion: true
+    bias_activation_fusion: false
+    checkpoint:
+      async_save: true
+      ckpt_assume_constant_structure: true
+    context_parallel_size: 1
+    cuda_graph_impl: none
+    cuda_graph_modules: []
+    cuda_graph_warmup_steps: 3
+    defer_fp32_logits: true
+    distributed_data_parallel_config:
+      data_parallel_sharding_strategy: optim_grads_params
+      grad_reduce_in_fp32: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      use_custom_fsdp: false
+    empty_unused_memory_level: 1
+    enabled: true
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    expert_model_parallel_size: 1
+    expert_tensor_parallel_size: 1
+    fine_grained_activation_offloading: false
+    force_reconvert_from_hf: false
+    fp8_cfg:
+      enabled: false
+      fp8: e4m3
+      fp8_param: false
+      fp8_recipe: blockwise
+    freeze_moe_router: true
+    fused_linear_logprobs_chunk_size: 256
+    gradient_accumulation_fusion: false
+    model_overrides: {}
+    moe_enable_deepep: false
+    moe_hybridep_prepad_packed_inputs: false
+    moe_per_layer_logging: false
+    moe_permute_fusion: true
+    moe_router_bias_update_rate: 0.0
+    moe_router_dtype: fp64
+    moe_router_load_balancing_type: none
+    moe_shared_expert_overlap: false
+    moe_token_dispatcher_type: alltoall
+    mtp_detach_heads: false
+    mtp_loss_scaling_factor: 0.0
+    mtp_num_layers: 0
+    mtp_use_repeated_layer: false
+    num_layers_in_first_pipeline_stage: null
+    num_layers_in_last_pipeline_stage: null
+    offload_modules: null
+    optimizer:
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-08
+      bf16: true
+      clip_grad: 1.0
+      fp16: false
+      lr: 1.0e-06
+      min_lr: 1.0e-06
+      optimizer: adam
+      optimizer_cpu_offload: false
+      optimizer_offload_fraction: 0.0
+      overlap_cpu_optimizer_d2h_h2d: false
+      params_dtype: float32
+      sgd_momentum: 0.9
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: false
+      weight_decay: 0.01
+    peft:
+      a2a_experimental: false
+      alpha: 32
+      dim: 8
+      dropout: 0.0
+      dropout_position: post
+      enabled: false
+      exclude_modules: []
+      lora_A_init_method: xavier
+      lora_B_init_method: zero
+      lora_dtype: null
+      restore_from: null
+      target_modules: []
+    pipeline_dtype: bfloat16
+    pipeline_model_parallel_size: 4
+    recompute_granularity: selective
+    recompute_modules: null
+    scheduler:
+      end_weight_decay: 0.01
+      lr_decay_iters: 1000
+      lr_decay_style: constant
+      lr_warmup_init: 1.0e-06
+      lr_warmup_iters: 0
+      start_weight_decay: 0.01
+      weight_decay_incr_style: constant
+    sequence_parallel: true
+    tensor_model_parallel_size: 2
+    train_iters: 2
+    use_fused_linear_logprobs: false
+    use_fused_weighted_squared_relu: false
+    use_gloo_process_groups: false
+  model_name: <site>/ap1p5-70b-sft-262k-2700_corr
+  offload_optimizer_for_logprob: false
+  optimizer: null
+  precision: bfloat16
+  scheduler: null
+  sequence_packing:
+    algorithm: modified_first_fit_decreasing
+    enabled: false
+    logprob_mb_tokens: 4096
+    microbatch_order: packer
+    sequence_length_round: 64
+    train_mb_tokens: 2048
+  tokenizer:
+    chat_template_kwargs:
+      enable_thinking: false
+    name: <site>/ap1p5-70b-sft-262k-2700_corr
+    tokenizer_kwargs: null
+    use_fastokens: false
+  train_global_batch_size: 768
+  train_micro_batch_size: 1
+  worker_extension_cls_fqn: null
+ppo: null
+reward_penalties:
+  penalize_duplicated_reasoning: false
+  penalize_empty_final_answer: false
+  penalize_malformed_think_tag: false
+  penalize_unwanted_tokens: false
+  token_ids: null
+rollout_checkpointing:
+  extra_fingerprint_excluded_paths: []
+  keep_latest_k: 2
+  restore_mode: latest
+  snapshot_attempt_interval_s: null
+rollout_recovery:
+  agent_granularity_overrides: {}
+  default_granularity: sibling
+  task_source_granularity_overrides: {}
+token_capture:
+  capture_dir: null
+  control_auth_token: null
+  control_timeout_s: 60.0
+  defer_routed_experts_to_policy: false
+  enabled: false
+  min_valid_fraction_per_group: null
+  num_reassembler_workers: 2
+  staging_partition: rollout_staging
+value: null
+value_loss_fn: null
