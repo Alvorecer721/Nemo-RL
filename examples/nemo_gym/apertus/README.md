@@ -10,7 +10,8 @@ waiting for each job to complete before submitting the next:
 ```bash
 sbatch --chdir="$PWD" infra/slurm/cscs/prepare_gym_math_with_judge_40step.slurm
 MATH_WITH_JUDGE_TRAIN_PATH="$PWD/outputs/nemo_gym/math_with_judge/<prepare-job-id>/train.jsonl" \
-  sbatch --chdir="$PWD" infra/slurm/cscs/probe_grpo_gym_math_with_judge_remote_40step.slurm
+  sbatch --chdir="$PWD" --export=MATH_WITH_JUDGE_TRAIN_PATH \
+  infra/slurm/cscs/probe_grpo_gym_math_with_judge_remote_40step.slurm
 sbatch --chdir="$PWD" infra/slurm/cscs/probe_grpo_gym_blackjack_remote_40step.slurm
 sbatch --chdir="$PWD" infra/slurm/cscs/prepare_gym_workspace_mbpp.slurm
 sbatch --chdir="$PWD" infra/slurm/cscs/train_grpo_gym_workspace_mbpp.slurm
@@ -19,6 +20,12 @@ sbatch --chdir="$PWD" infra/slurm/cscs/train_grpo_gym_workspace_mbpp.slurm
 All jobs use `docker/nemo_rl_vllm026_ncclext.toml` and the `preemptable`
 partition. The two preparation jobs run inside their own allocations; neither
 training launcher performs a remote-server preflight.
+
+The training launcher rebuilds driver and worker environments from the checked-out
+lockfile. It does not bypass the container dependency check. With an image built
+for the exact checkout, `NRL_FORCE_REBUILD_VENVS=false` allows environment reuse;
+the normal dependency check still applies. Pass submission-time overrides through
+`sbatch --export` explicitly because these wrappers use `--export=NONE`.
 
 Workspace runs one prompt with four generations per training step, so it opens
 at most four stateful remote sessions at once. This is intentional for the
@@ -140,3 +147,24 @@ four concurrent rollouts. It inherits W&B and per-step rollout logging. It
 runs at most 40 training steps; the full training split is available but a
 40-step run with one prompt per step does not cover it all. Validation is
 configured separately but the inherited probe has periodic validation disabled.
+
+## Optional stopping-token experiment
+
+The standard MBPP recipe retains the checkpoint's original EOS IDs `[2, 68, 72]`.
+Prefix reconstruction must preserve the token actually sampled, including its
+ending. Removing `72` changes generation stopping and is only a diagnostic
+experiment; it is not a replacement for the prefix correction.
+
+Prepare the diagnostic overlay and then launch it from the same checkout:
+
+```bash
+sbatch --chdir="$PWD" infra/slurm/cscs/prepare_apertus_mbpp_no_eos72_checkpoint.slurm
+# Wait for preparation to finish before submitting training.
+sbatch --chdir="$PWD" infra/slurm/cscs/train_grpo_gym_workspace_mbpp_no_eos72.slurm
+```
+
+Both wrappers use `OVERLAY_CHECKPOINT`, defaulting to this checkout's
+`outputs/model_overlays/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200-mbpp-no-eos72`.
+For a custom destination, set `OVERLAY_CHECKPOINT` and add
+`--export=OVERLAY_CHECKPOINT` to both submissions. Direct invocation of the
+diagnostic YAML also requires this environment variable.

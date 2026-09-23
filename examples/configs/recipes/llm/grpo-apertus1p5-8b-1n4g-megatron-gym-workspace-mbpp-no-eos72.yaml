@@ -3,4 +3,4 @@
 defaults: grpo-apertus1p5-8b-1n4g-megatron-gym-workspace-mbpp.yaml
 
 policy:
-  model_name: /iopsstor/scratch/cscs/anunay/swissai/post-training/Nemo-RL/outputs/model_overlays/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200-mbpp-no-eos72
+  model_name: ${oc.env:OVERLAY_CHECKPOINT}

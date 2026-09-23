@@ -13,6 +13,7 @@
 #SBATCH --no-requeue
 
 REPO_DIR=${REPO_DIR:-$PWD}
+export OVERLAY_CHECKPOINT="${OVERLAY_CHECKPOINT:-$REPO_DIR/outputs/model_overlays/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200-mbpp-no-eos72}"
 export RECIPE=${RECIPE:-"$REPO_DIR/examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-gym-workspace-mbpp-no-eos72.yaml"}
 
 source "$REPO_DIR/infra/slurm/cscs/train_grpo_gym_workspace_mbpp.slurm"

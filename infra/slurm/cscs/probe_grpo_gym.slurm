@@ -23,8 +23,10 @@ export CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm026_ncclext.t
 export RECIPE=${RECIPE:-$REPO_DIR/examples/configs/recipes/llm/grpo-apertus1p5-8b-1n4g-megatron-probe-gym.yaml}
 export RUN_SCRIPT=${RUN_SCRIPT:-examples/nemo_gym/run_grpo_nemo_gym.py}
 export RUN_PREFIX=${RUN_PREFIX:-"/root/.local/bin/uv run --locked --extra mcore --extra nemo_gym python"}
-# The vLLM 0.26 image predates the checked-out Gym source overlay.
-export NRL_IGNORE_VERSION_MISMATCH=${NRL_IGNORE_VERSION_MISMATCH:-1}
+# Source overlays must rebuild their locked dependencies instead of suppressing
+# the container fingerprint check. An exact matching image can opt into reuse.
+unset NRL_IGNORE_VERSION_MISMATCH
+export NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-true}
 # `#SBATCH --export=NONE` otherwise propagates to the `srun` step.
 export SLURM_EXPORT_ENV=ALL
 source "$REPO_DIR/infra/slurm/cscs/probe_grpo_fixgate.slurm"
