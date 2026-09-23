@@ -40,6 +40,5 @@ logger:
   log_dir: logs/grpo-apertus-gym-workspace-mbpp
   wandb_enabled: true
   wandb:
-    entity: null
     project: nemo-gym
     name: ap1p5-workspace-mbpp

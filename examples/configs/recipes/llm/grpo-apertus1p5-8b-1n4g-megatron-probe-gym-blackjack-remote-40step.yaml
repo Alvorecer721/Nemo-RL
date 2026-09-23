@@ -4,7 +4,6 @@ defaults: grpo-apertus1p5-8b-1n4g-megatron-probe-gym.yaml
 logger:
   wandb_enabled: true
   wandb:
-    entity: null
     project: nemo-gym
     name: ap1p5-blackjack-40step
 data:

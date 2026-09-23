@@ -7,7 +7,7 @@ data:
   train:
     data_path: ${oc.env:MATH_WITH_JUDGE_TRAIN_PATH}
     repeat: 1
-    split_validation_size: null
+    split_validation_size: 0.0
   validation: null
 grpo:
   max_num_steps: 40
@@ -35,6 +35,5 @@ logger:
   wandb_enabled: true
   metric_denylist: []
   wandb:
-    entity: null
     project: nemo-gym
     name: ap1p5-math_with_judge-40step
