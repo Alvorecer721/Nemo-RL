@@ -76,7 +76,7 @@ class _FakeApp:
         return self._register(path)
 
 
-def _install_fake_vllm(monkeypatch):
+def _install_fake_vllm(monkeypatch, protocol_layout="openai"):
     """Stub exactly the vLLM surface _setup_vllm_openai_api_server imports."""
     for name in (
         "vllm",
@@ -117,7 +117,7 @@ def _install_fake_vllm(monkeypatch):
         OpenAIServingChat=_OpenAIServingChat,
     )
     module(
-        "vllm.entrypoints.openai.engine.protocol",
+        f"vllm.entrypoints.{protocol_layout}.engine.protocol",
         ErrorResponse=placeholder("ErrorResponse"),
     )
     module(
@@ -161,9 +161,9 @@ def _install_fake_vllm(monkeypatch):
         built.clear()
 
 
-def _build_server(monkeypatch, serving_chat_kwargs):
+def _build_server(monkeypatch, serving_chat_kwargs, protocol_layout="openai"):
     """Run the real server setup and hand back the three consumer stubs."""
-    _install_fake_vllm(monkeypatch)
+    _install_fake_vllm(monkeypatch, protocol_layout)
 
     worker = VllmAsyncGenerationWorkerImpl.__new__(VllmAsyncGenerationWorkerImpl)
     worker.cfg = {
@@ -247,3 +247,15 @@ def test_absent_kwargs_render_as_empty_dict(monkeypatch):
 
     assert renderer[0].kwargs["default_chat_template_kwargs"] == {}
     assert tokenization[0].kwargs["default_chat_template_kwargs"] == {}
+
+
+def test_vllm029_server_preserves_thinking_template(monkeypatch):
+    renderer, chat, tokenization = _build_server(
+        monkeypatch,
+        {"default_chat_template_kwargs": {"enable_thinking": True}},
+        protocol_layout="serve",
+    )
+    for consumer in (renderer, chat, tokenization):
+        assert consumer[0].kwargs["default_chat_template_kwargs"] == {
+            "enable_thinking": True
+        }

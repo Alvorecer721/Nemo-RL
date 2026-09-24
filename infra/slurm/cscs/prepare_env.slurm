@@ -26,7 +26,7 @@ set -euo pipefail
 echo "START TIME: $(date)"
 
 REPO_DIR=${REPO_DIR:-$PWD}
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl.toml}
 BRIDGE_ROOT=${BRIDGE_ROOT:-$REPO_DIR/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge}
 UV=${UV:-/root/.local/bin/uv}
 # Actor FQN filters for prefetch_venvs: the Megatron policy worker, both vLLM

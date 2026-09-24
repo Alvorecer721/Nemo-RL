@@ -21,7 +21,7 @@ import threading
 import types
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import ray
@@ -49,6 +49,7 @@ from nemo_rl.models.generation.vllm.vllm_worker_async import (
     _AsyncLLMHTTPClient,
 )
 from nemo_rl.models.policy import LoRAConfig, PolicyConfig
+from nemo_rl.models.policy.draft_config import Eagle3DraftConfig
 from nemo_rl.models.policy.lm_policy import Policy
 
 model_name = "Qwen/Qwen3-0.6B"
@@ -147,6 +148,120 @@ basic_dtensor_test_config: PolicyConfig = {
 }
 
 
+@pytest.mark.parametrize("async_engine", [False, True])
+def test_vllm_generation_selects_worker_extension(
+    async_engine,
+) -> None:
+    config = deepcopy(basic_vllm_test_config)
+    config["vllm_cfg"]["async_engine"] = async_engine
+    extension_fqn = "tests.extensions.CustomGenerationWorker"
+    config["worker_extension_cls_fqn"] = extension_fqn
+
+    cluster = MagicMock()
+    cluster.world_size.return_value = 1
+    cluster.num_gpus_per_node = 1
+
+    with (
+        patch.dict(
+            "nemo_rl.distributed.ray_actor_environment_registry.ACTOR_ENVIRONMENT_REGISTRY",
+            {extension_fqn: "python"},
+        ),
+        patch(
+            "nemo_rl.models.generation.vllm.vllm_generation.RayWorkerBuilder"
+        ) as worker_builder,
+        patch(
+            "nemo_rl.models.generation.vllm.vllm_generation.RayWorkerGroup"
+        ) as worker_group,
+        patch(
+            "nemo_rl.models.generation.vllm.vllm_generation.ray.get",
+            return_value=[None],
+        ),
+    ):
+        worker_group.return_value.dp_size = 1
+        VllmGeneration(cluster, config, defer_model_load=True)
+
+    assert worker_builder.call_args.args[:2] == (extension_fqn, config)
+    assert worker_builder.call_args.kwargs == (
+        {"defer_model_load": True} if async_engine else {}
+    )
+
+
+def test_vllm_generation_rejects_worker_extension_with_quantization() -> None:
+    config = deepcopy(basic_vllm_test_config)
+    config["worker_extension_cls_fqn"] = "tests.extensions.CustomGenerationWorker"
+    config["quant_cfg"] = "NVFP4"
+    cluster = MagicMock()
+    cluster.world_size.return_value = 1
+    cluster.num_gpus_per_node = 1
+
+    with pytest.raises(
+        ValueError,
+        match="worker_extension_cls_fqn and quant_cfg are mutually exclusive",
+    ):
+        VllmGeneration(cluster, config, defer_model_load=True)
+
+    cluster._init_placement_groups.assert_not_called()
+
+
+@pytest.mark.parametrize("async_engine", [False, True])
+def test_vllm_generation_rejects_unregistered_worker_extension(
+    async_engine: bool,
+) -> None:
+    config = deepcopy(basic_vllm_test_config)
+    config["vllm_cfg"]["async_engine"] = async_engine
+    config["worker_extension_cls_fqn"] = "tests.extensions.UnregisteredGenerationWorker"
+    cluster = MagicMock()
+    cluster.world_size.return_value = 1
+    cluster.num_gpus_per_node = 1
+
+    with (
+        patch(
+            "nemo_rl.models.generation.vllm.vllm_generation.RayWorkerGroup"
+        ) as worker_group,
+        pytest.raises(ValueError, match="No actor environment registered"),
+    ):
+        VllmGeneration(cluster, config, defer_model_load=True)
+
+    worker_group.assert_not_called()
+    cluster._init_placement_groups.assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["sglang", "megatron", "trtllm", "dynamo"])
+def test_generation_config_rejects_worker_extension_for_other_backends(
+    backend: str,
+) -> None:
+    config = deepcopy(basic_vllm_test_config)
+    config["backend"] = backend
+    config["worker_extension_cls_fqn"] = "tests.extensions.CustomGenerationWorker"
+
+    with pytest.raises(ValueError, match="only supported by the vLLM backend"):
+        configure_generation_config(config, MagicMock())
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "megatron", "trtllm", "dynamo"])
+@pytest.mark.parametrize("include_null", [False, True])
+def test_generation_config_allows_no_worker_extension(
+    backend: str,
+    include_null: bool,
+) -> None:
+    config = deepcopy(basic_vllm_test_config)
+    config["backend"] = backend
+    if include_null:
+        config["worker_extension_cls_fqn"] = None
+
+    configure_generation_config(config, MagicMock())
+
+
+def test_generation_config_allows_vllm_worker_extension() -> None:
+    config = deepcopy(basic_vllm_test_config)
+    extension_fqn = "tests.extensions.CustomGenerationWorker"
+    config["worker_extension_cls_fqn"] = extension_fqn
+
+    configured = configure_generation_config(config, MagicMock())
+
+    assert configured["worker_extension_cls_fqn"] == extension_fqn
+
+
 def test_context_capped_max_new_tokens():
     assert (
         _context_capped_max_new_tokens(
@@ -186,6 +301,34 @@ async def test_async_vllm_worker_uses_native_keep_pause_and_resume() -> None:
 
     worker.llm.pause_generation.assert_awaited_once_with(mode="keep", clear_cache=False)
     worker.llm.resume_generation.assert_awaited_once_with()
+
+
+def test_async_vllm_http_client_preserves_admission_rejection() -> None:
+    rejection = RuntimeError("request queue full")
+    calls = []
+
+    def check_admission(n=1, request_id=None):
+        calls.append((n, request_id))
+        if n > 1:
+            raise rejection
+
+    engine = types.SimpleNamespace(
+        model_config=None,
+        renderer=None,
+        input_processor=None,
+        vllm_config=None,
+        check_admission=check_admission,
+    )
+    loop = asyncio.new_event_loop()
+    try:
+        client = _AsyncLLMHTTPClient(engine, loop)
+        assert client.check_admission() is None
+        with pytest.raises(RuntimeError, match="request queue full") as exc:
+            client.check_admission(3, request_id="overloaded-request")
+        assert exc.value is rejection
+        assert calls == [(1, None), (3, "overloaded-request")]
+    finally:
+        loop.close()
 
 
 @pytest.mark.asyncio
@@ -448,6 +591,30 @@ def test_sampling_params_preserve_bad_words():
     assert sampling_params["bad_words"] == ["<image>", "<img>"]
 
 
+def test_vllm_latest_metric_drain_prunes_worker_histories():
+    worker = object.__new__(VllmAsyncGenerationWorkerImpl)
+    worker.cfg = {"vllm_cfg": {"enable_vllm_metrics_logger": True}}
+    worker._vllm_metrics_lock = threading.Lock()
+    worker.inflight_batch_sizes = [1, 2]
+    worker.num_pending_samples = [3, 4]
+    worker.kv_cache_usage_perc = [0.2, 0.6]
+    worker.generation_tokens = [10, 30]
+
+    latest = worker.drain_latest_vllm_logger_metrics()
+
+    assert latest == {
+        "inflight_batch_sizes": [2],
+        "num_pending_samples": [4],
+        "kv_cache_usage_perc": [0.6],
+        "generation_tokens": [30],
+    }
+    assert worker.inflight_batch_sizes == [2]
+    assert worker.num_pending_samples == [4]
+    assert worker.kv_cache_usage_perc == [0.6]
+    assert worker.generation_tokens == [30]
+    assert latest["generation_tokens"] is not worker.generation_tokens
+
+
 def test_resolve_enable_prefix_caching_respects_explicit_config(monkeypatch):
     def raise_if_called():
         raise AssertionError("CUDA capability should not be queried")
@@ -547,8 +714,23 @@ def _install_fake_vllm_openai_modules(monkeypatch):
             self.kwargs = kwargs
             self.instances.append(self)
 
-    class VLLMValidationError(Exception):
-        pass
+    class VLLMValidationError(ValueError):
+        def __init__(self, message, *, parameter=None, value=None):
+            super().__init__(message)
+            self.parameter = parameter
+            self.value = value
+
+        def __str__(self):
+            base = super().__str__()
+            extras = [
+                f"{name}={value}"
+                for name, value in (
+                    ("parameter", self.parameter),
+                    ("value", self.value),
+                )
+                if value is not None
+            ]
+            return f"{base} ({', '.join(extras)})" if extras else base
 
     class ToolParserManager:
         import_tool_parser = MagicMock()
@@ -661,6 +843,78 @@ def test_vllm_async_http_server_loads_reasoning_parser_plugin(monkeypatch):
     assert "reasoning_parser_plugin" not in openai_serving_chat.instances[0].kwargs
 
 
+def _nemo_gym_recognizes_context_overflow(
+    *, status: int, response_content: str
+) -> bool:
+    """Mirror responses_api_models/vllm_model/app.py overflow detection."""
+    return status == 400 and (
+        "context length" in response_content or "max_tokens" in response_content
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_returns_http_400_for_nemo_gym(monkeypatch):
+    """Overflow from _clamp_max_tokens must be HTTP 400 that NeMo Gym recognizes."""
+    _, _, openai_serving_chat = _install_fake_vllm_openai_modules(monkeypatch)
+
+    worker = VllmAsyncGenerationWorkerImpl.__new__(VllmAsyncGenerationWorkerImpl)
+    worker.cfg = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "val_temperature": 0.0,
+        "val_top_p": 1.0,
+        "vllm_cfg": {},
+    }
+    worker.llm = MagicMock(model_config="model-config", renderer="renderer")
+    worker._http_engine_client = worker.llm
+    worker._capture_calls = {}
+    worker.token_capture = None
+    worker.llm_async_engine_args = MagicMock()
+    worker.llm_async_engine_args.create_model_config.return_value = MagicMock(
+        served_model_name="served-model", model="model-path"
+    )
+
+    app = _FakeFastAPIApp()
+    worker._setup_vllm_openai_api_server(app)
+
+    max_model_len = 128
+    renderer = openai_serving_chat.instances[0].kwargs["online_renderer"]
+    renderer.model_config = types.SimpleNamespace(max_model_len=max_model_len)
+    serving_chat = openai_serving_chat.instances[0]
+    chat_handler = next(
+        handler for path, handler in app.routes if path == "/v1/chat/completions"
+    )
+    overflow_prompt = [0] * max_model_len
+
+    async def create_chat_completion(request, _raw_request):
+        renderer._clamp_max_tokens(request, request.max_tokens, overflow_prompt)
+
+    serving_chat.create_chat_completion = create_chat_completion
+    response = await chat_handler(
+        types.SimpleNamespace(
+            top_k=-1,
+            top_p=1.0,
+            temperature=1.0,
+            max_tokens=1,
+            max_completion_tokens=None,
+        ),
+        MagicMock(),
+    )
+
+    response_content = response.body.decode()
+    assert response.status_code == 400
+    assert "maximum context length" in response_content
+    assert "(parameter=input_tokens, value=128)" in response_content
+    assert _nemo_gym_recognizes_context_overflow(
+        status=response.status_code,
+        response_content=response_content,
+    )
+    error = json.loads(response_content)["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "input_tokens"
+    assert error["code"] == 400
+
+
 def test_nano_v3_reasoning_parser_swaps_reasoning_when_thinking_disabled(
     monkeypatch,
 ):
@@ -762,6 +1016,7 @@ def test_configure_generation_config_uses_real_startup_weights_without_draft_ref
         )
 
     assert configured["vllm_cfg"]["load_format"] == "auto"
+    assert configured["_draft_weights_from_refit"] is False
 
 
 @pytest.mark.parametrize("transport", ["vllm_s3_sparse", "vllm_zmq_sparse"])
@@ -807,6 +1062,7 @@ def test_configure_generation_config_keeps_dummy_startup_weights_with_draft_refi
     )
 
     assert configured["vllm_cfg"]["load_format"] == "dummy"
+    assert configured["_draft_weights_from_refit"] is True
 
 
 def test_configure_generation_config_keeps_real_quant_export_on_cpu() -> None:
@@ -1019,7 +1275,7 @@ def get_basic_megatron_test_config(
                 "data_parallel_sharding_strategy": "optim_grads_params",
             },
         },
-        "draft": {"enabled": False},
+        "draft": Eagle3DraftConfig(enabled=False),
         "optimizer": None,  # Remove default FSDP optimizer
         "scheduler": None,  # Remove default scheduler
         "max_grad_norm": 1.0,
@@ -1169,6 +1425,91 @@ def test_vllm_missing_required_config_key(cluster):
     print(f"Successfully caught missing config key with error: {error_message}")
 
 
+@pytest.mark.parametrize(
+    ("config_updates", "error_match"),
+    [
+        ({"colocated.enabled": True}, "not supported yet.*colocated"),
+        ({"refit_transport": "nccl_reshard"}, "explicitly unsupported.*nccl_reshard"),
+        (
+            {"refit_transport": "nixl"},
+            "not supported yet.*update_weights_from_checkpoint_engine",
+        ),
+        (
+            {"refit_transport": "custom.module:Engine"},
+            "not supported yet.*update_weights_from_checkpoint_engine",
+        ),
+        ({"refit_transport": "vllm_s3_sparse"}, "refit_transport"),
+        ({"refit_transport": "vllm_zmq_sparse"}, "refit_transport"),
+        ({"quant_cfg": "NVFP4_DEFAULT_CFG"}, "explicitly unsupported.*quant_cfg"),
+        ({"_draft_weights_from_refit": True}, "policy.draft.enabled=true"),
+        (
+            {
+                "vllm_kwargs": {
+                    "speculative_config": {
+                        "method": "mtp",
+                        "num_speculative_tokens": 1,
+                    }
+                },
+                "_mtp_weights_from_refit": True,
+            },
+            "not supported yet.*MTP draft weights",
+        ),
+    ],
+)
+def test_vllm_generation_rejects_unsupported_reload_refit_config(
+    config_updates, error_match
+):
+    class DummyCluster:
+        num_gpus_per_node = 1
+
+        def world_size(self):
+            return 1
+
+    vllm_config = deepcopy(basic_vllm_test_config)
+    vllm_config["colocated"]["enabled"] = False
+    vllm_config["refit_transport"] = None
+    vllm_config["vllm_cfg"]["refit_with_reload_api"] = True
+    for path, value in config_updates.items():
+        target = vllm_config
+        parts = path.split(".")
+        for part in parts[:-1]:
+            target = target[part]
+        target[parts[-1]] = value
+
+    with pytest.raises(AssertionError, match=error_match):
+        VllmGeneration(DummyCluster(), vllm_config)
+
+
+def test_vllm_validate_settings_rejects_unsupported_reload_refit_config():
+    vllm_config = deepcopy(basic_vllm_test_config)
+    vllm_config["colocated"]["enabled"] = True
+    vllm_config["vllm_cfg"]["refit_with_reload_api"] = True
+    master_config = types.SimpleNamespace(policy={"generation": vllm_config})
+
+    with pytest.raises(AssertionError, match="not supported yet.*colocated"):
+        VllmGeneration.validate_settings(master_config)
+
+
+def test_vllm_validate_settings_accepts_default_non_colocated_reload_refit():
+    vllm_config = deepcopy(basic_vllm_test_config)
+    vllm_config["colocated"]["enabled"] = False
+    vllm_config["refit_transport"] = None
+    vllm_config["vllm_cfg"]["refit_with_reload_api"] = True
+    master_config = types.SimpleNamespace(policy={"generation": vllm_config})
+
+    VllmGeneration.validate_settings(master_config)
+
+
+def test_vllm_validate_settings_accepts_missing_vllm_cfg_as_refit_disabled():
+    vllm_config = {
+        "backend": "vllm",
+        "colocated": {"enabled": False, "resources": {}},
+    }
+    master_config = types.SimpleNamespace(policy={"generation": vllm_config})
+
+    VllmGeneration.validate_settings(master_config)
+
+
 def test_vllm_policy_generation(policy, test_input_data, tokenizer):
     """Test vLLM policy generation capabilities."""
     # Test generation
@@ -1291,7 +1632,7 @@ async def test_vllm_policy_generation_async(
         lm_policy = Policy(cluster, dtensor_config, tokenizer)
 
         print("preparing refit info...")
-        state_dict_info = lm_policy.prepare_refit_info()
+        state_dict_info = lm_policy.prepare_refit_info(refit_payload_mode="hf_export")
         async_policy.prepare_refit_info(state_dict_info)
 
         print("refitting vllm policy...")
@@ -1392,7 +1733,7 @@ def test_vllm_worker_seed_behavior(cluster, tokenizer):
     dtensor_config = basic_dtensor_test_config
     lm_policy = Policy(cluster, dtensor_config, tokenizer)
 
-    state_dict_info = lm_policy.prepare_refit_info()
+    state_dict_info = lm_policy.prepare_refit_info(refit_payload_mode="hf_export")
     policy.prepare_refit_info(state_dict_info)
 
     print("refitting vllm policy...")
@@ -1722,6 +2063,11 @@ async def test_vllm_generation_with_hf_training_colocated(
     dtensor_config = deepcopy(basic_dtensor_test_config)
     dtensor_config["dtensor_cfg"]["cpu_offload"] = cpu_offload
     dtensor_config["dtensor_cfg"]["_v2"] = enable_lora
+    if enable_lora:
+        dtensor_config["dtensor_cfg"]["checkpoint"] = {
+            "model_save_format": "safetensors",
+            "save_consolidated": "false",
+        }
     dtensor_config["dtensor_cfg"]["lora_cfg"] = deepcopy(basic_lora_test_config)
     dtensor_config["dtensor_cfg"]["lora_cfg"]["enabled"] = enable_lora
     dtensor_config["train_global_batch_size"] = 4
@@ -1729,7 +2075,7 @@ async def test_vllm_generation_with_hf_training_colocated(
 
     # Prepare refit info
     print("Preparing refit info...")
-    state_dict_info = lm_policy.prepare_refit_info()
+    state_dict_info = lm_policy.prepare_refit_info(refit_payload_mode="hf_export")
     vllm_policy.prepare_refit_info(state_dict_info)
 
     # Test
@@ -1810,6 +2156,11 @@ async def test_vllm_generation_with_hf_training_non_colocated(
     dtensor_config["train_global_batch_size"] = 4
     # lora must use dtensor v2
     dtensor_config["dtensor_cfg"]["_v2"] = enable_lora
+    if enable_lora:
+        dtensor_config["dtensor_cfg"]["checkpoint"] = {
+            "model_save_format": "safetensors",
+            "save_consolidated": "false",
+        }
     dtensor_config["dtensor_cfg"]["lora_cfg"] = deepcopy(basic_lora_test_config)
     dtensor_config["dtensor_cfg"]["lora_cfg"]["enabled"] = enable_lora
     lm_policy = Policy(policy_cluster_separate, dtensor_config, tokenizer)
@@ -1829,7 +2180,7 @@ async def test_vllm_generation_with_hf_training_non_colocated(
     ray.get(futures_train + futures_inference)
 
     # prepare refit info
-    state_dict_info = lm_policy.prepare_refit_info()
+    state_dict_info = lm_policy.prepare_refit_info(refit_payload_mode="hf_export")
     vllm_policy.prepare_refit_info(state_dict_info)
 
     # Test
@@ -2485,7 +2836,7 @@ def test_vllm_weight_update_and_prefix_cache_reset(
         vllm_policy = VllmGeneration(cluster, vllm_config)
 
         print("preparing refit info...")
-        state_dict_info = lm_policy.prepare_refit_info()
+        state_dict_info = lm_policy.prepare_refit_info(refit_payload_mode="hf_export")
         vllm_policy.prepare_refit_info(state_dict_info)
 
         # Prepare input data (batch size 2)
@@ -2596,6 +2947,10 @@ def test_vllm_weight_update_memory(cluster, tokenizer, train_backend):
     elif train_backend == "dtensor_v2":
         train_config = deepcopy(basic_dtensor_test_config)
         train_config["dtensor_cfg"]["_v2"] = True
+        train_config["dtensor_cfg"]["checkpoint"] = {
+            "model_save_format": "safetensors",
+            "save_consolidated": "false",
+        }
     elif train_backend == "megatron":
         train_config = get_basic_megatron_test_config(tp=1, pp=1, precision="float32")
     else:
@@ -2603,7 +2958,7 @@ def test_vllm_weight_update_memory(cluster, tokenizer, train_backend):
     lm_policy = Policy(cluster, train_config, tokenizer)
 
     print("preparing refit info...")
-    state_dict_info = lm_policy.prepare_refit_info()
+    state_dict_info = lm_policy.prepare_refit_info(refit_payload_mode="hf_export")
     vllm_policy.prepare_refit_info(state_dict_info)
 
     print("refitting vllm policy...")
@@ -2677,7 +3032,7 @@ def test_vllm_generation_with_stop(cluster, test_input_data, tokenizer, is_eval)
         lm_policy = Policy(cluster, dtensor_config, tokenizer)
 
         print("preparing refit info...")
-        state_dict_info = lm_policy.prepare_refit_info()
+        state_dict_info = lm_policy.prepare_refit_info(refit_payload_mode="hf_export")
         vllm_generation.prepare_refit_info(state_dict_info)
 
         print("refitting vllm policy...")
@@ -2816,7 +3171,7 @@ async def test_vllm_refit_non_colocated_update_weights(
     ray.get(futures_train + futures_inference)
 
     # prepare refit info
-    state_dict_info = lm_policy.prepare_refit_info()
+    state_dict_info = lm_policy.prepare_refit_info(refit_payload_mode="hf_export")
     vllm_generation.prepare_refit_info(state_dict_info)
 
     print("refitting vllm policy...")
@@ -2939,7 +3294,9 @@ def test_vllm_generation_with_megatron_training(
         megatron_policy = Policy(cluster, megatron_config, test_tokenizer)
 
         print("preparing refit info...")
-        state_dict_info = megatron_policy.prepare_refit_info()
+        state_dict_info = megatron_policy.prepare_refit_info(
+            refit_payload_mode="hf_export"
+        )
         vllm_policy.prepare_refit_info(state_dict_info)
 
         print("Refitting vLLM policy with Megatron weights...")
@@ -3101,7 +3458,9 @@ def test_vllm_generation_with_megatron_training_moe_model(
         megatron_policy = Policy(moe_cluster, megatron_config, test_tokenizer)
 
         print("preparing refit info...")
-        state_dict_info = megatron_policy.prepare_refit_info()
+        state_dict_info = megatron_policy.prepare_refit_info(
+            refit_payload_mode="hf_export"
+        )
         vllm_policy.prepare_refit_info(state_dict_info)
 
         print("Refitting vLLM policy with Megatron weights...")
@@ -3227,7 +3586,7 @@ def test_vllm_megatron_weight_update_memory(cluster, tokenizer):
     megatron_policy = Policy(cluster, megatron_config, test_tokenizer)
 
     print("preparing refit info...")
-    state_dict_info = megatron_policy.prepare_refit_info()
+    state_dict_info = megatron_policy.prepare_refit_info(refit_payload_mode="hf_export")
     vllm_policy.prepare_refit_info(state_dict_info)
 
     print("Refitting vLLM policy with Megatron...")
@@ -3343,7 +3702,9 @@ def test_vllm_megatron_pipeline_parallel(cluster, tokenizer):
         megatron_policy = Policy(cluster, megatron_config, test_tokenizer)
 
         print("preparing refit info...")
-        state_dict_info = megatron_policy.prepare_refit_info()
+        state_dict_info = megatron_policy.prepare_refit_info(
+            refit_payload_mode="hf_export"
+        )
         vllm_policy.prepare_refit_info(state_dict_info)
 
         print("Refitting vLLM with Megatron PP=2 weights...")
@@ -3409,7 +3770,9 @@ def test_vllm_megatron_weight_update_with_packing(cluster, test_input_data):
         vllm_generation = VllmGeneration(cluster, vllm_config)
 
         # prepare refit info
-        state_dict_info = megatron_policy.prepare_refit_info()
+        state_dict_info = megatron_policy.prepare_refit_info(
+            refit_payload_mode="hf_export"
+        )
         vllm_generation.prepare_refit_info(state_dict_info)
 
         print("refitting vllm policy...")

@@ -125,12 +125,6 @@ def replace_prefix_tokens(
         "Tokenizer or model generation config must provide an EOS token ID"
     )
 
-    # The model isn't guaranteed to end on EOS (e.g. it hit max_tokens); chat
-    # templates always add one, so cut the model input to just before its EOS.
-    model_cut_end = len(model_prefix_token_ids)
-    if model_prefix_token_ids[-1] in effective_eos_token_ids:
-        model_cut_end -= 1
-
     # Locate the turn boundary by EOS count rather than token position. Qwen3
     # templates may strip prior reasoning blocks when re-rendering history;
     # EOS counting preserves the original generated reasoning tokens without
@@ -156,6 +150,10 @@ def replace_prefix_tokens(
         f"Template repr (detokenized): {repr(tokenizer.decode(template_token_ids))}"
     )
 
-    return (
-        model_prefix_token_ids[:model_cut_end] + template_token_ids[template_cut_start:]
-    )
+    # Keep the sampled terminator instead of replacing it with the template's
+    # possibly different EOS. Only a length-limited generation needs the
+    # template to supply the missing turn ending.
+    if model_prefix_token_ids[-1] in effective_eos_token_ids:
+        template_cut_start += 1
+
+    return model_prefix_token_ids + template_token_ids[template_cut_start:]

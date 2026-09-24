@@ -18,7 +18,7 @@ set -euo pipefail
 # REPO_DIR defaults to the job working dir ($PWD), which is also where the relative #SBATCH logs/ land.
 # (sbatch copies this script to /var/spool/slurmd, so BASH_SOURCE doesn't resolve here.)
 REPO_DIR=${REPO_DIR:-$PWD}
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl.toml}
 RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/nemo_rl_dpo_apertus_${SLURM_JOB_ID}}
 
 # Apertus stack: bridge fork (apertus support) shadows the image's bundled

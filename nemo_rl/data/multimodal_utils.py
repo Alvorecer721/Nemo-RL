@@ -37,8 +37,9 @@ if TYPE_CHECKING:
     # ``nemo_rl.data_plane`` and ``nemo_rl.data`` mutually importing.
     from nemo_rl.data_plane.interfaces import KVBatchMeta
 
-VLLM_MULTIMODAL_DATA_KEYS = frozenset({"vllm_images", "vllm_videos", "vllm_audios"})
-NATIVE_MULTIMODAL_KEYS = frozenset({"vllm_content", *VLLM_MULTIMODAL_DATA_KEYS})
+VLLM_CONTENT_KEY = "vllm_content"
+VLLM_MULTI_MODAL_DATA_KEY = "vllm_multi_modal_data"
+VLLM_PROMPT_KEYS = frozenset({VLLM_CONTENT_KEY, VLLM_MULTI_MODAL_DATA_KEY})
 IMAGE_CONTENT_TYPES = frozenset({"input_image", "image", "image_url"})
 VIDEO_CONTENT_TYPES = frozenset({"input_video", "video", "video_url"})
 AUDIO_CONTENT_TYPES = frozenset({"input_audio", "audio", "audio_url"})
@@ -1093,6 +1094,18 @@ def encode_multimodal_for_wire(
         )
 
 
+# Model inputs some remote-code processors omit from ``model_input_names`` even
+# though their forward requires them. Consumed by
+# ``extract_multimodal_model_inputs``; membership here does NOT imply the field
+# is wire-registered (see ``PACKED_/PER_TOKEN_MULTIMODAL_FIELDS``).
+UNDECLARED_MULTIMODAL_MODEL_INPUTS = (
+    "imgs_sizes",
+    "num_frames",
+    "pixel_values_flat",
+    "image_num_patches",
+)
+
+
 def get_multimodal_keys_from_processor(processor) -> list[str]:
     """Get keys of the multimodal data that can be used as model inputs.
 
@@ -1216,12 +1229,7 @@ def extract_multimodal_model_inputs(
     # TODO(rohitrango): Let ProcessorInterface declare model-specific media inputs.
     # Some remote-code processors omit these inputs from model_input_names even
     # though their model forward requires them.
-    for key in (
-        "imgs_sizes",
-        "num_frames",
-        "pixel_values_flat",
-        "image_num_patches",
-    ):
+    for key in UNDECLARED_MULTIMODAL_MODEL_INPUTS:
         if key in processed and key not in multimodal_keys:
             multimodal_keys.append(key)
     for key in multimodal_keys:
@@ -1233,7 +1241,7 @@ def extract_multimodal_model_inputs(
                 f"Processor model input {key!r} must be a torch.Tensor, got "
                 f"{type(value).__name__}."
             )
-        if key == "imgs_sizes":
+        if key in ("imgs_sizes", "num_frames"):
             value = value.to(dtype=torch.int32)
         extracted[key] = PackedTensor(
             value,

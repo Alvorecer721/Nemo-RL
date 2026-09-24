@@ -6,12 +6,12 @@ set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 EXPECTED_HEAD=$(git -C "$REPO_DIR" rev-parse HEAD)
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm029.toml}
 GLM_CKPT=${GLM_CKPT:-/capstor/store/cscs/swissai/infra01/hf_models/models/zai-org/GLM-5.1}
 GLM_MEGATRON_CACHE=${GLM_MEGATRON_CACHE:-/iopsstor/scratch/cscs/xyixuan/.cache/huggingface/nemo_rl_glm51_tp1pp18ep4}
 GLM_RECIPE=${GLM_RECIPE:-$REPO_DIR/examples/configs/recipes/llm/autoresearch/grpo-glm5.1-80n4g-megatron-tp2pp18ep16-async-vllm-tp32-r3-10step.yaml}
 GLM_RUN_ROOT=${GLM_RUN_ROOT:-/iopsstor/scratch/cscs/xyixuan/nemo_rl_glm51_r3_10step/$EXPECTED_HEAD}
-GLM_RESERVATION=${GLM_RESERVATION-SD-69241-apertus-1-5-0}
+GLM_RESERVATION=${GLM_RESERVATION-}
 RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY:-68719476736}
 RAY_LOG_SYNC_FREQUENCY=${RAY_LOG_SYNC_FREQUENCY:-30}
 SBATCH_BIN=${SBATCH_BIN:-sbatch}

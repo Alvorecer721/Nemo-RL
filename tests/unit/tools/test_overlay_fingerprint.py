@@ -17,12 +17,11 @@
 import base64
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[3] / "tools/restamp_overlay_fingerprint.py"
 BASE = {
@@ -30,7 +29,25 @@ BASE = {
     "uv.lock": "old-lock",
     "submodules/3rdparty/Bridge": "abc123",
     "submodules/3rdparty/Gym": "def456",
+    "submodules/3rdparty/kernels": "789abc",
 }
+LOCK = """
+[[package]]
+name = "project"
+source = { editable = "." }
+
+[[package]]
+name = "core"
+source = { editable = "3rdparty/Bridge/3rdparty/LM" }
+
+[[package]]
+name = "gym"
+source = { editable = "3rdparty/Gym" }
+
+[[package]]
+name = "wheel"
+source = { registry = "https://pypi.org/simple" }
+"""
 
 
 class OverlayFingerprintTests(unittest.TestCase):
@@ -39,14 +56,17 @@ class OverlayFingerprintTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.container = Path(temporary.name) / "container-fingerprint"
         self.source = Path(temporary.name) / "source-fingerprint"
+        self.lock = Path(temporary.name) / "uv.lock"
+        self.lock.write_text(LOCK)
         self.original = json.dumps(BASE).encode()
         self.container.write_bytes(self.original)
         self.source.write_bytes(self.original)
 
-    def _run(self, requested):
+    def _run(self, requested, command=None):
         payload = json.dumps(requested).encode()
+        command = command or ["restamp", str(self.container), str(self.source)]
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), str(self.container), str(self.source)],
+            [sys.executable, str(SCRIPT), *command, "--lock", str(self.lock)],
             env={
                 **os.environ,
                 "NEMO_RL_BUILD_FINGERPRINT_B64": base64.b64encode(payload).decode(),
@@ -65,8 +85,8 @@ class OverlayFingerprintTests(unittest.TestCase):
 
     def test_changed_or_missing_requested_pins_preserve_both_fingerprints(self):
         cases = [
-            {**BASE, "submodules/3rdparty/Bridge": "different"},
-            {key: value for key, value in BASE.items() if not key.endswith("Bridge")},
+            {**BASE, "submodules/3rdparty/kernels": "different"},
+            {key: value for key, value in BASE.items() if not key.endswith("kernels")},
             {**BASE, "submodules/3rdparty/New": "new-pin"},
             {"pyproject.toml": "new-project", "uv.lock": "new-lock"},
             {**BASE, "submodules/3rdparty/Bridge": None},
@@ -78,6 +98,41 @@ class OverlayFingerprintTests(unittest.TestCase):
                 self.assertIn("submodule", result.stderr.lower())
                 self.assertEqual(self.container.read_bytes(), self.original)
                 self.assertEqual(self.source.read_bytes(), self.original)
+
+    def test_shipped_editable_submodules_may_move(self):
+        requested = {
+            **BASE,
+            "submodules/3rdparty/Bridge": "moved-with-nested-core",
+            "submodules/3rdparty/Gym": "moved",
+        }
+        listed, _ = self._run(requested, ["shipped-submodules", str(self.container)])
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(listed.stdout.split(), ["3rdparty/Bridge", "3rdparty/Gym"])
+
+        restamp = ["restamp", str(self.container), str(self.source), "--shipped"]
+        refused, _ = self._run(requested, [*restamp, "3rdparty/Gym"])
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("3rdparty/Bridge", refused.stderr)
+        self.assertEqual(self.container.read_bytes(), self.original)
+
+        result, payload = self._run(requested, [*restamp, *listed.stdout.split()])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.container.read_bytes(), payload)
+
+    def test_shipping_a_baked_submodule_does_not_excuse_its_pin(self):
+        requested = {**BASE, "submodules/3rdparty/kernels": "different"}
+        result, _ = self._run(
+            requested,
+            [
+                "restamp",
+                str(self.container),
+                str(self.source),
+                "--shipped",
+                "3rdparty/kernels",
+            ],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.container.read_bytes(), self.original)
 
     def test_missing_inherited_pins_preserve_both_fingerprints(self):
         for inherited in ({"uv.lock": "old-lock"}, {}, []):

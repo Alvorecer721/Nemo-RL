@@ -193,11 +193,8 @@ class TestPrefetchVenvs:
 
             assert mock_create_venv.call_count == 4
 
-    def test_prefetch_venvs_raises_after_final_failure(
-        self, prefetch_venvs_func, monkeypatch
-    ):
+    def test_prefetch_venvs_reports_final_failure(self, prefetch_venvs_func):
         """A release image must not silently omit an unready worker."""
-        monkeypatch.setenv("NRL_VENV_PREFETCH_MAX_ATTEMPTS", "1")
         with patch(
             "nemo_rl.utils.prefetch_venvs.create_local_venv"
         ) as mock_create_venv:
@@ -207,9 +204,11 @@ class TestPrefetchVenvs:
                 "/path/to/venv/bin/python",
             ]
 
-            with pytest.raises(RuntimeError, match="VllmGenerationWorker"):
-                prefetch_venvs_func(filters=None)
+            failed = prefetch_venvs_func(filters=None, max_attempts=1)
 
+            assert failed == [
+                "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker"
+            ]
             assert mock_create_venv.call_count == 3
 
     def test_prefetch_venvs_case_sensitive_filter(self, prefetch_venvs_func):
@@ -267,11 +266,8 @@ class TestPrefetchVenvs:
             assert "DTensorPolicyWorker" in captured.out
             assert "MegatronPolicyWorker" in captured.out
 
-    def test_prefetch_venvs_summary_with_failures(
-        self, prefetch_venvs_func, capsys, monkeypatch
-    ):
+    def test_prefetch_venvs_summary_with_failures(self, prefetch_venvs_func, capsys):
         """Test that summary includes failed actor names when errors occur."""
-        monkeypatch.setenv("NRL_VENV_PREFETCH_MAX_ATTEMPTS", "1")
         with patch(
             "nemo_rl.utils.prefetch_venvs.create_local_venv"
         ) as mock_create_venv:
@@ -281,10 +277,44 @@ class TestPrefetchVenvs:
                 "/path/to/venv/bin/python",
             ]
 
-            with pytest.raises(RuntimeError, match="VllmGenerationWorker"):
-                prefetch_venvs_func(filters=None)
+            failed = prefetch_venvs_func(filters=None, max_attempts=1)
 
+            assert failed
             captured = capsys.readouterr()
             assert "Venv prefetching complete! Summary:" in captured.out
             assert "Prefetched: 2" in captured.out
             assert "Failed: 1" in captured.out
+
+    def test_prefetch_venvs_returns_the_failed_actors(self, prefetch_venvs_func):
+        """A failed venv is reported to the caller, not just printed.
+
+        This runs during the image build. Before this returned anything, a venv
+        that failed to build was printed in the summary and then swallowed, so
+        the build went green and the actor only died the first time someone
+        launched it.
+        """
+        with patch(
+            "nemo_rl.utils.prefetch_venvs.create_local_venv"
+        ) as mock_create_venv:
+            mock_create_venv.side_effect = [
+                Exception("Test error"),
+                "/path/to/venv/bin/python",
+                "/path/to/venv/bin/python",
+            ]
+
+            failed = prefetch_venvs_func(filters=None, max_attempts=1)
+
+        assert failed == [
+            "nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker"
+        ]
+
+    def test_prefetch_venvs_returns_empty_when_all_succeed(self, prefetch_venvs_func):
+        """The success path must stay falsy, or every build would fail."""
+        with patch(
+            "nemo_rl.utils.prefetch_venvs.create_local_venv"
+        ) as mock_create_venv:
+            mock_create_venv.return_value = "/path/to/venv/bin/python"
+
+            failed = prefetch_venvs_func(filters=None)
+
+        assert failed == []

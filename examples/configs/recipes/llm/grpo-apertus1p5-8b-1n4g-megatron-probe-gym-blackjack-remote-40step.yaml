@@ -1,37 +1,30 @@
 # Forty-step Apertus remote Blackjack validation.  Five fixture prompts
 # repeated 32 times give the synchronous four-prompt collector exactly 40 steps.
 defaults: grpo-apertus1p5-8b-1n4g-megatron-probe-gym.yaml
-
 logger:
   wandb_enabled: true
   wandb:
-    entity: anunay-yadav-epfl
     project: nemo-gym
     name: ap1p5-blackjack-40step
-    # Do not upload raw remote Gym results; they can carry environment metadata.
-    log_nemo_gym_full_result_tables: false
-
 data:
   train:
     data_path: 3rdparty/Gym-workspace/Gym/resources_servers/blackjack/data/example.jsonl
     repeat: 32
   validation:
     data_path: 3rdparty/Gym-workspace/Gym/resources_servers/blackjack/data/example.jsonl
-
 grpo:
-  # Five request rows x 32 repeats / four prompts per update = 40 updates.
-  # Each prompt receives four independently dealt game episodes.
-  num_prompts_per_step: 4
-  num_generations_per_prompt: 4
   max_num_steps: 40
-
-policy:
-  # Keep the optimization batch equal to prompts x generations.
-  train_global_batch_size: 16
-
 env:
   should_log_nemo_gym_responses: false
   nemo_gym:
+    token_id_capture:
+      enabled: true
+      all_agents: true
+      dir: ${oc.env:NEMO_GYM_TOKEN_CAPTURE_DIR,/tmp/nemo_gym_token_capture}
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          supply_prefix_token_ids: true
     config_paths:
     - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
     - resources_servers/blackjack/configs/blackjack_remote.yaml

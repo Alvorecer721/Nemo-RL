@@ -985,7 +985,9 @@ def setup(
         worker_init_timing_metrics["collective_init_time_s"] = time.perf_counter() - t0
 
     if backend != "sglang":
-        state_dict_info = policy.prepare_refit_info()
+        state_dict_info = policy.prepare_refit_info(
+            refit_payload_mode=policy_generation.get_refit_payload_mode()
+        )
         if policy_generation is not None:
             policy_generation.prepare_refit_info(state_dict_info)
 
@@ -1469,6 +1471,9 @@ def ppo_train(
                             task_to_env=task_to_env,
                             max_seq_len=None,
                             generation_config=generation_config,
+                            num_generations_per_prompt=(
+                                master_config.ppo.num_generations_per_prompt
+                            ),
                             log_full_result_tables=should_log_nemo_gym_full_result_tables(
                                 wandb_enabled=master_config.logger["wandb_enabled"],
                                 wandb_config=master_config.logger["wandb"],
@@ -2002,7 +2007,7 @@ def ppo_train(
                             tokenizer_path=os.path.join(
                                 checkpoint_path, "policy", "tokenizer"
                             ),
-                            checkpointing_cfg=master_config.checkpointing,
+                            is_final_checkpoint=is_last_step,
                         )
                         policy.offload_to_cpu()
 
@@ -2019,7 +2024,7 @@ def ppo_train(
                             tokenizer_path=os.path.join(
                                 checkpoint_path, "value", "tokenizer"
                             ),
-                            checkpointing_cfg=master_config.checkpointing,
+                            is_final_checkpoint=is_last_step,
                         )
                         value_model.finish_training()
 
@@ -2975,7 +2980,7 @@ def async_ppo_train(
                             tokenizer_path=os.path.join(
                                 checkpoint_path, "policy", "tokenizer"
                             ),
-                            checkpointing_cfg=master_config.checkpointing,
+                            is_final_checkpoint=is_last_step,
                         )
                         policy.offload_to_cpu()
 
@@ -2992,7 +2997,7 @@ def async_ppo_train(
                             tokenizer_path=os.path.join(
                                 checkpoint_path, "value", "tokenizer"
                             ),
-                            checkpointing_cfg=master_config.checkpointing,
+                            is_final_checkpoint=is_last_step,
                         )
                         value_model.finish_training()
 

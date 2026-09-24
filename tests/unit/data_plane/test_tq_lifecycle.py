@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import Callable
-from unittest.mock import MagicMock
+import pickle
+from pathlib import Path
+from typing import Any, Callable
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -34,10 +36,12 @@ from tensordict import TensorDict
 
 transfer_queue = pytest.importorskip("transfer_queue")  # noqa: F841
 
+from nemo_rl.data_plane import build_data_plane_client
 from nemo_rl.data_plane.column_io import kv_first_write, read_columns
 from nemo_rl.data_plane.interfaces import DataPlaneClient, KVBatchMeta
 from nemo_rl.data_plane.schema import DP_TRAIN_FIELDS
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+from tests.unit.data_plane.conftest import _make_tq_cfg
 
 
 def _register_partition(client: DataPlaneClient) -> None:
@@ -116,6 +120,7 @@ def test_register_partition_uses_unique_schema_warmup_key(monkeypatch) -> None:
 
     monkeypatch.setattr(tq_adapter.tq, "kv_batch_put", fake_put)
     monkeypatch.setattr(tq_adapter.tq, "kv_clear", fake_clear)
+    monkeypatch.setattr(tq_adapter, "_tracked_fields", lambda pid: set())
     # bootstrap=False only connects to an existing controller; stubbing that
     # lets the real __init__ run, so this test cannot drift from it.
     monkeypatch.setattr(tq_adapter, "_connect_existing", lambda: None)
@@ -171,6 +176,42 @@ def test_register_partition_uses_unique_schema_warmup_key(monkeypatch) -> None:
     ]
 
 
+def test_register_partition_skips_fields_the_controller_already_tracks(
+    monkeypatch,
+) -> None:
+    """Fields the controller already tracks are not warmed with a float32 placeholder."""
+    from nemo_rl.data_plane.adapters import transfer_queue as tq_adapter
+
+    put_calls = []
+    tracked = MagicMock(return_value={"input_ids", "routed_experts"})
+    monkeypatch.setattr(
+        tq_adapter.tq, "kv_batch_put", lambda **kwargs: put_calls.append(kwargs)
+    )
+    monkeypatch.setattr(tq_adapter.tq, "kv_clear", lambda **kwargs: None)
+    monkeypatch.setattr(tq_adapter, "_tracked_fields", tracked)
+    monkeypatch.setattr(tq_adapter, "_connect_existing", lambda: None)
+
+    client = tq_adapter.TQDataPlaneClient(_make_tq_cfg("simple"), bootstrap=False)
+    client.register_partition(
+        partition_id="train",
+        fields=["input_ids", "routed_experts", "advantages"],
+        num_samples=2,
+        consumer_tasks=["train"],
+    )
+
+    tracked.assert_called_once_with("train")
+    assert [list(call["fields"].keys()) for call in put_calls] == [["advantages"]]
+
+    # Fields learned from the controller stay warm for this client.
+    client.register_partition(
+        partition_id="train",
+        fields=["input_ids", "routed_experts"],
+        num_samples=2,
+        consumer_tasks=["train"],
+    )
+    assert len(put_calls) == 1
+
+
 def test_data_operation_guard_covers_the_full_interface() -> None:
     public_abstract_methods = {
         name
@@ -193,6 +234,7 @@ def test_each_public_data_operation_marks_the_client_dirty(
     tq_client.kv_retrieve_keys.return_value = ["sample-0"]
     tq_client.check_consumption_status.return_value = True
     monkeypatch.setattr(tq_adapter.tq, "get_client", MagicMock(return_value=tq_client))
+    monkeypatch.setattr(tq_adapter, "_tracked_fields", lambda pid: set())
     monkeypatch.setattr(tq_adapter.tq, "kv_batch_put", MagicMock())
     monkeypatch.setattr(
         tq_adapter.tq,
@@ -262,6 +304,97 @@ def test_checkpoint_lifecycle_forwards_to_tq(monkeypatch, tmp_path) -> None:
     assert load_calls == [checkpoint_dir]
     assert metadata == {"step": 7}
     assert client._data_operations_started
+
+
+def test_deserialization_rebuilds_mooncake_client_before_attach(monkeypatch) -> None:
+    from nemo_rl.data_plane.adapters import tq_mooncake_checkpoint
+    from nemo_rl.data_plane.adapters import transfer_queue as tq_adapter
+
+    cfg = {
+        "enabled": True,
+        "impl": "transfer_queue",
+        "backend": "mooncake_cpu",
+        "claim_meta_poll_interval_s": 0.5,
+        "mooncake_cpu": {
+            "reuse_registered_buffers": False,
+        },
+    }
+    events: list[str] = []
+    monkeypatch.setattr(tq_adapter, "_get_local_node_ip", lambda: "")
+    monkeypatch.setattr(
+        tq_adapter,
+        "_patch_mooncake_register_check",
+        lambda: events.append("register_patch"),
+    )
+    monkeypatch.setattr(
+        tq_mooncake_checkpoint,
+        "install_tq_mooncake_checkpoint_plugin",
+        lambda: events.append("checkpoint_plugin"),
+    )
+    monkeypatch.setattr(
+        tq_adapter, "_connect_existing", lambda: events.append("connect")
+    )
+    bootstrap = MagicMock(side_effect=AssertionError("unexpected TQ bootstrap"))
+    monkeypatch.setattr(tq_adapter, "_init_tq", bootstrap)
+
+    source = object.__new__(tq_adapter.TQDataPlaneClient)
+    source._cfg = cfg
+    restored = pickle.loads(pickle.dumps(source))
+
+    assert events == ["register_patch", "checkpoint_plugin", "connect"]
+    assert restored._cfg == cfg
+    assert restored._supports_checkpointing is True
+    bootstrap.assert_not_called()
+
+
+@pytest.mark.parametrize("storage_metadata", [{}, {"storage_saved": False}])
+@pytest.mark.parametrize("operation", ["save", "load"])
+def test_checkpoint_rejects_incomplete_storage(
+    monkeypatch,
+    tmp_path,
+    storage_metadata: dict[str, Any],
+    operation: str,
+) -> None:
+    from nemo_rl.data_plane.adapters import transfer_queue as tq_adapter
+
+    checkpoint_dir = tmp_path / f"{operation}-checkpoint"
+    connect = MagicMock()
+    load = MagicMock()
+
+    def save(
+        path: str | Path,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        del metadata
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "metadata.json").write_text(json.dumps(storage_metadata))
+
+    monkeypatch.setattr(tq_adapter, "_connect_existing", connect)
+    monkeypatch.setattr(tq_adapter.tq, "save_checkpoint", save)
+    monkeypatch.setattr(tq_adapter.tq, "load_checkpoint", load)
+
+    client = object.__new__(tq_adapter.TQDataPlaneClient)
+    client._backend = "simple"
+    client._supports_checkpointing = True
+    client._data_operations_started = False
+
+    if operation == "load":
+        checkpoint_dir.mkdir()
+        (checkpoint_dir / "metadata.json").write_text(json.dumps(storage_metadata))
+
+    with pytest.raises(RuntimeError, match="storage_saved must be true"):
+        if operation == "save":
+            client.save_checkpoint(checkpoint_dir)
+        else:
+            client.load_checkpoint(checkpoint_dir)
+
+    if operation == "save":
+        connect.assert_called_once_with()
+    else:
+        connect.assert_not_called()
+    load.assert_not_called()
 
 
 def test_list_sample_ids_uses_tq_partition_listing(monkeypatch) -> None:
@@ -341,7 +474,7 @@ def test_failed_checkpoint_load_leaves_client_in_dirty_state(
 
 
 @pytest.mark.parametrize("operation", ["save", "load"])
-def test_mooncake_checkpoint_lifecycle_fails_loudly(
+def test_unsupported_backend_checkpoint_lifecycle_fails_loudly(
     monkeypatch,
     tmp_path,
     operation: str,
@@ -356,12 +489,12 @@ def test_mooncake_checkpoint_lifecycle_fails_loudly(
     monkeypatch.setattr(tq_adapter.tq, "load_checkpoint", load)
 
     client = object.__new__(tq_adapter.TQDataPlaneClient)
-    client._backend = "mooncake_cpu"
+    client._backend = "future_backend"
     client._supports_checkpointing = False
     client._data_operations_started = False
     checkpoint_dir = tmp_path / "step-7"
 
-    with pytest.raises(NotImplementedError, match="mooncake_cpu"):
+    with pytest.raises(NotImplementedError, match="future_backend"):
         if operation == "save":
             client.save_checkpoint(checkpoint_dir)
         else:
@@ -408,6 +541,46 @@ def test_smoke_round_trip(tq_client) -> None:
     assert tq_client.check_consumption_status("smoke", ["read"])
 
     tq_client.clear_samples(sample_ids=None, partition_id="smoke")
+
+
+def test_reregistration_over_stored_integer_rows_issues_no_placeholder(
+    tq_client,
+) -> None:
+    """A connect-only client re-registering over stored rows issues no float32 placeholder."""
+    from nemo_rl.data_plane.adapters import transfer_queue as tq_adapter
+
+    partition_id = "restored-int-schema"
+    sample_ids = ["r0", "r1"]
+    input_ids = torch.tensor([[11, 12, 13], [21, 22, 23]], dtype=torch.int64)
+    tq_client.register_partition(
+        partition_id=partition_id,
+        fields=["input_ids"],
+        num_samples=len(sample_ids),
+        consumer_tasks=["train"],
+    )
+    tq_client.put_samples(
+        sample_ids=sample_ids,
+        partition_id=partition_id,
+        fields=TensorDict({"input_ids": input_ids}, batch_size=[2]),
+    )
+
+    restored = build_data_plane_client(_make_tq_cfg("simple"), bootstrap=False)
+    with patch.object(
+        tq_adapter.tq, "kv_batch_put", wraps=tq_adapter.tq.kv_batch_put
+    ) as put:
+        restored.register_partition(
+            partition_id=partition_id,
+            fields=["input_ids"],
+            num_samples=len(sample_ids),
+            consumer_tasks=["train"],
+        )
+    put.assert_not_called()
+    out = restored.get_samples(
+        sample_ids=sample_ids, partition_id=partition_id, select_fields=["input_ids"]
+    )
+    assert out["input_ids"].dtype == torch.int64
+    assert torch.equal(out["input_ids"], input_ids)
+    tq_client.clear_samples(sample_ids=sample_ids, partition_id=partition_id)
 
 
 def test_smoke_round_trip_backends(tq_client_backends) -> None:

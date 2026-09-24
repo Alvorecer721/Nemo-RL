@@ -11,7 +11,6 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=64
 #SBATCH --partition=normal
-#SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --export=NONE
 
 set -euo pipefail
@@ -37,7 +36,7 @@ case "$SAVE_MODE" in
 esac
 
 REPO_DIR=${REPO_DIR:-$SLURM_SUBMIT_DIR}
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm0251.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm0251.toml}
 RUN_DIR=${RUN_DIR:-$REPO_DIR/logs/glm51_checkpoint_control_${SAVE_MODE}_${PHASE}_${SLURM_JOB_ID}}
 XIELU_SITE=${XIELU_SITE:-/capstor/store/cscs/swissai/infra01/MLLM/wheelhouse/aarch64/xielu-site-current}
 APERTUS_CKPT=${APERTUS_CKPT:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200}

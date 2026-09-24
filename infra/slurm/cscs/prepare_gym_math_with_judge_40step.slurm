@@ -13,7 +13,7 @@
 
 set -euo pipefail
 REPO_DIR=${REPO_DIR:-$PWD}
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm026_ncclext.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm029.toml}
 export MATH_WITH_JUDGE_DATA_DIR=${MATH_WITH_JUDGE_DATA_DIR:-$REPO_DIR/outputs/nemo_gym/math_with_judge/${SLURM_JOB_ID}}
 export MATH_WITH_JUDGE_DATASET_REVISION=${MATH_WITH_JUDGE_DATASET_REVISION:-b6ae8c60f5c1f2b594e2140b91c49c9ad0949e29}
 export MATH_WITH_JUDGE_PREPARATION_SCRIPT=$REPO_DIR/examples/nemo_gym/apertus/prepare_deepscaler_math_with_judge.py

@@ -13,7 +13,7 @@
 
 set -euo pipefail
 REPO_DIR=${REPO_DIR:-$PWD}
-CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/docker/nemo_rl_vllm026_ncclext.toml}
+CONTAINER_ENV=${CONTAINER_ENV:-$REPO_DIR/infra/slurm/cscs/environments/nemo_rl_vllm029.toml}
 OUTPUT_DIR=${OUTPUT_DIR:-$REPO_DIR/outputs/apertus-mbpp}
 REVISION=${REVISION:-4bb6404fdc6cacfda99d4ac4205087b89d32030c}
 UV=${UV:-/root/.local/bin/uv}
