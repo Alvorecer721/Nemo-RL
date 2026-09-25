@@ -373,6 +373,8 @@ environments = [
 ]
 preview = true # Enable preview features like extra-build-dependencies
 no-build-isolation-package = [
+  # The Git source builds the PyTorch extension in transformer-engine itself.
+  "transformer-engine",
   "transformer-engine-torch",
   "flash-attn",
   "mamba-ssm",
@@ -584,6 +586,7 @@ flash-attn = [{ requirement = "torch", match-runtime = true }]
 # Git-sourced packages CAN use match-runtime = true if we provide dependency-metadata
 deep_ep = [{ requirement = "torch", match-runtime = true }]
 deep_gemm = [{ requirement = "torch", match-runtime = true }]
+transformer-engine = [{ requirement = "torch", match-runtime = true }]
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }]
 mamba-ssm = [{ requirement = "torch", match-runtime = true }]
 causal-conv1d = [{ requirement = "torch", match-runtime = true }]
