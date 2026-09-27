@@ -183,11 +183,38 @@ def test_spec_decode_metrics_failure_does_not_drop_replica_metrics():
     gen._step_metrics_snapshot = {}
     _generate(gen)
     with patch.object(
-        gen, "_get_raw_spec_counters", side_effect=ray.exceptions.ActorDiedError()
+        gen, "_get_raw_spec_counters", side_effect=RuntimeError("reader gone")
     ):
         metrics = gen.get_step_metrics()
     assert metrics["vllm/replica_0/calls_completed"] == 1
     assert gen._step_metrics_snapshot is None
+
+
+def test_step_metrics_propagate_dead_actor_and_reset_snapshot():
+    gen = _make_generation(dp_size=2)
+    gen._step_metrics_snapshot = {}
+    with (
+        patch.object(
+            gen, "_get_raw_spec_counters", side_effect=ray.exceptions.ActorDiedError()
+        ),
+        pytest.raises(ray.exceptions.RayActorError),
+    ):
+        gen.get_step_metrics()
+    assert gen._step_metrics_snapshot is None
+
+
+def test_step_metrics_combine_replica_and_engine_metrics_from_one_snapshot():
+    gen = _make_generation(dp_size=2)
+    gen._step_metrics_snapshot = {"vllm:generation_tokens": 2.0}
+    _generate(gen)
+    with patch.object(
+        gen, "_get_raw_spec_counters", return_value={"vllm:generation_tokens": 5.0}
+    ) as read_counters:
+        metrics = gen.get_step_metrics()
+    assert metrics["vllm/replica_0/calls_completed"] == 1
+    assert metrics["vllm/generation_tokens"] == 3.0
+    assert gen._step_metrics_snapshot is None
+    read_counters.assert_called_once_with()
 
 
 def _attach(gen: VllmGeneration, **policy_kwargs) -> GenerationFleetHealth:

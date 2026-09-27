@@ -37,7 +37,7 @@ def _config(*, async_enabled: bool, dynamic_sampling: bool) -> MasterConfig:
 
 
 def test_async_grpo_rejects_silently_ignored_dynamic_sampling() -> None:
-    with pytest.raises(NotImplementedError, match="silently ignored"):
+    with pytest.raises(NotImplementedError, match="use_dynamic_sampling=true is not supported by async_grpo_train"):
         _validate_async_dynamic_sampling_capability(
             _config(async_enabled=True, dynamic_sampling=True)
         )

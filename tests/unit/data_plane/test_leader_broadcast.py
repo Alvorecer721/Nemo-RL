@@ -11,16 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit test for ``_broadcast_batched_data_dict`` on a 2-rank gloo group.
+"""Tests for ``_broadcast_batched_data_dict`` on two-rank process groups.
 
 Exercises the helper that backs ``_fetch(fetch_policy="leader_broadcast")``.
-Runs on CPU (gloo) so it stays in the no-GPU Tier 1 lane.
+Most cases run on CPU with Gloo; one optional NCCL case covers device staging.
 """
 
 from __future__ import annotations
 
 import os
 from functools import partial
+from pathlib import Path
 
 import pytest
 import torch
@@ -32,22 +33,15 @@ from nemo_rl.data_plane.worker_mixin import _broadcast_batched_data_dict
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
 
-def _noncontiguous_int16_routes() -> torch.Tensor:
-    routes = torch.tensor(
-        [[[-32768, -1], [127, 128]], [[255, 256], [1024, 32767]]],
-        dtype=torch.int16,
-    ).transpose(0, 1)
-    assert not routes.is_contiguous()
-    return routes
-
-
-def _in_gloo_group(body, rank: int, world_size: int, tmp_init_file: str, q):
-    """Run ``body(rank)`` in a gloo group, reporting the outcome via ``q``."""
+def _in_group(body, rank: int, world_size: int, tmp_init_file: str, q, backend):
+    """Run ``body(rank)`` in a process group, reporting the outcome via ``q``."""
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
+    if backend == "nccl":
+        torch.cuda.set_device(rank)
     dist.init_process_group(
-        backend="gloo",
+        backend=backend,
         init_method=f"file://{tmp_init_file}",
         rank=rank,
         world_size=world_size,
@@ -61,12 +55,12 @@ def _in_gloo_group(body, rank: int, world_size: int, tmp_init_file: str, q):
         dist.destroy_process_group()
 
 
-def _collect_two_rank_results(body, tmp_init_file: str):
+def _collect_two_rank_results(body, tmp_init_file: str, backend: str = "gloo"):
     """Spawn two ranks over ``body`` and collect both outcomes."""
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     procs = [
-        ctx.Process(target=_in_gloo_group, args=(body, rank, 2, tmp_init_file, q))
+        ctx.Process(target=_in_group, args=(body, rank, 2, tmp_init_file, q, backend))
         for rank in range(2)
     ]
     for p in procs:
@@ -84,9 +78,9 @@ def _collect_two_rank_results(body, tmp_init_file: str):
             p.join(timeout=5)
 
 
-def _run_two_ranks(body, tmp_init_file: str):
+def _run_two_ranks(body, tmp_init_file: str, backend: str = "gloo"):
     """Spawn two ranks over ``body`` and require both to report ok."""
-    results = _collect_two_rank_results(body, tmp_init_file)
+    results = _collect_two_rank_results(body, tmp_init_file, backend)
     assert results == [(0, "ok"), (1, "ok")], results
 
 
@@ -102,7 +96,7 @@ def _packed(rows):
     return PackedTensor(
         [r.clone() if r is not None else None for r in rows],
         dim_to_pack=0,
-        pad_to_max_shape=True,
+        preprocess_mode="pad_to_max_shape",
     )
 
 
@@ -118,7 +112,6 @@ def _round_trip_body(rank: int):
             {
                 "input_ids": torch.arange(12, dtype=torch.long).reshape(3, 4),
                 "input_lengths": torch.tensor([4, 3, 2], dtype=torch.int32),
-                "routed_experts": _noncontiguous_int16_routes(),
                 "scalar_meta": "step_42",
                 "pixel_values": _packed(rows),
             }
@@ -135,8 +128,6 @@ def _round_trip_body(rank: int):
         out["input_ids"], torch.arange(12, dtype=torch.long).reshape(3, 4)
     )
     assert torch.equal(out["input_lengths"], torch.tensor([4, 3, 2], dtype=torch.int32))
-    assert torch.equal(out["routed_experts"], _noncontiguous_int16_routes())
-    assert out["routed_experts"].dtype == torch.int16
     assert out["scalar_meta"] == "step_42"
 
     packed = out["pixel_values"]
@@ -152,6 +143,50 @@ def _round_trip_body(rank: int):
     assert torch.equal(packed.as_tensor(), expected.as_tensor())
 
 
+def _deduplicated_round_trip_body(rank: int):
+    first_physical_row = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    third_physical_row = torch.arange(3, dtype=torch.float32).reshape(1, 3)
+    physical_rows = [
+        first_physical_row,
+        None,
+        third_physical_row,
+    ]
+    data = (
+        BatchedDataDict(
+            {
+                "pixel_values": PackedTensor(
+                    physical_rows,
+                    dim_to_pack=0,
+                    preprocess_mode="patchify",
+                    preprocess_kwargs={"patch_dim": 2},
+                    _row_offsets=[0, 1, 2, 4],
+                    _segment_indices=[0, 1, 2, 0],
+                    _segment_provenance=[b"a", b"b", b"c"],
+                )
+            }
+        )
+        if rank == 0
+        else None
+    )
+
+    out = _broadcast_batched_data_dict(
+        data, is_leader=(rank == 0), src=0, group=dist.group.WORLD
+    )
+
+    packed = out["pixel_values"]
+    assert isinstance(packed, PackedTensor), type(packed).__name__
+    assert packed.preprocess_mode == "patchify"
+    assert packed.preprocess_kwargs == {"patch_dim": 2}
+    assert packed._row_offsets == [0, 1, 2, 4]
+    assert packed._segment_indices == [0, 1, 2, 0]
+    assert packed._segment_provenance == [b"a", b"b", b"c"]
+    assert packed.tensors[1] is None
+    assert packed.tensors[0] is not None
+    assert packed.tensors[2] is not None
+    assert torch.equal(packed.tensors[0], first_physical_row)
+    assert torch.equal(packed.tensors[2], third_physical_row)
+
+
 def _all_empty_body(rank: int):
     # One DP shard of a mixed image/text batch can hold only media-free
     # samples. ``pixel_values`` is still in ``meta.fields``, so the shard
@@ -162,7 +197,9 @@ def _all_empty_body(rank: int):
             {
                 "input_ids": torch.arange(8, dtype=torch.long).reshape(2, 4),
                 "pixel_values": PackedTensor(
-                    [None, None], dim_to_pack=0, pad_to_max_shape=True
+                    [None, None],
+                    dim_to_pack=0,
+                    preprocess_mode="pad_to_max_shape",
                 ),
             }
         )
@@ -179,7 +216,46 @@ def _all_empty_body(rank: int):
     assert isinstance(packed, PackedTensor), type(packed).__name__
     assert packed.logical_segment_counts_by_row() == [0, 0]
     assert packed.as_tensor() is None
-    assert packed.pad_to_max_shape is True
+    assert packed.preprocess_mode == "pad_to_max_shape"
+    assert packed.preprocess_kwargs == {}
+
+
+def _nccl_cpu_packed_round_trip_body(rank: int):
+    first = torch.arange(6, dtype=torch.int16).reshape(2, 3)
+    second = torch.arange(3, dtype=torch.int16).reshape(1, 3) + 10
+    data = (
+        BatchedDataDict(
+            {
+                "pixel_values": PackedTensor(
+                    [first, None, second],
+                    dim_to_pack=0,
+                    _row_offsets=[0, 1, 2, 4],
+                    _segment_indices=[0, 1, 2, 0],
+                    _segment_provenance=[b"a", b"b", b"c"],
+                )
+            }
+        )
+        if rank == 0
+        else None
+    )
+
+    out = _broadcast_batched_data_dict(
+        data, is_leader=(rank == 0), src=0, group=dist.group.WORLD
+    )
+
+    packed = out["pixel_values"]
+    assert packed._row_offsets == [0, 1, 2, 4]
+    assert packed._segment_indices == [0, 1, 2, 0]
+    assert packed._segment_provenance == [b"a", b"b", b"c"]
+    assert packed.tensors[1] is None
+    assert packed.tensors[0] is not None
+    assert packed.tensors[2] is not None
+    assert packed.tensors[0].device.type == "cpu"
+    assert packed.tensors[2].device.type == "cpu"
+    assert packed.tensors[0].dtype == torch.int16
+    assert packed.tensors[2].dtype == torch.int16
+    assert torch.equal(packed.tensors[0], first)
+    assert torch.equal(packed.tensors[2], second)
 
 
 def _unsupported_type_body(rank: int):
@@ -189,64 +265,131 @@ def _unsupported_type_body(rank: int):
     )
 
 
+def _tensor_layout_round_trip_body(rank: int, *, source_device: str) -> None:
+    device = torch.device(source_device)
+    if device.type == "cuda":
+        device = torch.device("cuda", rank)
+    for source_rank in (0, 1):
+        expected = {}
+        for dtype in (torch.float32, torch.int64, torch.int16):
+            values = torch.arange(24, dtype=dtype, device=device).reshape(4, 6)
+            expected[f"{dtype}_transpose"] = values.T
+            expected[f"{dtype}_slice"] = values[:, ::2]
+            expected[f"{dtype}_contiguous"] = values
+            expected[f"{dtype}_scalar"] = torch.tensor(-1, dtype=dtype, device=device)
+            expected[f"{dtype}_empty"] = torch.empty(2, 0, dtype=dtype, device=device)
+        expected["int16_domain"] = torch.arange(
+            -32768, 32768, dtype=torch.int32, device=device
+        ).to(torch.int16)
+        data = BatchedDataDict(expected) if rank == source_rank else None
+
+        result = _broadcast_batched_data_dict(
+            data, is_leader=rank == source_rank, src=source_rank, group=dist.group.WORLD
+        )
+
+        assert result.keys() == expected.keys()
+        for key, original in expected.items():
+            actual = result[key]
+            assert actual.dtype == original.dtype, key
+            assert actual.shape == original.shape, key
+            assert actual.device == device, key
+            assert torch.equal(actual, original), key
+            if rank == source_rank:
+                assert actual is original, key
+
+
+def test_leader_broadcast_preserves_strided_tensors(tmp_path: Path) -> None:
+    _run_two_ranks(
+        partial(_tensor_layout_round_trip_body, source_device="cpu"),
+        str(tmp_path / "init_strided"),
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+    reason="two CUDA devices are required for NCCL broadcast",
+)
+@pytest.mark.parametrize("source_device", ["cpu", "cuda"])
+def test_leader_broadcast_preserves_strided_tensors_nccl(
+    tmp_path: Path, source_device: str
+) -> None:
+    _run_two_ranks(
+        partial(_tensor_layout_round_trip_body, source_device=source_device),
+        str(tmp_path / "init_strided_nccl"),
+        backend="nccl",
+    )
+
+
+def _int16_byte_wire_round_trip_body(rank: int, *, source_device: str) -> None:
+    values = torch.arange(-32768, 32768, dtype=torch.int32).to(torch.int16)
+    if source_device == "cuda":
+        values = values.cuda()
+    packed_values = values.reshape(256, 256).T
+    data = (
+        BatchedDataDict(
+            {
+                "routed_experts": values,
+                "pixel_values": PackedTensor([packed_values, None], dim_to_pack=0),
+            }
+        )
+        if rank == 0
+        else None
+    )
+    observed: list[tuple[torch.dtype, int]] = []
+    real_broadcast = dist.broadcast
+
+    def record_broadcast(
+        tensor: torch.Tensor, *, src: int, group: dist.ProcessGroup
+    ) -> None:
+        observed.append((tensor.dtype, tensor.numel() * tensor.element_size()))
+        real_broadcast(tensor, src=src, group=group)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(dist, "broadcast", record_broadcast)
+        result = _broadcast_batched_data_dict(
+            data, is_leader=rank == 0, src=0, group=dist.group.WORLD
+        )
+
+    # Each payload covers the complete int16 domain without int32 expansion.
+    assert observed == [(torch.uint8, 131072), (torch.uint8, 131072)], observed
+    assert result["routed_experts"].dtype == torch.int16
+    assert result["routed_experts"].device == values.device
+    assert torch.equal(result["routed_experts"], values)
+    packed = result["pixel_values"]
+    assert packed.tensors[0].dtype == torch.int16
+    assert packed.tensors[0].device == values.device
+    assert torch.equal(packed.tensors[0], packed_values)
+    assert packed.tensors[1] is None
+
+
+def test_leader_broadcast_int16_uses_two_bytes_per_value(tmp_path: Path) -> None:
+    _run_two_ranks(
+        partial(_int16_byte_wire_round_trip_body, source_device="cpu"),
+        str(tmp_path / "init_byte_wire"),
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+    reason="two CUDA devices are required for NCCL broadcast",
+)
+@pytest.mark.parametrize("source_device", ["cpu", "cuda"])
+def test_leader_broadcast_int16_uses_two_bytes_per_value_nccl(
+    tmp_path: Path, source_device: str
+) -> None:
+    _run_two_ranks(
+        partial(_int16_byte_wire_round_trip_body, source_device=source_device),
+        str(tmp_path / "init_byte_wire_nccl"),
+        backend="nccl",
+    )
+
+
 def test_leader_broadcast_round_trip(tmp_path):
     _run_two_ranks(_round_trip_body, str(tmp_path / "init"))
 
 
-def _tensor_payload(device: str) -> dict[str, torch.Tensor]:
-    payload = {}
-    for dtype in (
-        torch.bool,
-        torch.uint8,
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
-        torch.float64,
-    ):
-        values = torch.arange(6, device=device).reshape(2, 3).to(dtype)
-        payload[f"{dtype}_matrix"] = values
-        payload[f"{dtype}_transposed"] = values.T
-        payload[f"{dtype}_sliced"] = values[:, 1:]
-        payload[f"{dtype}_scalar"] = torch.tensor(1, dtype=dtype, device=device)
-        payload[f"{dtype}_empty"] = torch.empty(2, 0, 3, dtype=dtype, device=device)
-    # Exhaust the signed int16 domain so a wrong wire dtype cannot silently
-    # truncate negative sentinels or large expert indices.
-    payload["int16_domain"] = torch.arange(
-        -32768, 32768, dtype=torch.int32, device=device
-    ).to(torch.int16)
-    return payload
-
-
-def _tensor_round_trip_body(rank: int, *, source_device: str = "cpu") -> None:
-    expected = _tensor_payload(source_device)
-    original_values = {key: tensor.clone() for key, tensor in expected.items()}
-    data = BatchedDataDict(expected) if rank == 0 else None
-    original_strides = {key: tensor.stride() for key, tensor in expected.items()}
-
-    out = _broadcast_batched_data_dict(
-        data, is_leader=(rank == 0), src=0, group=dist.group.WORLD
-    )
-
-    assert out.keys() == expected.keys()
-    for key, tensor in expected.items():
-        actual = out[key]
-        assert actual.dtype == tensor.dtype, key
-        assert actual.shape == tensor.shape, key
-        assert actual.device == tensor.device, key
-        assert torch.equal(actual, original_values[key]), key
-        if rank == 0:
-            assert out is data
-            assert actual is tensor, key
-            assert actual.stride() == original_strides[key], key
-
-
-def test_leader_broadcast_preserves_tensor_values_layout_and_dtype(tmp_path):
-    """Collectives preserve scalars, empty fields and strided tensor values."""
-    _run_two_ranks(_tensor_round_trip_body, str(tmp_path / "init_tensors"))
+def test_leader_broadcast_preserves_packed_tensor_deduplication(tmp_path):
+    _run_two_ranks(_deduplicated_round_trip_body, str(tmp_path / "init_dedup"))
 
 
 def test_leader_broadcast_keeps_media_free_packed_key(tmp_path):
@@ -257,6 +400,34 @@ def test_leader_broadcast_keeps_media_free_packed_key(tmp_path):
     set than the same shard on the independent-fetch path.
     """
     _run_two_ranks(_all_empty_body, str(tmp_path / "init_empty"))
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+    reason="two CUDA devices are required for NCCL broadcast",
+)
+def test_leader_broadcast_restores_cpu_packed_tensor_after_nccl(tmp_path):
+    _run_two_ranks(
+        _nccl_cpu_packed_round_trip_body,
+        str(tmp_path / "init_nccl"),
+        backend="nccl",
+    )
+
+
+def test_packed_tensor_broadcast_rejects_tensor_header_state():
+    packed = _packed(_pixel_rows())
+    packed.__dict__["cached_tensor"] = torch.ones(1)
+
+    with pytest.raises(TypeError, match="header must be tensor-free"):
+        packed.broadcast_parts()
+
+
+def test_packed_tensor_broadcast_rejects_oversized_payload():
+    packed = PackedTensor([torch.ones(2)], dim_to_pack=0)
+    header, shapes, _, _, _ = packed.broadcast_parts()
+
+    with pytest.raises(ValueError, match="shapes describe 2 elements"):
+        header.rebuild_from_broadcast_parts(shapes, torch.ones(3))
 
 
 def test_leader_broadcast_reports_descriptor_error_to_all_ranks(tmp_path):
@@ -284,43 +455,3 @@ def test_get_replica_group_default_is_none():
         pass
 
     assert _Stub()._get_replica_group() is None
-
-
-def _nccl_int16_worker(rank: int, world_size: int) -> None:
-    if rank == 0:
-        data = BatchedDataDict({"routed_experts": _noncontiguous_int16_routes()})
-    else:
-        data = None
-
-    out = _broadcast_batched_data_dict(
-        data,
-        is_leader=(rank == 0),
-        src=0,
-        group=dist.group.WORLD,
-    )
-
-    expected = _noncontiguous_int16_routes()
-    assert out["routed_experts"].device.type == "cpu"
-    assert out["routed_experts"].dtype == torch.int16
-    assert torch.equal(out["routed_experts"], expected)
-
-
-def test_leader_broadcast_int16_round_trip_nccl(distributed_test_runner):
-    """NCCL transport handles non-contiguous Router Replay routes."""
-    distributed_test_runner(_nccl_int16_worker, world_size=2, backend="nccl")
-
-
-def _nccl_tensor_worker(rank: int, world_size: int, *, source_device: str) -> None:
-    _tensor_round_trip_body(rank, source_device=source_device)
-
-
-@pytest.mark.parametrize("source_device", ["cpu", "cuda"])
-def test_leader_broadcast_preserves_tensor_devices_nccl(
-    distributed_test_runner, source_device
-):
-    """NCCL preserves the source device type and the leader's original views."""
-    distributed_test_runner(
-        partial(_nccl_tensor_worker, source_device=source_device),
-        world_size=2,
-        backend="nccl",
-    )
