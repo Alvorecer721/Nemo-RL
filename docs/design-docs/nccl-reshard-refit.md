@@ -6,8 +6,8 @@ The default non-colocated transport broadcasts every **full** parameter tensor f
 training ranks to every generation rank. `nccl_reshard_refit` replaces that for the bulk
 of the payload with a **shard-to-shard reshard**: each training rank sends only its local
 shard, and each generation rank receives exactly the bytes of its own (differently
-parallelized) shard. This is both faster and lighter on memory since no rank ever
-materializes or receives the full tensor.
+parallelized) shard. It avoids a full-tensor gather and broadcast: a destination
+materializes only the weight shard required by its own layout.
 
 ## Enabling It
 
@@ -94,10 +94,13 @@ single `ValueError` listing every violation. The current requirements are:
   only for `refit_transport=mcore`. Colocated Megatron generation requires
   `refit_transport=mcore`, because its refit is carried by the in-place
   wake-reshard; the other transports are rejected rather than silently ignored.
-* **Generation-side PP > 1 is not supported by this refit transport yet.**
-  Megatron-Core and vLLM can run generation with PP, and training-side Megatron
-  PP is supported here; the missing piece is generation-stage-aware destination
-  routing in `nccl_reshard`.
+* **Generation-side pipeline parallelism is supported for Megatron training.**
+  vLLM and Megatron generation can use different TP and PP layouts from the
+  trainer. Setup discovers each generation rank's actual local weights and
+  validates their ownership before installing the transfer plan on both sides.
+  PP ranks that do not own a weight participate in communicator setup without
+  allocating storage for that weight. Tied embeddings remain on the misc path
+  so the backend's regular loader preserves their stage-specific semantics.
 * **No ModelOpt real quantization** — `policy.generation.real_quant=false`. Real-quant
   rollouts refit through vLLM's layerwise-reload weight loaders, which the bulk
   `xferdtensor` writes bypass.
@@ -119,7 +122,9 @@ nccl-reshard-refit implementation:
 * **Bulk path** — the FFN projection weights (`gate_proj` / `up_proj` / `down_proj`
   `.weight`, dense MLP and MoE experts alike; see `is_nccl_reshard_param()`). These are
   resharded shard-to-shard with `xferdtensor` over dedicated NCCL communicators. For
-  large models this covers the vast majority of the refit bytes. For the current version of implementation, it only detects `(experts).N.{gate_proj|up_proj|down_proj}` as the subject of this performant transportation path. The coverage will be expanded via future updates.
+  large models this covers the vast majority of the refit bytes. The fork also
+  selects supported attention output projections and eligible untied vocabulary
+  weights; the source catalog records the actual selection.
   Two FFN-named groups are explicitly excluded and ride the misc path instead:
   shared-expert weights (`*.shared_expert.*`, which fuse differently on the vLLM
   side) and co-trained MTP drafter weights (which vLLM keeps in a separate
@@ -170,7 +175,9 @@ role.
    NCCL group per training PP stage**, each spanning that stage's training ranks plus
    *all* generation ranks (non-PP is simply `pp_size == 1`, a single group over
    everything). Keeping the bulk path on its own communicators decouples it from the
-   misc broadcast.
+   misc broadcast. Each rendezvous address comes from the actual source-stage
+   leader's placement bundle, including when one Ray placement group spans several
+   nodes or its bundle order differs from model-rank order.
 3. **`prepare_nccl_reshard_refit_info()`** — the metadata exchange. The **training side
    builds a backend-agnostic description** of every bulk parameter
    (`build_nccl_reshard_refit_info()` in `nemo_rl/weight_sync/nccl_reshard_utils.py`),
@@ -180,6 +187,17 @@ role.
    Megatron patches torch's storage unpickler, so raw tensor pickles would require
    `import megatron` inside the vLLM worker. The generation side rebuilds the objects
    with `restore_refit_info_placements()`.
+
+   For generation PP > 1, the destination first reports local canonical weight
+   names, logical shard shapes and dtypes, and its actual PP/TP/DP/EP coordinates.
+   `finalize_nccl_reshard_refit_info()` checks complete topology and exactly one
+   owning PP stage for every decoder weight. Its destination mesh includes all TP
+   shards and DP replicas of that stage. Some backends also allocate vocabulary
+   weights on several PP stages; each such stage must report a complete copy,
+   and those copies share the mesh's replica axis. Partial copies are rejected.
+   The source and destination install the same validated plan. A membership
+   rebuild repeats discovery and validation over the surviving complete engines.
+   Generation PP = 1 retains the existing setup path.
 
 The derived metadata (`nccl_reshard_refit_info`) contains, per parameter:
 
@@ -230,11 +248,15 @@ Every training step (with in-flight weight updates, concurrently with generation
 * The **generation side** walks the same metadata in the same order — every rank in a
   comm group must issue the same sequence of transfers. Per-PP-stage parameter groups
   are distributed across `NRL_REFIT_NUM_STREAMS` CUDA streams so different stages'
-  reshards overlap. For each parameter it runs `pre` (receive-buffer allocation), calls
+  reshards overlap. For each locally owned parameter it runs `pre`
+  (receive-buffer allocation), calls
   `xferdtensor(None, ..., dst, ..., group, stream)`, then `post` (copy back into the
   fused parameter or load staged TRTLLM experts). After every transfer completes, the
   TRTLLM path finalizes vLLM's native layerwise reload once to restore the packed runtime
-  layout.
+  layout. A rank on another generation PP stage passes a metadata-only destination
+  descriptor and skips both hooks. It still enters the transfer call because
+  communicator splitting and native transport setup can involve the full parent
+  group.
 
 ### The Misc Path
 
@@ -327,10 +349,12 @@ xferdtensor(src_tensor, src_mesh, src_placement,
             process_group, stream=None)
 ```
 
-and dispatches to one of two transports:
+and dispatches to one of three implementations:
 
-* **Core NCCL reshard** — the reshard operation provided by the **nccl4py
-  wrapper** (`nccl.m2n.reshard`). When the package is accesible, this is the default:
+* **Native NCCL M2N** — the reshard operation provided by the **nccl4py
+  wrapper** (`nccl.m2n.reshard`). This is selected when the package is available
+  and the communicator reports device API support. The pinned M2N mesh API also
+  requires at most two mesh axes and contiguous ranks in row-major order:
   the local shards, mesh rank grids, and placements are handed to the NCCL library,
   which executes the cross-mesh redistribution natively.
 * **`xferdtensor_python_impl`** (`nemo_rl/weight_sync/xferdtensor_python.py`) — a pure
@@ -339,7 +363,11 @@ and dispatches to one of two transports:
   between the source and destination layouts, moves each destination region once via
   batched point-to-point (with striped receives across replica groups), and fans out to
   replicas with cached split-communicator broadcasts. It is a drop-in with the same
-  signature and is selected automatically when `nccl.m2n` is not importable.
+  signature and is selected automatically when `nccl.m2n` is not importable or
+  the communicator lacks device API support, or a mesh is outside the native
+  API's supported geometry. A successful single-node native
+  test does not establish native support across nodes. This fallback still uses
+  NCCL for the shard transfers and does not gather and broadcast each full weight.
 * **`xferdtensor_golden`** (`nemo_rl/weight_sync/xferdtensor.py`) — a pure function-only
   implementation intended for debugging. This implementation simply broadcasts the full
   tensor to the destination ranks, which then discard the unused parts. While not performant,
@@ -348,6 +376,124 @@ and dispatches to one of two transports:
 Both transports honor the `stream` argument so the transfer is ordered with the caller's
 `pre`/`post` staging work on one CUDA stream.
 
+## Generation PP Validation
+
+`tests/functional/nccl_reshard_pp.py` exercises a local BF16 dense/MoE Qwen3 or Apertus
+checkpoint with a Megatron trainer. It changes source parameters before every
+warm refit, compares every bulk shard with an independently updated HF tensor,
+and generates between updates. For vLLM it also checks every local model parameter
+directly, including fused QKV, norms, and tied vocabulary aliases. Storage checks,
+mutations, and generation are outside the timed refit.
+MoE checks reconstruct grouped tensors from numerically ordered HF expert keys
+and check vLLM's fused expert storage using its actual expert placement. The
+current MoE raw-storage oracle selects the Triton BF16 backend.
+
+`--update-mode optimizer` replaces artificial scaling with real distributed
+Adam updates. After each update, all training ranks participate in an independent
+full Megatron-Bridge HF export. Destination weights must match that export and
+must change from the previous refit. Training and reference export are outside
+the timer. `--train-dp`, `--train-ep`, `--train-etp`, `--gen-ep` and `--gen-etp`
+allow different expert layouts on either side. The driver runs the production
+configuration validator before allocating actors. vLLM tests default source ETP
+to 1, as required by that validator; MoE training with TP > 1 enables sequence
+parallelism.
+For large checkpoints, `--reference-workers N` overlaps independent CPU
+checkpoint checks. Every tensor is still compared in full; memory scales with
+the number of concurrent checks. Partial timings are written before inspection,
+and the report gains `passed: true` only after all checks finish.
+
+The optional PP1 reference checks identical tokens and generation logprobs at
+`atol=1e-5, rtol=0` with the same backend and TP. Cross-backend BF16 logprob
+differences are reported separately: kernel differences can exceed 0.2 after
+repeated artificial scaling even in the PP1 control.
+
+For example, with the matching worker environments and enough GPUs available:
+
+```bash
+# Four GPUs: reference with training TP2 and generation TP2/PP1.
+uv run tests/functional/nccl_reshard_pp.py \
+  --backend vllm --model /path/to/Qwen3-0.6B \
+  --train-tp 2 --gen-tp 2 --gen-pp 1 --output pp1.json
+
+# Eight GPUs: different training/generation PP, with a PP1 output oracle.
+uv run tests/functional/nccl_reshard_pp.py \
+  --backend vllm --model /path/to/Qwen3-0.6B \
+  --train-tp 1 --train-pp 4 --gen-tp 2 --gen-pp 2 \
+  --reference-report pp1.json --output pp2.json
+```
+
+Set `NRL_XFERDTENSOR_PYTHON=1` to qualify the Python NCCL path explicitly.
+Otherwise the runtime logs the selected implementation and device API capability.
+The separate four-GPU `tests/functional/nccl_reshard_pp_transport.py` gate accepts
+`--mode python` or `--mode native`; native mode fails if native M2N is unavailable.
+
+On 2026-09-20, GH200 tests with the fork's vLLM 0.29.0 / Torch 2.13.0 image gave
+the following Qwen3-0.6B BF16 results. Each row includes five changed warm refits;
+setup and the first refit are excluded. Both nodes have four GPUs in the
+two-node rows.
+
+| Generation backend | Nodes | Train TP/PP → Gen TP/PP | Transport | Warm median | Warm min–max |
+|---|---:|---|---|---:|---:|
+| vLLM | 1 | 2/1 → 2/1 | Python NCCL | 108 ms | 106–109 ms |
+| vLLM | 1 | 2/1 → 1/2 | Python NCCL | 108 ms | 105–152 ms |
+| vLLM | 1 | 2/1 → 1/2 | Native M2N | 111 ms | 109–115 ms |
+| vLLM | 2 | 1/4 → 2/2 | Python NCCL | 142 ms | 128–148 ms |
+| Megatron | 2 | 2/2 → 2/2 | Python NCCL | 261 ms | 261–271 ms |
+
+All bulk checks passed. The vLLM TP2/PP2 run matched its TP2/PP1 reference with
+zero logprob difference at updates 0, 1, and 5. The Megatron timing includes its
+inference-engine pause/resume lifecycle; vLLM's non-colocated refit call measures
+the transfer and weight loading. These rows are not a comparison of generation
+throughput or an extrapolation to larger models.
+
+The two-node runtime reported `device_api_support=False` and automatically used
+Python NCCL. Native M2N was verified on one node only. No dependency upgrades or
+image-fingerprint bypasses were needed.
+
+Apertus-1.5-70B BF16 on two nodes, training TP1/PP4 to vLLM TP2/PP2,
+completed three changed warm refit calls in **3.212, 3.212 and 3.239 seconds**
+(median **3.212 seconds**); the cold refit took 3.334 seconds. The logged payload
+was 123.14 GiB bulk plus 12.50 GiB misc. This also used Python NCCL. All four
+iterations passed all 484 bulk-shard and 1,606 local parameter-tensor checks;
+generation/source-policy comparisons passed at updates 0, 1 and 3. The receipt
+also preserves an earlier run that ended during its final CPU check as partial.
+
+Qwen3-Coder-30B-A3B-Instruct BF16 also passed with expert parallelism:
+
+| Generation | Nodes | Training TP/PP/DP/EP/ETP → Generation TP/PP/EP/ETP | Updates | Transport | Warm refits |
+|---|---:|---|---|---|---:|
+| vLLM | 1 | 1/1/2/2/1 → 1/2/1/1 | Two deterministic BF16 updates | Native M2N | 0.462, 0.459 s |
+| vLLM | 3 | 1/2/4/4/1 → 2/2/2/1 | Two real distributed Adam updates | Python NCCL | 0.866, 0.869 s |
+| vLLM | 3 | 2/2/2/4/1 → 2/2/2/1 | One real distributed Adam update | Python NCCL | 0.916 s |
+| Megatron | 3 | 1/2/4/4/1 → 2/2/2/1 | Two real distributed Adam updates | Python NCCL | 0.967, 0.974 s |
+
+Every initial and updated bulk shard matched the independent HF reference;
+vLLM also passed every raw-parameter check. Generation passed after each refit.
+Both TP1-source Adam steps changed all 392 observed vLLM bulk shards and all
+388 Megatron bulk shards; the TP2-source step changed all 384 bulk shards.
+Source vocabulary padding makes that TP2 case use the misc path for vocabulary
+weights, which are included in the full vLLM raw-parameter check. The native row uses contiguous 1D source
+and destination meshes on one NVLink node. These different topologies do not
+isolate the speed difference between native and Python implementations. The
+logged TP1-source 30B payload was 55.91 GiB bulk plus 0.96 GiB misc; the
+TP2-source case used 54.75 GiB bulk plus 2.12 GiB misc. Full reference export
+and all-weight hashing are outside the reported timings.
+
+Fault probes use `--gen-dp 2 --rebuild-after-stage-loss` to remove a whole engine
+after one PP stage exits, then check a changed refit and generation on the
+survivor. `--abort-during-refit --refit-timeout 20` exits a stage after its engine
+enters receive. The latter requires bounded failure and never serves or attempts
+to reuse a lost CUDA context. The final two-node recovery rebuilt in 3.36 seconds;
+the in-flight two-node probe returned the explicit fatal-context error after
+21.28 seconds. This exercises
+the transport contract; it does not replace full SingleController availability
+testing.
+
+These are local GH200 qualification results, not upstream CI results.
+The functional probes above reproduce the checks; measured timings depend on
+the model, topology, transport and installed dependencies.
+The recorded MoE vLLM gates use Triton BF16 expert storage. Quantized PP,
+processed TRTLLM MoE storage, and MTP remain outside these measured gates.
 
 ## Expected Performance
 

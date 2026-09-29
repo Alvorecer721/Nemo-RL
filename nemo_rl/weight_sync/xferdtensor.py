@@ -17,10 +17,18 @@
 import logging
 import os
 from contextlib import nullcontext
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import torch
 from torch.distributed._tensor import Shard
+from torch.distributed.device_mesh import DeviceMesh
+
+from nemo_rl.weight_sync.nccl_reshard_utils import (
+    _STR_TO_DTYPE,
+    LocalParamSpec,
+    MeshInfo,
+    RefitCtx,
+)
 
 try:
     from nccl.m2n import (  # pyrefly: ignore[import-error]
@@ -39,6 +47,8 @@ _XFERDTENSOR_PATH_LOGGED = False
 
 class _ReshardKwargs(TypedDict, total=False):
     stream: int
+    dst_local_shape: tuple[int, ...]
+    dst_dtype: torch.dtype
 
 
 class DTensorRef:
@@ -58,17 +68,79 @@ class DTensorRef:
     params). ``global_shape`` is always the full unsharded shape.
     """
 
+    dtype: torch.dtype
+    device: torch.device
+
     def __init__(
-        self, local_tensor: torch.Tensor, global_shape, dtype=None, device=None
-    ):
+        self,
+        local_tensor: torch.Tensor | None,
+        global_shape: tuple[int, ...] | list[int] | torch.Size,
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | int | None = None,
+    ) -> None:
+        if local_tensor is None and (dtype is None or device is None):
+            raise ValueError(
+                "A metadata-only DTensorRef requires explicit dtype and device"
+            )
         self._local_tensor = local_tensor
         self.shape = (
             torch.Size(global_shape)
             if not isinstance(global_shape, torch.Size)
             else global_shape
         )
-        self.dtype = dtype if dtype is not None else local_tensor.dtype
-        self.device = device if device is not None else local_tensor.device
+        if local_tensor is not None:
+            dtype = local_tensor.dtype if dtype is None else dtype
+            device = local_tensor.device if device is None else device
+        assert dtype is not None and device is not None
+        self.dtype = dtype
+        # torch.device's stub describes its class-level descriptor protocol;
+        # assigning an instance value here is valid (also tested on idle ranks).
+        self.device = torch.device(device)  # pyrefly: ignore[read-only]
+
+
+def receive_resharded_param(
+    param_info: dict[str, Any],
+    spec: LocalParamSpec | None,
+    group: Any,
+    stream: Any,
+    *,
+    device: torch.device,
+) -> None:
+    """Receive a local shard or participate without storage on an off-stage rank.
+
+    Every parent rank must enter xferdtensor in order: Python replica splits and
+    native M2N setup are collective even when this rank owns no payload.
+    """
+    owns_parameter = int(group.rank) in param_info["dst_mesh_info"].mesh
+    if owns_parameter != (spec is not None):
+        raise ValueError(
+            f"Refit destination {param_info['name']!r} on rank {group.rank}: "
+            f"plan ownership={owns_parameter}, local target={spec is not None}"
+        )
+    ctx = None
+    if spec is None:
+        destination = DTensorRef(
+            None,
+            param_info["global_shape"],
+            dtype=_STR_TO_DTYPE[str(param_info["dtype"])],
+            device=device,
+        )
+    else:
+        ctx = spec.pre(spec.base) if spec.pre is not None else RefitCtx(buf=spec.base)
+        destination = DTensorRef(ctx.buf, param_info["global_shape"])
+    xferdtensor(
+        None,
+        param_info["src_mesh_info"],
+        param_info["src_placements"],
+        destination,
+        param_info["dst_mesh_info"],
+        param_info["dst_placements"],
+        group,
+        stream,
+    )
+    if spec is not None and spec.post is not None:
+        assert ctx is not None
+        spec.post(ctx)
 
 
 # ===========================================================
@@ -116,6 +188,19 @@ def _communicator_supports_device_api(process_group) -> bool:
     return bool(getattr(communicator, "device_api_support", False))
 
 
+def _native_mesh_supported(mesh: MeshInfo | DeviceMesh) -> bool:
+    """The pinned M2N descriptor accepts contiguous rank intervals on <=2 axes.
+
+    In particular, vLLM DP replicas of a PP stage may have gaps between ranks.
+    The exact-transfer fallback supports that ownership without a new group.
+    """
+    ranks = mesh.mesh
+    if not 1 <= ranks.ndim <= 2 or ranks.numel() == 0:
+        return False
+    flat = ranks.flatten().tolist()
+    return flat == list(range(flat[0], flat[0] + len(flat)))
+
+
 def xferdtensor(
     src_tensor,
     src_mesh,
@@ -133,7 +218,12 @@ def xferdtensor(
     device_api_support = None
     if not use_golden and not use_python and _reshard is not None:
         device_api_support = _communicator_supports_device_api(process_group)
-    use_native = bool(device_api_support)
+    native_mesh_support = None
+    if device_api_support:
+        native_mesh_support = _native_mesh_supported(
+            src_mesh
+        ) and _native_mesh_supported(dst_mesh)
+    use_native = bool(device_api_support and native_mesh_support)
     if not _XFERDTENSOR_PATH_LOGGED:
         if use_golden:
             path = "golden (broadcast)"
@@ -145,6 +235,7 @@ def xferdtensor(
             f"[xferdtensor] reshard path: {path} "
             f"(real_op_available={_reshard is not None}, "
             f"device_api_support={device_api_support}, "
+            f"native_mesh_support={native_mesh_support}, "
             f"force_golden={use_golden}, force_python={use_python})",
             flush=True,
         )
@@ -186,6 +277,21 @@ def xferdtensor(
     dst_local = dst_tensor._local_tensor if dst_tensor is not None else None
 
     reshard_kwargs: _ReshardKwargs = {}
+    if src_local is None and dst_local is None:
+        # nccl.m2n.reshard accepts null buffers on idle ranks, but still needs
+        # one role's logical local shape and dtype to build its descriptors.
+        metadata = dst_tensor if dst_tensor is not None else src_tensor
+        local_shape = list(metadata.shape)
+        for axis, placement in enumerate(dst_placement):
+            if isinstance(placement, Shard):
+                shards = int(dst_mesh.mesh.shape[axis])
+                if local_shape[placement.dim] % shards:
+                    raise ValueError(
+                        "Native M2N requires evenly divisible destination shards"
+                    )
+                local_shape[placement.dim] //= shards
+        reshard_kwargs["dst_local_shape"] = tuple(local_shape)
+        reshard_kwargs["dst_dtype"] = metadata.dtype
     if stream is not None:
         reshard_kwargs["stream"] = int(stream.cuda_stream)
     _reshard(  # pyrefly: ignore[not-callable]

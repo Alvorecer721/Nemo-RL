@@ -25,6 +25,7 @@ from typing import Any, AsyncGenerator, Optional
 
 import requests
 import torch
+from megatron.core import parallel_state
 from megatron.core.inference.config import (
     AsyncScheduleMode,
     CudaGraphSizingDistribution,
@@ -105,11 +106,13 @@ from nemo_rl.utils.packed_tensor import packed_broadcast_consumer
 from nemo_rl.weight_sync.nccl_reshard_utils import (
     _INDIVIDUAL_EXPERT_RE,
     _STR_TO_DTYPE,
+    DestinationRefitManifest,
     HFToLocalParamMap,
     LocalParamSpec,
     RefitCtx,
     is_nccl_reshard_param,
     restore_refit_info_placements,
+    validate_destination_param_map,
 )
 
 
@@ -1545,9 +1548,14 @@ class MegatronGenerationRefitMixin:
                 destination=destination,
             )
 
+        requested_names = {
+            param["name"]
+            for params in refit_info["per_layer_params"].values()
+            for param in params
+        }
         for task in tasks:
             for spec in task.conversion_task.local_hf_param_specs():
-                if is_nccl_reshard_param(spec.name):
+                if spec.name in requested_names or is_nccl_reshard_param(spec.name):
                     add_piece(task, spec)
 
         expert_pieces: dict[
@@ -1578,7 +1586,13 @@ class MegatronGenerationRefitMixin:
                 for received, piece in zip(ctx.buf.unbind(0), grouped, strict=True):
                     self._commit_megatron_bulk_refit_piece(piece, received)
 
-            return LocalParamSpec(base=None, pre=pre, post=post)
+            return LocalParamSpec(
+                base=None,
+                pre=pre,
+                post=post,
+                wire_shape=(len(grouped), *first.shape),
+                wire_dtype=first.dtype,
+            )
 
         def staged_spec(piece: _MegatronBulkRefitPiece) -> LocalParamSpec:
             def pre(_base: Any) -> RefitCtx:
@@ -1589,7 +1603,13 @@ class MegatronGenerationRefitMixin:
             def post(ctx: RefitCtx) -> None:
                 self._commit_megatron_bulk_refit_piece(piece, ctx.buf)
 
-            return LocalParamSpec(base=None, pre=pre, post=post)
+            return LocalParamSpec(
+                base=None,
+                pre=pre,
+                post=post,
+                wire_shape=tuple(piece.shape),
+                wire_dtype=piece.dtype,
+            )
 
         def direct_spec(piece: _MegatronBulkRefitPiece) -> LocalParamSpec:
             assert piece.destination is not None
@@ -1597,7 +1617,12 @@ class MegatronGenerationRefitMixin:
             def pre(base: torch.Tensor) -> RefitCtx:
                 return RefitCtx(buf=piece.spec.select(base))
 
-            return LocalParamSpec(base=piece.destination, pre=pre)
+            return LocalParamSpec(
+                base=piece.destination,
+                pre=pre,
+                wire_shape=tuple(piece.shape),
+                wire_dtype=piece.dtype,
+            )
 
         specs = {}
         for layer_name in refit_info["layer_names"]:
@@ -1613,6 +1638,8 @@ class MegatronGenerationRefitMixin:
                         )
                     )
                     if not grouped:
+                        if refit_info.get("gen_pp_size", 1) > 1:
+                            continue
                         raise ValueError(
                             f"No local Megatron experts map to M-to-N weight {name!r}."
                         )
@@ -1621,6 +1648,8 @@ class MegatronGenerationRefitMixin:
 
                 piece = pieces.get(name)
                 if piece is None:
+                    if refit_info.get("gen_pp_size", 1) > 1:
+                        continue
                     raise ValueError(
                         f"No local Megatron destination maps to M-to-N weight {name!r}."
                     )
@@ -1775,6 +1804,27 @@ class MegatronGenerationRefitMixin:
         )
 
     @torch.no_grad()
+    def discover_nccl_reshard_destination(
+        self, refit_info: dict[str, Any]
+    ) -> DestinationRefitManifest:
+        """Describe stage-local HF views using Bridge's actual conversion tasks."""
+        info = restore_refit_info_placements(refit_info)
+        _model_chunks, tasks = self._build_generation_refit_tasks()
+        self._prepare_mxfp8_refit(tasks)
+        local_map = self._build_destination_hf_to_local_param_map(info, tasks)
+        offset = info["train_world_size"] // info["pp_size"]
+        return {
+            "rank": self._generation_nccl_reshard_groups[0].rank - offset,
+            "pp_rank": parallel_state.get_pipeline_model_parallel_rank(),
+            "tp_rank": parallel_state.get_tensor_model_parallel_rank(),
+            "dp_rank": parallel_state.get_data_parallel_rank(),
+            "ep_rank": parallel_state.get_expert_model_parallel_rank(),
+            "etp_rank": parallel_state.get_expert_tensor_parallel_rank(),
+            "edp_rank": parallel_state.get_expert_data_parallel_rank(),
+            "params": local_map.local_metadata(),
+        }
+
+    @torch.no_grad()
     def _prepare_destination_nccl_reshard_refit_info(
         self, refit_info: dict[str, Any]
     ) -> None:
@@ -1783,6 +1833,10 @@ class MegatronGenerationRefitMixin:
         model_chunks, tasks = self._build_generation_refit_tasks()
         self._prepare_mxfp8_refit(tasks)
         bulk_map = self.build_hf_to_local_param_map(refit_info, destination_tasks=tasks)
+        if refit_info.get("gen_pp_size", 1) > 1:
+            validate_destination_param_map(
+                refit_info, bulk_map, rank=self._generation_nccl_reshard_groups[0].rank
+            )
 
         misc_meta = refit_info.get("misc_meta", {})
         misc_state_dict_info = {
@@ -1811,32 +1865,18 @@ class MegatronGenerationRefitMixin:
 
         # Keep this transport import local: xferdtensor probes the optional
         # nccl.m2n extension at import time.
-        from nemo_rl.weight_sync.xferdtensor import DTensorRef, xferdtensor
+        from nemo_rl.weight_sync.xferdtensor import receive_resharded_param
 
         self._generation_m2n_pending: dict[int, dict[str, torch.Tensor]] = {}
 
         def receive_one(param_info: dict[str, Any], group: Any, stream: Any) -> None:
-            spec = self.hf_to_local_param_map.get(param_info["name"])
-            if spec is None:
-                raise RuntimeError(
-                    f"Megatron M-to-N refit has no destination for {param_info['name']!r}."
-                )
-            ctx = (
-                spec.pre(spec.base) if spec.pre is not None else RefitCtx(buf=spec.base)
-            )
-            destination = DTensorRef(ctx.buf, param_info["global_shape"])
-            xferdtensor(
-                None,
-                param_info["src_mesh_info"],
-                param_info["src_placements"],
-                destination,
-                param_info["dst_mesh_info"],
-                param_info["dst_placements"],
+            receive_resharded_param(
+                param_info,
+                self.hf_to_local_param_map.get(param_info["name"]),
                 group,
                 stream,
+                device=torch.device("cuda", torch.cuda.current_device()),
             )
-            if spec.post is not None:
-                spec.post(ctx)
 
         stage_params: OrderedDict[int, list[dict[str, Any]]] = OrderedDict()
         refit_info = self.nccl_reshard_refit_info

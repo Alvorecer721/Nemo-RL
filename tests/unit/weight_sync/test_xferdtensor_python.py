@@ -263,3 +263,41 @@ def test_striped_geometry_distributes_replica_receives():
         3: ((4, 6), (0, 4)),
         5: ((6, 8), (0, 4)),
     }
+
+
+def test_metadata_only_pipeline_rank_has_no_storage_and_validates():
+    from nemo_rl.weight_sync.xferdtensor import DTensorRef
+
+    tensor = DTensorRef(None, (8, 4), dtype=torch.bfloat16, device=torch.device("cpu"))
+    assert impl._tensor_metadata(None, tensor) == (
+        (8, 4),
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+    assert impl._local_tensor(tensor) is None
+    impl._validate_local_inputs(
+        3,
+        None,
+        tensor,
+        {0: ((0, 8), (0, 4))},
+        {1: ((0, 8), (0, 4))},
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+    with pytest.raises(ValueError, match="did not receive a destination tensor"):
+        impl._validate_local_inputs(
+            1,
+            None,
+            tensor,
+            {0: ((0, 8), (0, 4))},
+            {1: ((0, 8), (0, 4))},
+            torch.device("cpu"),
+            torch.bfloat16,
+        )
+
+
+def test_metadata_only_ref_requires_explicit_dtype_and_device():
+    from nemo_rl.weight_sync.xferdtensor import DTensorRef
+
+    with pytest.raises(ValueError, match="dtype and device"):
+        DTensorRef(None, (8, 4))

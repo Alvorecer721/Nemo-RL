@@ -348,12 +348,6 @@ def _megatron_gen_config(*, policy_updates=None, **mcore_generation_config):
 @pytest.mark.parametrize(
     ("policy_updates", "mcore_generation_config", "expected_violation"),
     [
-        # Gen-side PP has no stage-aware destination routing yet.
-        (
-            None,
-            {"pipeline_model_parallel_size": 2},
-            "pipeline_model_parallel_size must be 1",
-        ),
         # The transport materializes logical BF16; a non-BF16 trainer would
         # silently ship the wrong dtype.
         ({"precision": "float32"}, {}, "policy.precision must be 'bfloat16'"),
@@ -1120,3 +1114,168 @@ def test_vocab_parallel_bulk_ok_requires_unpadded_shards_on_both_sides(
         )
         is expected
     )
+
+
+# Destination ownership is discovered from the model, not a uniform layer split.
+def _pipeline_destination_case(order="vllm", train_pp=1):
+    metadata = {
+        f"model.layers.{layer}.mlp.down_proj.weight": {
+            "shape": [8, 12],
+            "dtype": "torch.bfloat16",
+        }
+        for layer in range(3)
+    }
+    parallelism = {"tp_size": 2, "ep_size": 1, "etp_size": 2, "pp_size": 2}
+    plan = build_nccl_reshard_refit_info(
+        metadata,
+        {"tp_size": 1, "pp_size": train_pp},
+        parallelism,
+        train_world_size=train_pp,
+        gen_world_size=8,
+        layer_to_pp_stage={f"model.layers.{i}": i % train_pp for i in range(3)},
+    )
+    manifests = []
+    for dp in range(2):
+        for pp in range(2):
+            for tp in range(2):
+                rank = (
+                    (dp * 2 + pp) * 2 + tp
+                    if order == "vllm"
+                    else (pp * 2 + dp) * 2 + tp
+                )
+                manifests.append(
+                    {
+                        "rank": rank,
+                        "pp_rank": pp,
+                        "tp_rank": tp,
+                        "dp_rank": dp,
+                        "ep_rank": 0,
+                        "etp_rank": tp,
+                        "edp_rank": dp,
+                        "params": {
+                            name: {"shape": [8, 6], "dtype": "torch.bfloat16"}
+                            for i, name in enumerate(metadata)
+                            if (0 if i < 2 else 1) == pp
+                        },
+                    }
+                )
+    return plan, manifests, parallelism
+
+
+@pytest.mark.parametrize(
+    "order,expected", [("vllm", [[1, 2], [5, 6]]), ("megatron", [[1, 2], [3, 4]])]
+)
+@pytest.mark.parametrize("train_pp", [1, 4])
+def test_finalize_destination_uses_actual_owners(order, expected, train_pp):
+    from nemo_rl.weight_sync.nccl_reshard_utils import finalize_nccl_reshard_refit_info
+
+    original, manifests, parallelism = _pipeline_destination_case(order, train_pp)
+    plan = finalize_nccl_reshard_refit_info(original, manifests, parallelism)
+    for layer in (0, 1):
+        param = plan["per_layer_params"][f"model.layers.{layer}"][0]
+        assert param["dst_mesh_info"].mesh.tolist() == expected
+        assert param["dst_placements"] == [Replicate(), Shard(1)]
+    assert (
+        original["per_layer_params"]["model.layers.0"][0]["dst_mesh_info"].mesh.numel()
+        == 8
+    )
+    wire = make_nccl_reshard_refit_info_wire_safe(plan)
+    restored = restore_refit_info_placements(wire)
+    assert (
+        restored["per_layer_params"]["model.layers.0"][0]["dst_mesh_info"].mesh.tolist()
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "defect", ["missing", "duplicate_stage", "shape", "dtype", "rank", "tp_coordinate"]
+)
+def test_finalize_destination_rejects_invalid_ownership(defect):
+    from nemo_rl.weight_sync.nccl_reshard_utils import finalize_nccl_reshard_refit_info
+
+    original, manifests, parallelism = _pipeline_destination_case()
+    name = "model.layers.0.mlp.down_proj.weight"
+    if defect == "missing":
+        del manifests[1]["params"][name]
+    elif defect == "duplicate_stage":
+        manifests[2]["params"][name] = manifests[0]["params"][name]
+    elif defect == "shape":
+        manifests[0]["params"][name]["shape"] = [8, 12]
+    elif defect == "dtype":
+        manifests[0]["params"][name]["dtype"] = "torch.float32"
+    elif defect == "rank":
+        manifests[0]["rank"] = manifests[1]["rank"]
+    else:
+        manifests[0]["tp_rank"] = manifests[1]["tp_rank"]
+    with pytest.raises(ValueError):
+        finalize_nccl_reshard_refit_info(original, manifests, parallelism)
+
+
+@pytest.mark.parametrize("name", ["model.embed_tokens.weight", "lm_head.weight"])
+def test_finalize_destination_accepts_complete_vocab_copies_across_pp(name):
+    """Qwen3 MoE allocates both vocabulary tensors on every vLLM PP stage."""
+    import copy
+
+    from nemo_rl.weight_sync.nccl_reshard_utils import finalize_nccl_reshard_refit_info
+
+    original, manifests, parallelism = _pipeline_destination_case()
+    param = copy.deepcopy(original["per_layer_params"]["model.layers.0"][0])
+    param.update(name=name, global_shape=[16, 6])
+    original["per_layer_params"]["model.layers.0"].append(param)
+    for manifest in manifests:
+        manifest["params"][name] = {"shape": [8, 6], "dtype": "torch.bfloat16"}
+    plan = finalize_nccl_reshard_refit_info(original, manifests, parallelism)
+    vocab = plan["per_layer_params"]["model.layers.0"][-1]
+    assert vocab["dst_mesh_info"].mesh.tolist() == [[1, 2], [5, 6], [3, 4], [7, 8]]
+    assert vocab["dst_placements"] == [Replicate(), Shard(0)]
+    # A PP copy must contain every TP shard in every replica.
+    del manifests[2]["params"][name]
+    with pytest.raises(ValueError, match="ownership"):
+        finalize_nccl_reshard_refit_info(original, manifests, parallelism)
+
+
+def test_finalize_destination_rejects_complete_decoder_copies_across_pp():
+    from nemo_rl.weight_sync.nccl_reshard_utils import finalize_nccl_reshard_refit_info
+
+    original, manifests, parallelism = _pipeline_destination_case()
+    name = "model.layers.0.mlp.down_proj.weight"
+    for manifest in manifests:
+        manifest["params"][name] = {"shape": [8, 6], "dtype": "torch.bfloat16"}
+    with pytest.raises(ValueError, match="ownership"):
+        finalize_nccl_reshard_refit_info(original, manifests, parallelism)
+
+
+@pytest.mark.parametrize("backend", ["vllm", "megatron"])
+def test_check_refit_support_accepts_destination_pipeline_parallelism(backend):
+    config = _valid_nccl_reshard_config()
+    config.policy["generation"]["backend"] = backend
+    config.policy["generation"]["vllm_cfg"] = {
+        "pipeline_parallel_size": 2,
+        "async_engine": True,
+    }
+    config.policy["generation"]["mcore_generation_config"] = {
+        "pipeline_model_parallel_size": 2
+    }
+    check_nccl_reshard_refit_support(config)
+
+
+def test_prepared_pipeline_map_must_match_finalized_ownership():
+    from nemo_rl.weight_sync.nccl_reshard_utils import (
+        HFToLocalParamMap,
+        LocalParamSpec,
+        finalize_nccl_reshard_refit_info,
+        validate_destination_param_map,
+    )
+
+    initial, manifests, parallelism = _pipeline_destination_case()
+    finalized = finalize_nccl_reshard_refit_info(initial, manifests, parallelism)
+    local_map = HFToLocalParamMap(
+        {name: LocalParamSpec(None) for name in manifests[0]["params"]}
+    )
+    validate_destination_param_map(finalized, local_map, rank=1)
+    with pytest.raises(ValueError, match="validated"):
+        validate_destination_param_map(initial, local_map, rank=1)
+    with pytest.raises(ValueError, match="missing="):
+        validate_destination_param_map(finalized, HFToLocalParamMap(), rank=1)
+    with pytest.raises(ValueError, match="unexpected="):
+        validate_destination_param_map(finalized, local_map, rank=3)

@@ -721,6 +721,9 @@ class TestNcclReshardWeightSynchronizer:
                 },
             },
         )
+        policy.worker_group.worker_metadata = [
+            {"bundle_indices": (0, [rank])} for rank in range(2)
+        ]
         policy.init_nccl_reshard_comm_group.return_value = [MagicMock()]
         policy.prepare_nccl_reshard_refit_info.return_value = refit_info
         gen = _mock_generation(cfg={"backend": "vllm"})

@@ -87,6 +87,34 @@ def test_python_path_when_communicator_lacks_device_api(monkeypatch, capsys):
     assert "device_api_support=False" in out
 
 
+@pytest.mark.parametrize("ranks", [[[2, 4]], [[3, 2]], [[[2, 3]]]])
+def test_native_unsupported_mesh_uses_exact_transfer(monkeypatch, ranks):
+    """NCCL M2N requires at most two axes and contiguous row-major ranks.
+
+    vLLM DP replicas of a PP stage can be separated by other stages' ranks.
+    They still must refit successfully when the parent has device API support.
+    """
+    calls = []
+    monkeypatch.setattr(xfer, "_reshard", lambda *a, **k: calls.append("native"))
+    monkeypatch.setattr(
+        xferdtensor_python,
+        "xferdtensor_python_impl",
+        lambda *a, **k: calls.append("python"),
+    )
+    destination = _Mesh([2, 3])
+    destination.mesh = torch.tensor(ranks)
+    xfer.xferdtensor(
+        xfer.DTensorRef(torch.zeros(2, 4), (4, 4)),
+        _Mesh([0, 1]),
+        [Replicate(), Shard(0)],
+        None,
+        destination,
+        [Replicate()] * destination.mesh.ndim,
+        _ProcessGroup(True),
+    )
+    assert calls == ["python"]
+
+
 def test_python_override_skips_capability_query(monkeypatch):
     monkeypatch.setenv("NRL_XFERDTENSOR_PYTHON", "1")
     process_group = _ProcessGroup(AssertionError("must not query"))
@@ -114,3 +142,49 @@ def test_missing_communicator_uses_python_path(monkeypatch):
     process_group = _ProcessGroup(False)
     process_group.nccl_communicator = None
     assert _xferdtensor_with_stubs(monkeypatch, process_group) == ["python"]
+
+
+def test_offstage_receive_participates_without_allocating(monkeypatch):
+    from nemo_rl.weight_sync.xferdtensor import receive_resharded_param
+
+    calls = []
+    monkeypatch.setattr(xfer, "xferdtensor", lambda *args: calls.append(args))
+    info = {
+        "name": "model.layers.1.mlp.down_proj.weight",
+        "global_shape": (8, 4),
+        "dtype": "torch.bfloat16",
+        "src_mesh_info": _Mesh([0]),
+        "dst_mesh_info": _Mesh([1]),
+        "src_placements": [Replicate(), Replicate()],
+        "dst_placements": [Replicate(), Replicate()],
+    }
+    group = _ProcessGroup(False)
+    group.rank = 2
+    receive_resharded_param(info, None, group, None, device=torch.device("cpu"))
+    assert len(calls) == 1
+    assert calls[0][3]._local_tensor is None
+    assert calls[0][3].shape == (8, 4)
+    group.rank = 1
+    with pytest.raises(ValueError, match="destination"):
+        receive_resharded_param(info, None, group, None, device=torch.device("cpu"))
+
+
+def test_native_idle_rank_supplies_explicit_shape_and_dtype(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(xfer, "_reshard", lambda *a, **kw: recorded.append((a, kw)))
+    metadata = xfer.DTensorRef(
+        None, (8, 4), dtype=torch.bfloat16, device=torch.device("cpu")
+    )
+    xfer.xferdtensor(
+        None,
+        _Mesh([0]),
+        [Replicate(), Replicate()],
+        metadata,
+        _Mesh([1, 2]),
+        [Replicate(), Shard(0)],
+        _ProcessGroup(True),
+    )
+    args, kwargs = recorded[0]
+    assert args[:2] == (None, None)
+    assert kwargs["dst_local_shape"] == (4, 4)
+    assert kwargs["dst_dtype"] == torch.bfloat16

@@ -53,7 +53,15 @@ class _Worker:
             return f"f-{self._w.idx}-{self._n}"
 
     def __getattr__(self, name):
-        if name.startswith(("init_", "prepare_", "nccl_reshard", "update_weights")):
+        if name.startswith(
+            (
+                "init_",
+                "prepare_",
+                "nccl_reshard",
+                "update_weights",
+                "reset_prefix_cache",
+            )
+        ):
             return _Worker._M(self, name)
         raise AttributeError(name)
 
@@ -107,6 +115,12 @@ def _reshard(dp_size=4, workers_per_shard=1, dead_shards=(), train_world_size=8)
 
     plan_calls = []
     policy = SimpleNamespace(
+        worker_group=SimpleNamespace(
+            worker_metadata=[
+                {"bundle_indices": (rank // 8, [rank % 8])}
+                for rank in range(train_world_size)
+            ]
+        ),
         cfg={
             "megatron_cfg": {
                 "tensor_model_parallel_size": 1,
@@ -205,6 +219,35 @@ class TestPlanRegeneration:
         assert plan_calls[-1]["train_world_size"] == 16
 
 
+@pytest.mark.parametrize("unified", [True, False])
+def test_pipeline_rendezvous_uses_the_stage_leaders_actual_bundle(unified):
+    """The TCPStore master is the stage's first worker, even after bundle sorting."""
+    sync, _, _, _, _ = _reshard(train_world_size=8)
+    sync._policy.cfg["megatron_cfg"]["pipeline_model_parallel_size"] = 2
+    sync._train_cluster.num_gpus_per_node = 4
+    # Unified placement groups may reorder the bundles after topology discovery.
+    bundles = [2, 6, 1, 5, 0, 4, 3, 7] if unified else [0, 1, 2, 3] * 2
+    placements = [(rank // 4, [bundle]) for rank, bundle in enumerate(bundles)]
+    sync._policy.worker_group.worker_metadata = [
+        {"bundle_indices": placement} for placement in placements
+    ]
+    node_for_bundle = {
+        (0 if unified else pg, bundle[0]): f"node-{rank // 4}"
+        for rank, (pg, bundle) in enumerate(placements)
+    }
+
+    def address(pg_idx, bundle_idx):
+        return node_for_bundle[(0 if unified else pg_idx, bundle_idx)], 9010
+
+    sync._train_cluster.get_available_address_and_port = address
+    received = []
+    sync._policy.init_nccl_reshard_comm_group = lambda **kwargs: (
+        received.append(kwargs) or []
+    )
+    sync.init_communicator()
+    assert received[0]["pp_ips"] == ["node-0", "node-1"]
+
+
 class TestBothCommunicatorFamilies:
     def test_the_dead_shard_receives_neither_family(self):
         sync, _, workers, _, kill = _reshard(dp_size=4, dead_shards=(3,))
@@ -301,6 +344,25 @@ class TestRefitDispatchExcludesTheDeadShard:
 
         assert [w.idx for w in workers if w.calls] == [0, 1, 2]
 
+    def test_finish_generation_resets_only_surviving_engine_caches(self):
+        from nemo_rl.models.generation.vllm.vllm_generation import VllmGeneration
+
+        sync, gen, workers, _, kill = _reshard(
+            dp_size=2, workers_per_shard=2, dead_shards=(0,)
+        )
+        gen.cfg["colocated"] = {"enabled": False}
+        gen.worker_group.run_all_workers_single_data = lambda method, **kwargs: [
+            getattr(worker, method).remote() for worker in workers[::2]
+        ]
+        sync.init_communicator()
+        kill()
+        sync.reconcile_communicator([0])
+        for worker in workers:
+            worker.calls.clear()
+
+        assert VllmGeneration.finish_generation(gen)
+        assert [worker.idx for worker in workers if worker.calls] == [2]
+
 
 class TestTheRefitDeadlineReachesThisTransport:
     """The abort machinery was wired to the collective path only.
@@ -351,3 +413,72 @@ class TestTheRefitDeadlineReachesThisTransport:
         assert refits, "no generation worker was asked to refit"
         for _name, kwargs in refits:
             assert kwargs.get("refit_timeout_s", "MISSING") is None
+
+
+def test_pipeline_setup_installs_same_validated_plan_on_both_sides():
+    from nemo_rl.weight_sync.nccl_reshard_utils import build_nccl_reshard_refit_info
+
+    sync, generation, _workers, _plans, kill = _reshard(
+        dp_size=2,
+        workers_per_shard=2,
+        dead_shards=(0,),
+        train_world_size=1,
+    )
+    sync._policy.cfg["generation"]["vllm_cfg"]["pipeline_parallel_size"] = 2
+    name = "model.layers.0.mlp.down_proj.weight"
+    events = []
+    installed = []
+
+    def prepare(tp, gp, tws, iws, **kwargs):
+        events.append("catalog")
+        return build_nccl_reshard_refit_info(
+            {name: {"shape": [8, 8], "dtype": "torch.bfloat16"}},
+            tp,
+            gp,
+            tws,
+            iws,
+        )
+
+    def discover(info):
+        events.append("discover")
+        return [
+            {
+                "rank": rank,
+                "pp_rank": rank % 2,
+                "tp_rank": 0,
+                "dp_rank": rank // 2,
+                "ep_rank": 0,
+                "etp_rank": 0,
+                "edp_rank": rank // 2,
+                "params": {name: {"shape": [8, 8], "dtype": "torch.bfloat16"}}
+                if rank % 2 == 0
+                else {},
+            }
+            for rank in range(info["gen_world_size"])
+        ]
+
+    def install(side, info):
+        assert info["destination_ownership_validated"]
+        events.append(side)
+        installed.append(info)
+
+    sync._policy.prepare_nccl_reshard_refit_info = prepare
+    sync._policy.install_nccl_reshard_refit_info = lambda info: install("source", info)
+    generation.discover_nccl_reshard_destination = discover
+    generation.prepare_nccl_reshard_refit_info = lambda info: install(
+        "destination", info
+    )
+    sync.init_communicator()
+    assert events == ["catalog", "discover", "source", "destination"]
+    assert installed[0] == installed[1]
+    assert installed[0]["per_layer_params"]["model.layers.0"][0]["dst_mesh_info"][
+        "mesh"
+    ] == [1, 3]
+    kill()
+    events.clear()
+    sync.reconcile_communicator([0])
+    assert events == ["catalog", "discover", "source", "destination"]
+    assert installed[-2] == installed[-1]
+    assert installed[-1]["per_layer_params"]["model.layers.0"][0]["dst_mesh_info"][
+        "mesh"
+    ] == [1]
